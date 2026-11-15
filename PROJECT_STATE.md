@@ -38,10 +38,19 @@ merging the last one brings everything:
 12. `fix/live-pause` — pause in live mode, quit asks twice
 13. `fix/rally-fairness` — Crack lob, firewall rule offer
 14. `docs/state-0.3-t3` — README and this file
+15. `tune/playtest-3-gameplay` — gun on even beat divisions, steeper progression, rage and
+    encore instead of the purgatory loop, ear candy
+16. `art/playtest-3-visuals` — nine rebuilt skies, horizon props, sky transition, item and
+    Heart looks
+17. `chore/trim-agents` — four agents removed, self-check commands in `CLAUDE.md`
+18. `docs/playtest-3-t4` — `docs/plans/0.4-playtest-3.md` and this file
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T3-win-x64` (built from branch 14).
+The third playtest (2026-11-15) and what was done about it are in
+`docs/plans/0.4-playtest-3.md`.
 
-**Verified by machine only:** 35 unit tests, `--sim` balance runs, screenshots of the menu
+**Test build:** `#UserTesting\Heartline-0.3.0-T4-win-x64` (built from branch 18).
+
+**Verified by machine only:** 37 unit tests, `--sim` balance runs, screenshots of the menu
 screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any
 of it feels or sounds, mouse hover tooltips and slider dragging, the firewall button (it was
 never run), a two-PC Rally match, live-mode pause with real audio.
@@ -52,7 +61,7 @@ Boss rush mode; per-mood rim and Heart shapes; live mode on the new generator an
 capture (`docs/plans/live-audio.md`, needs the player's answers to its section 6).
 
 Balance (`--sim`, 6 Straftat songs, 120 ms bot, hits per minute, LULLABY to FLATLINE):
-1.5 / 2.1 / 3.1 / 3.5 / 5.5 / 6.8 / 8.4.
+2.1 / 2.0 / 3.3 / 5.0 / 5.8 / 6.5 / 8.3 (after the 0.4 progression changes).
 
 ## What the player said (2026-11-14 playtest of 0.1) — the brief for 0.2
 - Dies within ~30 s on any song; difficulty should NOT depend on the song (slow songs were much
@@ -195,6 +204,9 @@ SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia
 tools, balance simulator, bot · `rng.rs` PRNG.
 
 ## Session Log
+- 2026-11-15 — Third playtest (`docs/plans/0.4-playtest-3.md`): gun sync, progression, rage and
+  encore, ear candy, rebuilt skies and transitions, item and Heart looks, agent roster trimmed.
+  37 unit tests pass; shipped `Heartline-0.3.0-T4`.
 - 2026-11-15 — 0.3 plan slices 1, 2, 3, 4, 7 (pause), 8, 9, 10, 11, 12, 13 and a new slice 15
   (RoR2-style menu) on stacked branches; 35 unit tests pass; shipped `Heartline-0.3.0-T3`.
 - 2026-11-13 — Researched stack, installed Rust, wrote DESIGN.md, built 0.1.0, packaged to
