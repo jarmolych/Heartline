@@ -865,7 +865,10 @@ impl App {
                 while self.juke.cursor < ev.len() && ev[self.juke.cursor].at() <= t {
                     let e = ev[self.juke.cursor];
                     self.juke.cursor += 1;
-                    if matches!(e.ev, Ev::Beat { .. } | Ev::Hit { .. } | Ev::Section { .. }) {
+                    if let Ev::Candy { .. } = e.ev {
+                        self.world.candy = 1.0;
+                    }
+                    if matches!(e.ev, Ev::Beat { .. } | Ev::Hit { .. } | Ev::Section { .. } | Ev::Chime { .. }) {
                         self.world.apply(&e);
                     }
                 }
