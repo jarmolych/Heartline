@@ -981,6 +981,8 @@ uniform vec3 u_mood;
 uniform vec3 u_mood2;
 // sky transition: x = progress 0..1 (1 = settled), y = the backdrop being left, z = the prop being left
 uniform vec3 u_tr;
+// x = chime envelope, y = its pitch 0..1, z = ear-candy envelope
+uniform vec3 u_fx;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
@@ -1551,6 +1553,17 @@ vec3 vista(vec2 p) {
             col += mix(u_sunB, vec3(1.0), 0.5) * sweep * bell * (0.35 + 0.45 * lines * smoothstep(0.0, 1.0, abs(fract(p.x * 3.0 - u_time * 2.0) - 0.5) * 2.0));
             col += u_sunB * bell * 0.5 * exp(-(hz - p.y) * 14.0);
         }
+        // a chime lights a star where its note sits in pitch (low notes left, high notes right);
+        // ear candy sends a shimmer through the whole sky
+        if (u_fx.x > 0.01) {
+            vec2 sq = (p - vec2(0.12 + 0.76 * u_fx.y, 0.07 + 0.16 * fract(u_fx.y * 7.3))) * vec2(u_res.x / u_res.y, 1.0);
+            float fl = exp(-abs(sq.x) * 240.0) * exp(-abs(sq.y) * 20.0) + exp(-abs(sq.y) * 240.0) * exp(-abs(sq.x) * 20.0);
+            col += mix(u_sunA, vec3(1.0), 0.6) * (fl * 0.9 + exp(-dot(sq, sq) * 3000.0) * 1.6) * u_fx.x;
+        }
+        if (u_fx.z > 0.01) {
+            col += vec3(0.9, 0.95, 1.0) * stars(p * u_res + 5.0, 5.0 * u_res.y / 1080.0, 0.35) * u_fx.z * (1.0 - t);
+            col += u_sunA * 0.25 * u_fx.z * exp(-(hz - p.y) * 10.0);
+        }
         // rain: three depths of streaks. It thickens with the song's energy and every hat
         // brightens it; a little mist hangs on the horizon.
         if (u_mood.y > 0.5 && u_mood.y < 1.5) {
@@ -1878,6 +1891,7 @@ impl Renderer {
                 ("u_mood", UniformType::Float3),
                 ("u_mood2", UniformType::Float3),
                 ("u_tr", UniformType::Float3),
+                ("u_fx", UniformType::Float3),
             ],
             &[],
             PipelineParams::default(),
@@ -2370,6 +2384,7 @@ impl Renderer {
         m.set_uniform("u_mood", vec3(self.mood_cur.scene as f32, weather as f32, self.mood_cur.floor as f32));
         m.set_uniform("u_mood2", vec3(self.mood_cur.prop as f32, world.hit[2] * self.fx.min(1.0), world.hit[0] * self.fx.min(1.0)));
         m.set_uniform("u_tr", vec3(ease(self.mood_k), self.mood_old.scene as f32, self.mood_old.prop as f32));
+        m.set_uniform("u_fx", vec3(world.chime * self.fx.min(1.0), world.chime_pitch, world.candy * self.fx.min(1.0)));
         gl_use_material(m);
         draw_rectangle(0.0, 0.0, 1.0, 1.0, WHITE);
         gl_use_default_material();
