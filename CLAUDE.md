@@ -21,6 +21,8 @@ inside a step.
   then "split analyze", so there's always a clean place to stop.
 - **Effort:** use medium or high effort for normal coding. Fable and max effort are for planning
   and reviews (the `planner` agent), not long implementation runs.
+- **Publishing:** whenever work stops at a clean point, commit and push to `origin` (the user
+  asked for this on 2026-11-14). Keep wrap-up testing light: build + unit tests.
 - **Overriding the rule:** if the user says to ignore the pacing rule, keep going.
 
 ## Project basics
