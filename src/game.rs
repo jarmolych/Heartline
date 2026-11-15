@@ -102,9 +102,11 @@ impl UpgradeId {
     }
 }
 
-/// Beat subdivisions the gun may lock to, and the target seconds between shots per TEMPO level.
+/// Beat subdivisions the gun may lock to when there is no gun track (live audio, drift). The
+/// target seconds between shots per TEMPO level are `level::GUN_INTERVALS`.
 const FIRE_DIVS: [f32; 9] = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0];
-const FIRE_INTERVALS: [f32; 5] = [0.27, 0.21, 0.165, 0.13, 0.105];
+/// Shots at least this much heavier than nominal get a soft tick (`Sfx::Shot`).
+const GUN_TICK_FROM: f32 = 1.2;
 
 // ---- difficulty ramp ("pressure") -----------------------------------------------------------
 // The level generator plans every song at full density for the chosen difficulty. At run time
@@ -401,6 +403,8 @@ pub struct Stats {
     pub hearts_broken: u32,
     pub songs: u32,
     pub notes_shot: u32,
+    /// Sum of the damage multipliers of every shot the gun fired (1.0 = one nominal shot).
+    pub gun_dmg: f32,
     /// Hits taken per source (`SRC_*`).
     pub by_src: [u32; 6],
     /// Bullet hits per `Bullet::pat`.
@@ -472,6 +476,11 @@ pub struct World {
     pub last_hit_age: f32,
     /// 1.0 normally; drops after a hit and recovers (see `MERCY_*`).
     pub mercy: f32,
+    /// Shot times of the current song per TEMPO level (`level::gun_track`). Empty when the song
+    /// is not known ahead of time (live audio, drift): the gun then locks to a beat subdivision.
+    pub gun: Vec<Vec<f32>>,
+    /// TEMPO level `Player::fire_phase` was counted at (a level change must not fire a shot).
+    gun_lv: usize,
 }
 
 pub fn tile_center(c: usize, r: usize) -> Vec2 {
@@ -547,6 +556,8 @@ impl World {
             shard_snd_cd: 0.0,
             last_hit_age: 0.0,
             mercy: 1.0,
+            gun: Vec::new(),
+            gun_lv: 0,
         }
     }
 
@@ -584,6 +595,7 @@ impl World {
         self.beat_count = 0;
         self.section_banner = 0.0;
         self.player.fire_phase = 0;
+        self.gun.clear();
         if self.player.up(UpgradeId::Encore) > 0 {
             self.player.shield = true;
         }
@@ -1141,7 +1153,7 @@ impl World {
         }
 
         if !self.dead {
-            self.update_player(dt, input, beat_pos, active);
+            self.update_player(dt, t, input, beat_pos, active);
         }
 
         // ---- shots ----
@@ -1190,7 +1202,7 @@ impl World {
         self.texts.retain(|t| t.life > 0.0);
     }
 
-    fn update_player(&mut self, dt: f32, input: &Input, beat_pos: f32, active: bool) {
+    fn update_player(&mut self, dt: f32, t: f32, input: &Input, beat_pos: f32, active: bool) {
         let glide = self.player.up(UpgradeId::Glide) as f32;
         let p = &mut self.player;
         p.invuln = (p.invuln - dt).max(0.0);
@@ -1246,41 +1258,67 @@ impl World {
             self.hurt_player(SRC_HEART);
         }
 
-        // ---- beat-quantised gun ----
-        // The gun always fires on a subdivision of the beat, but which one is chosen so the
-        // fire rate (and with the damage correction, the DPS) is the same for every tempo.
-        let lv = self.player.up(UpgradeId::Tempo) as usize;
-        let target = FIRE_INTERVALS[lv.min(FIRE_INTERVALS.len() - 1)];
-        let bl = self.beat_len.clamp(0.2, 2.0);
-        let mut div = 1.0f32;
-        let mut best = f32::MAX;
-        for &d in FIRE_DIVS.iter() {
-            let err = ((bl / d) / target).ln().abs();
-            if err < best {
-                best = err;
-                div = d;
+        // ---- the gun ----
+        // With a gun track the gun plays the song's own rhythm (drum hits, filled on the beat
+        // grid). Without one it locks to the beat subdivision nearest the target interval. Either
+        // way a shot's damage is proportional to the gap before it, so the damage per second
+        // depends only on the TEMPO level, never on the song.
+        let lv = (self.player.up(UpgradeId::Tempo) as usize).min(GUN_INTERVALS.len() - 1);
+        let target = GUN_INTERVALS[lv];
+        let mut shot: Option<f32> = None;
+        let idx;
+        if let Some(track) = self.gun.get(lv).filter(|v| !v.is_empty()) {
+            idx = track.partition_point(|&x| x <= t) as i64;
+            if idx > self.player.fire_phase && idx > 0 {
+                let k = idx as usize - 1;
+                let gap = if k > 0 { track[k] - track[k - 1] } else { target };
+                shot = Some(gun_damage(gap, target));
+            }
+        } else {
+            let bl = self.beat_len.clamp(0.2, 2.0);
+            let mut div = 1.0f32;
+            let mut best = f32::MAX;
+            for &d in FIRE_DIVS.iter() {
+                let err = ((bl / d) / target).ln().abs();
+                if err < best {
+                    best = err;
+                    div = d;
+                }
+            }
+            idx = (beat_pos * div).floor() as i64;
+            if idx != self.player.fire_phase {
+                shot = Some(gun_damage(bl / div, target));
             }
         }
-        let idx = (beat_pos * div).floor() as i64;
-        if idx != self.player.fire_phase {
-            self.player.fire_phase = idx;
-            if input.fire {
-                self.fire(((bl / div) / target).clamp(0.6, 1.7));
+        let same_lv = lv == self.gun_lv;
+        self.gun_lv = lv;
+        self.player.fire_phase = idx;
+        if let Some(scale) = shot {
+            if input.fire && same_lv {
+                self.fire(scale);
             }
         }
     }
 
-    fn fire(&mut self, dmg_scale: f32) {
+    /// Fire the gun. `scale` is the shot's damage multiplier (`gun_damage`): heavier shots are
+    /// drawn larger and get a soft tick.
+    fn fire(&mut self, scale: f32) {
         let p = &mut self.player;
         let n = 1 + p.ups[UpgradeId::Chord as usize] as usize;
-        let dmg = (1.0 + 0.5 * p.ups[UpgradeId::Gain as usize] as f32) * dmg_scale;
+        let dmg = (1.0 + 0.5 * p.ups[UpgradeId::Gain as usize] as f32) * scale;
         let pierce = p.ups[UpgradeId::Pierce as usize];
         let base = p.aim_dir.y.atan2(p.aim_dir.x);
-        p.muzzle = 1.0;
+        p.muzzle = scale.clamp(0.7, 1.6);
+        let r = 5.0 * scale.sqrt().clamp(0.8, 1.5);
+        let x = p.pos.x;
         for k in 0..n {
             let off = (k as f32 - (n as f32 - 1.0) * 0.5) * 0.11;
             let d = dir(base + off);
-            self.shots.push(Shot { pos: p.pos + d * 15.0, vel: d * 1250.0, dmg, pierce, life: 0.85, r: 5.0 });
+            self.shots.push(Shot { pos: p.pos + d * 15.0, vel: d * 1250.0, dmg, pierce, life: 0.85, r });
+        }
+        self.stats.gun_dmg += scale;
+        if scale >= GUN_TICK_FROM {
+            self.snd(Sfx::Shot, (0.3 + 0.3 * (scale - GUN_TICK_FROM)).min(0.6), x);
         }
     }
 
@@ -1666,6 +1704,50 @@ impl World {
         self.enemies.clear();
         for (_, pos) in dead {
             self.burst(pos, 8, 300.0, C_SECONDARY, 4.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::{Band, Onset};
+
+    /// Hold fire for 60 s of a steady song at `bpm` and return the damage dealt, in nominal shots.
+    fn gun_minute(bpm: f32, tempo_lv: u8) -> f32 {
+        let bl = 60.0 / bpm;
+        let beats: Vec<f32> = (0..(70.0 / bl) as usize).map(|i| 0.2 + i as f32 * bl).collect();
+        // Hats on the off-beats and a snare on every second beat, a little off the grid.
+        let mut onsets: Vec<Onset> = Vec::new();
+        for (i, &b) in beats.iter().enumerate() {
+            onsets.push(Onset { t: b + 0.5 * bl + 0.004, band: Band::High, strength: 0.6 });
+            if i % 2 == 1 {
+                onsets.push(Onset { t: b - 0.003, band: Band::Mid, strength: 1.0 });
+            }
+        }
+        let mut w = World::new(1.0, true);
+        w.begin_song(60.0, 0, 1);
+        w.beat_len = bl;
+        w.gun = gun_track(&beats, &onsets, 70.0);
+        w.player.ups[UpgradeId::Tempo as usize] = tempo_lv;
+        let input = Input { fire: true, ..Input::default() };
+        let dt = 1.0 / 120.0;
+        let mut t = 0.0f32;
+        while t < 60.0 {
+            w.update(dt, t, &input, beat_pos(&beats, t), &Feat::default(), 0.5, true);
+            t += dt;
+        }
+        w.stats.gun_dmg
+    }
+
+    #[test]
+    fn gun_dps_is_the_same_at_every_tempo() {
+        for lv in 0..GUN_INTERVALS.len() as u8 {
+            let want = 60.0 / GUN_INTERVALS[lv as usize];
+            for bpm in [70.0, 110.0, 170.0] {
+                let got = gun_minute(bpm, lv);
+                assert!((got / want - 1.0).abs() < 0.02, "level {lv} at {bpm} BPM: {got} vs {want}");
+            }
         }
     }
 }
