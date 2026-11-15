@@ -396,7 +396,8 @@ const M_LIBRARY: usize = 4;
 const M_OPTIONS: usize = 5;
 const M_QUIT: usize = 6;
 const CODEX_TABS: [&str; 5] = ["THE HEART", "ENEMIES", "UPGRADES", "THE MUSIC", "RECORDS"];
-const CODEX_HEART: [(&str, &str); 9] = [
+const CODEX_HEART: [(&str, &str); 10] = [
+    ("CHARGE", "While the body of the Heart can be hurt, a charge appears far from it. Carry it into the ring around the Heart to take a fifth of the phase at once. A hit knocks it loose."),
     ("SHELL", "Calm sections. The Heart is immune: break the three shield nodes circling the arena."),
     ("VALVE", "Groove sections. It opens for the first half of every bar; while shut, shots do a fifth."),
     ("SPLIT", "Surge sections. Three linked cores orbit it and only the lit one can be hurt. Break them in order."),
@@ -3666,6 +3667,8 @@ async fn run(args: Args) {
                     ("hearts broken", format!("{}", st.hearts_broken)),
                     ("enemies destroyed", format!("{}", st.kills)),
                     ("notes shot down", format!("{}", st.notes_shot)),
+                    ("grazes", format!("{}", st.grazes)),
+                    ("phases broken early", format!("{}", st.phases_broken)),
                     ("shards collected", format!("{}", st.shards)),
                     ("best combo", format!("{:.0}", st.max_combo)),
                     ("hits taken", format!("{}", st.hits)),
@@ -3793,7 +3796,7 @@ async fn run(args: Args) {
                     }
                 };
                 match tab {
-                    0 => CODEX_HEART.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 72.0)),
+                    0 => CODEX_HEART.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 66.0)),
                     1 => CODEX_ENEMIES.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 72.0)),
                     2 => {
                         // two columns: emblem, name, what it does, how far it levels

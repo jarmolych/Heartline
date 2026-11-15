@@ -632,6 +632,11 @@ pub struct HeartPhase {
 pub const HEART_ANCHORS: [(f32, f32); 7] = [(0.0, 0.0), (-230.0, -110.0), (230.0, -110.0), (-230.0, 110.0), (230.0, 110.0), (-300.0, 0.0), (300.0, 0.0)];
 /// The Heart stays at least this long in one place.
 const HEART_STAY_SECS: f32 = 7.0;
+/// The charge: seconds between offers, how close to the Heart it must be carried (beyond the
+/// Heart's own radius), and the share of the phase it removes.
+const FORK_EVERY: f32 = 16.0;
+pub const FORK_DELIVER_R: f32 = 95.0;
+const FORK_SHARE: f32 = 0.2;
 /// In Overdrive the Heart charges at most once per this many beats.
 const CHARGE_EVERY_BEATS: f32 = 8.0;
 /// Resonance: seconds it lasts, and what it multiplies damage and score by.
@@ -789,6 +794,11 @@ pub struct World {
     /// Shot times of the current song per TEMPO level (`level::gun_track`). Empty when the song
     /// is not known ahead of time (live audio, drift): the gun then locks to a beat subdivision.
     pub gun: Vec<Vec<f32>>,
+    /// Side objective: a charge lying on the field (`fork`), or being carried. Walk it into the
+    /// ring around the Heart to deal a slice of the phase at once; a hit knocks it loose.
+    pub fork: Option<Vec2>,
+    pub carrying: bool,
+    fork_cd: f32,
     /// Resonance: a meter (0..1) filled by playing close to the music (grazes, kills, on-beat
     /// dashes, hurting the Heart). Full, it rings for `RESONANCE_SECS` (`res_t` counts down):
     /// more damage, double score, a wider magnet.
@@ -919,6 +929,9 @@ impl World {
             last_hit_age: 0.0,
             mercy: 1.0,
             gun: Vec::new(),
+            fork: None,
+            carrying: false,
+            fork_cd: FORK_EVERY * 0.6,
             resonance: 0.0,
             res_t: 0.0,
             live_phases: false,
@@ -1313,6 +1326,9 @@ impl World {
         self.section_banner = 0.0;
         self.player.fire_phase = 0;
         self.gun.clear();
+        self.fork = None;
+        self.carrying = false;
+        self.fork_cd = FORK_EVERY * 0.6;
         self.painters.clear();
         self.res_t = 0.0;
         self.armed = 0;
@@ -1342,6 +1358,54 @@ impl World {
     fn add_score(&mut self, base: f32) {
         let res = if self.res_t > 0.0 { RESONANCE_SCORE } else { 1.0 };
         self.score += (base * self.mult() * self.score_mult * res).round().max(0.0) as u64;
+    }
+
+    /// The charge: offered while the body of the Heart can be hurt, picked up by touch,
+    /// delivered by carrying it into the ring around the Heart.
+    fn update_fork(&mut self, dt: f32, active: bool) {
+        let open = matches!(self.heart.form, HeartForm::Valve | HeartForm::Overdrive) && !self.purgatory && !self.heart.broken && !self.pacifist && !self.phases.is_empty();
+        if !open {
+            self.fork = None;
+            self.carrying = false;
+            return;
+        }
+        let ppos = self.player.pos;
+        let hpos = self.heart.pos;
+        if self.carrying {
+            if ppos.distance(hpos) < HEART_R + FORK_DELIVER_R {
+                self.carrying = false;
+                self.fork_cd = FORK_EVERY;
+                let dmg = self.heart.phase_max * FORK_SHARE;
+                self.burst(hpos, 46, 760.0, C_ACCENT, 6.0);
+                self.text(hpos + vec2(0.0, -150.0), "DELIVERED", C_ACCENT, 38.0, 1.6);
+                self.shake = self.shake.max(0.5);
+                self.snd(Sfx::Slam, 0.9, hpos.x);
+                self.add_score(800.0);
+                self.resonate(0.25);
+                self.damage_heart(dmg);
+            }
+        } else if let Some(f) = self.fork {
+            if f.distance(ppos) < 36.0 && !self.dead {
+                self.fork = None;
+                self.carrying = true;
+                self.text(ppos + vec2(0.0, -48.0), "CARRY IT TO THE HEART", C_ACCENT, 20.0, 1.8);
+                self.snd(Sfx::Shield, 0.8, ppos.x);
+            }
+        } else if active && self.pressure() >= 0.5 {
+            self.fork_cd -= dt;
+            if self.fork_cd <= 0.0 {
+                // far from the Heart, so the walk back is the risk
+                let spots = [vec2(-560.0, -300.0), vec2(560.0, -300.0), vec2(-560.0, 300.0), vec2(560.0, 300.0)];
+                let mut best: Vec<Vec2> = spots.iter().copied().filter(|s| s.distance(hpos) > 520.0).collect();
+                if best.is_empty() {
+                    best = spots.to_vec();
+                }
+                let at = best[self.rng.below(best.len())];
+                self.fork = Some(at);
+                self.burst(at, 20, 300.0, C_ACCENT, 4.0);
+                self.snd(Sfx::Shard, 0.9, at.x);
+            }
+        }
     }
 
     /// Feed the resonance meter; when it fills, resonance starts.
@@ -1966,6 +2030,11 @@ impl World {
         let pos = p.pos;
         self.stats.hits += 1;
         self.stats.by_src[src.min(5)] += 1;
+        if self.carrying {
+            self.carrying = false;
+            self.fork = Some(pos);
+            self.text(pos + vec2(0.0, -64.0), "DROPPED", C_DANGER, 22.0, 1.0);
+        }
         self.snd(Sfx::Hurt, 1.0, pos.x);
         self.mercy = MERCY_DROP + (1.0 - MERCY_DROP) * h;
         self.combo *= 0.5;
@@ -2193,6 +2262,7 @@ impl World {
         }
         self.window.peak_mult = self.window.peak_mult.max(self.mult());
         self.res_t = (self.res_t - dt).max(0.0);
+        self.update_fork(dt, active);
         // DODGE: staying alive is the score.
         if self.pacifist && active && !self.dead {
             self.survive_acc += dt * 20.0;
