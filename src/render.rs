@@ -3281,9 +3281,13 @@ impl Renderer {
                         line(vec2(fx, by - 6.0 * u), vec2(fx, by + 6.0 * u), if next { 2.5 } else { 1.0 } * u, alpha(if next { pal.accent } else { WHITE }, if next { 0.95 } else { 0.4 }));
                     }
                 }
+                if w.rage > 0 {
+                    vtext(&format!("RAGE {}", roman(w.rage as u8)), bx + bw + 12.0 * u, by + 27.0 * u, 15.0 * u, alpha(pal.danger, 0.95), -1);
+                }
                 if w.purgatory {
                     let pulse = 0.75 + 0.25 * (self.time * 5.0).sin();
-                    vtext(&format!("PURGATORY  {:.0}", w.phase_left().ceil()), sw * 0.5, by + 28.0 * u, 20.0 * u, alpha(pal.accent, pulse), 0);
+                    let left = w.phase_left().min((w.purg_until - w.t).max(0.0));
+                    vtext(&format!("PURGATORY  {:.0}", left.ceil()), sw * 0.5, by + 28.0 * u, 20.0 * u, alpha(pal.accent, pulse), 0);
                 } else if w.heart.form != HeartForm::Core {
                     vtext(w.heart.form.name(), bx + bw + 12.0 * u, by + 7.0 * u, 16.0 * u, alpha(pal.accent, 0.9), -1);
                     if w.form_banner > 0.0 {

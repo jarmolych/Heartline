@@ -141,7 +141,23 @@ const GUN_TICK_FROM: f32 = 1.2;
 /// (starting pressure, seconds of play until full pressure) for the 1st, 2nd and later songs.
 const RAMP: [(f32, f32); 3] = [(0.40, 75.0), (0.70, 30.0), (0.85, 15.0)];
 /// Extra pressure per cleared song in a run.
-const RUN_ESCALATION: f32 = 0.07;
+const RUN_ESCALATION: f32 = 0.14;
+/// Extra pressure per player level: the level keeps up with a strong build.
+const LEVEL_PRESSURE: f32 = 0.02;
+/// Extra pressure per rage step (each time a Heart phase is broken early in this song).
+const RAGE_PRESSURE: f32 = 0.10;
+const RAGE_MAX: u32 = 5;
+/// Purgatory lasts this long at most; if the section is still going the Heart returns.
+const PURGATORY_SECS: f32 = 9.0;
+/// How much of the player's measured damage rate the Heart's return and its later phases are
+/// sized for (below 1 so a strong player still gets ahead, just not by a whole phase).
+const RAGE_KEEP_UP: f32 = 0.8;
+/// Shards needed for the next level: `XP_BASE + XP_LIN * level + XP_QUAD * level^2`.
+const XP_BASE: u32 = 18;
+const XP_LIN: u32 = 14;
+const XP_QUAD: u32 = 3;
+/// The Heart's health grows with the player's damage output to this power (1 = fully keeps up).
+const HEART_POWER_EXP: f32 = 0.8;
 /// Pressure multiplier right after the player is hit, and how fast it recovers (per second).
 const MERCY_DROP: f32 = 0.55;
 const MERCY_RECOVER: f32 = 0.05;
@@ -229,7 +245,7 @@ impl Player {
             shield: false,
             ups: [0; N_UPGRADES],
             xp: 0,
-            xp_next: 14,
+            xp_next: XP_BASE,
             level: 0,
             fire_phase: 0,
             drone_ang: 0.0,
@@ -665,6 +681,13 @@ pub struct World {
     pub form_banner: f32,
     /// Beats since the last downbeat.
     bar_beat: u32,
+    /// How many Heart phases were broken early in this song (raises pressure).
+    pub rage: u32,
+    /// When the current phase (or the Heart's return) began, and when purgatory runs out.
+    phase_t0: f32,
+    pub purg_until: f32,
+    /// Damage per second the player dealt in the phase they last broke.
+    phase_dps: f32,
     /// Musical layers currently driving attacks (bit = `LayerKind as u8`), for the HUD.
     pub armed: u8,
     /// 0..1 glow per layer: rises while the layer is armed.
@@ -763,6 +786,10 @@ impl World {
             purg: 0.0,
             form_banner: 0.0,
             bar_beat: 0,
+            rage: 0,
+            phase_t0: 0.0,
+            purg_until: 0.0,
+            phase_dps: 0.0,
             armed: 0,
             layer_glow: [0.0; N_LAYERS],
             chime: 0.0,
@@ -778,7 +805,12 @@ impl World {
         let h = hardness(self.diff);
         let r0 = (r0 + 0.45 * h).min(0.95);
         let k = smooth01(self.active_t / (secs * (1.0 - 0.6 * h)));
-        (r0 + (1.0 - r0) * k) * (1.0 + RUN_ESCALATION * self.song_idx as f32) * self.mercy * if self.purgatory { PURGATORY_PRESSURE } else { 1.0 }
+        (r0 + (1.0 - r0) * k)
+            * (1.0 + RUN_ESCALATION * self.song_idx as f32)
+            * (1.0 + LEVEL_PRESSURE * self.player.level as f32)
+            * (1.0 + RAGE_PRESSURE * self.rage as f32)
+            * self.mercy
+            * if self.purgatory { PURGATORY_PRESSURE } else { 1.0 }
     }
 
     /// Give the Heart one phase per section of the song. Call after `begin_song`.
@@ -811,10 +843,48 @@ impl World {
         self.phases.get(self.phase_i).map_or(0.0, |p| (p.t1 - self.t).max(0.0))
     }
 
+    /// The player's damage output relative to a fresh build (1.0 = no upgrades).
+    pub fn gun_power(&self) -> f32 {
+        let p = &self.player;
+        let tempo = (p.up(UpgradeId::Tempo) as usize).min(GUN_INTERVALS.len() - 1);
+        (1.0 + 0.5 * p.up(UpgradeId::Gain) as f32)
+            * (1.0 + 0.7 * p.up(UpgradeId::Chord) as f32)
+            * (GUN_INTERVALS[0] / GUN_INTERVALS[tempo])
+            * (1.0 + 0.2 * p.up(UpgradeId::Echo) as f32)
+            * (1.0 + 0.1 * p.up(UpgradeId::Pierce) as f32)
+            * (1.0 + 0.1 * p.up(UpgradeId::Downbeat) as f32)
+    }
+
+    /// Purgatory ran out while the section is still playing: the Heart comes back, sized for
+    /// the damage the player has just shown they can do.
+    fn encore(&mut self) {
+        let bonus = (self.phase_dps * self.phase_left() * RAGE_KEEP_UP).max(self.heart.max_hp * 0.03);
+        self.heart.hp += bonus;
+        self.heart.max_hp += bonus;
+        self.purgatory = false;
+        self.phase_t0 = self.t;
+        self.heart.phase_max = bonus;
+        self.heart.reform = 1.0;
+        self.heart.nodes.clear();
+        if self.heart.form.has_nodes() {
+            let a0 = self.rng.angle();
+            for k in 0..3 {
+                self.heart.nodes.push(Node { ang: a0 + k as f32 * TAU / 3.0, hp: bonus / 3.0, max_hp: bonus / 3.0, flash: 0.0 });
+            }
+        }
+        self.form_banner = 1.0;
+        self.shake = self.shake.max(0.5);
+        self.snd(Sfx::Slam, 0.9, 0.0);
+        self.burst(Vec2::ZERO, 50, 620.0, C_DANGER, 7.0);
+        self.text(vec2(0.0, -120.0), "THE HEART RETURNS", C_DANGER, 46.0, 2.4);
+        self.text(vec2(0.0, -82.0), &format!("rage {}: it hits harder now", self.rage), C_WHITE, 22.0, 2.4);
+    }
+
     fn enter_phase(&mut self, idx: usize) {
         if self.phases.is_empty() || self.heart.broken {
             return;
         }
+        self.phase_t0 = self.t;
         let idx = idx.min(self.phases.len() - 1);
         let form = HeartForm::of(self.phases[idx].kind);
         if form != self.heart.form {
@@ -875,6 +945,20 @@ impl World {
     fn enter_purgatory(&mut self) {
         self.purgatory = true;
         self.stats.phases_broken += 1;
+        // Rage: the faster the phase fell, the more the rest of the Heart grows, so a strong
+        // build is answered with a tougher Heart instead of purgatory after purgatory.
+        let took = (self.t - self.phase_t0).max(1.0);
+        let planned = self.phases.get(self.phase_i).map_or(took, |p| (p.t1 - self.phase_t0).max(took));
+        self.phase_dps = self.heart.phase_max / took;
+        let grow = 1.0 + ((planned / took).min(3.0) - 1.0) * RAGE_KEEP_UP;
+        let before = self.heart.hp;
+        for ph in self.phases.iter_mut().skip(self.phase_i) {
+            ph.floor *= grow;
+        }
+        self.heart.hp = before * grow;
+        self.heart.max_hp += before * (grow - 1.0);
+        self.rage = (self.rage + 1).min(RAGE_MAX);
+        self.purg_until = self.t + PURGATORY_SECS;
         self.heart.nodes.clear();
         self.pulses.clear();
         // Everything hostile in the air becomes a shootable note.
@@ -891,9 +975,12 @@ impl World {
         self.text(vec2(0.0, -120.0), "PURGATORY", C_ACCENT, 54.0, 2.6);
         self.text(vec2(0.0, -78.0), "phase broken early - everything is shootable", C_WHITE, 22.0, 2.6);
         self.window.broke_phase = true;
-        let left = self.phase_left();
-        if left > 5.0 {
+        // The first two breaks of a song are rewarded with a graded offer, later ones with shards.
+        let left = self.phase_left().min(PURGATORY_SECS);
+        if left > 5.0 && self.rage <= 2 {
             self.spawn_reward(left.min(14.0));
+        } else {
+            self.drop_shards(vec2(0.0, 150.0), 6, false);
         }
     }
 
@@ -946,7 +1033,11 @@ impl World {
         }
         self.song_idx = song_idx;
         self.rng = Rng::new(seed ^ 0xA5A5_5A5A);
-        let hp = active_secs * 2.6 * (1.0 + 0.3 * song_idx as f32) * (0.75 + 0.25 * self.diff);
+        // The Heart is sized for the damage this build can do, so upgrades help without
+        // turning the next song into a walkover.
+        let hp = active_secs * 2.6 * (1.0 + 0.15 * song_idx as f32) * (0.75 + 0.25 * self.diff) * self.gun_power().powf(HEART_POWER_EXP);
+        self.rage = 0;
+        self.phase_t0 = 0.0;
         self.heart = Heart::new(hp, 1.0);
         // Depth: every song after the first switches one more modifier on.
         if song_idx == 0 {
@@ -1514,6 +1605,8 @@ impl World {
             EnemyKind::Wisp => (1.0, 11.0),
             EnemyKind::Elite => (22.0 + 8.0 * self.diff + 6.0 * self.song_idx as f32, 34.0),
         };
+        // Ordinary enemies toughen with depth (elites already scale).
+        let hp = if matches!(kind, EnemyKind::Elite | EnemyKind::Wisp | EnemyKind::Mini) { hp } else { hp * (1.0 + 0.3 * self.song_idx as f32) };
         let mut vel = Vec2::ZERO;
         let mut state = 0.0;
         match kind {
@@ -1626,6 +1719,9 @@ impl World {
             n.flash = (n.flash - dt * 7.0).max(0.0);
         }
         self.purg += ((self.purgatory as u8 as f32) - self.purg) * (dt * 3.0).min(1.0);
+        if self.purgatory && !self.heart.broken && self.t >= self.purg_until && self.phase_left() > 4.0 {
+            self.encore();
+        }
         self.window.peak_mult = self.window.peak_mult.max(self.mult());
         self.grade_banner = (self.grade_banner - dt / 3.0).max(0.0);
         self.form_banner = (self.form_banner - dt / 3.5).max(0.0);
@@ -2200,7 +2296,8 @@ impl World {
         if self.player.xp >= self.player.xp_next {
             self.player.xp -= self.player.xp_next;
             self.player.level += 1;
-            self.player.xp_next = 14 + 9 * self.player.level;
+            let l = self.player.level;
+            self.player.xp_next = XP_BASE + XP_LIN * l + XP_QUAD * l * l;
             self.spawn_orbs(14.0);
         }
 
