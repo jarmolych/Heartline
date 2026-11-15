@@ -110,6 +110,10 @@ pub enum EnemyKind {
     Wisp,
     /// Ear candy made visible: a harmless golden sprite worth catching.
     Sprite,
+    /// Metronome: stands where it arrives and fires a fan at the player on every downbeat.
+    Turret,
+    /// Cymbal: drifts at the player, arms when close and bursts into a ring two beats later.
+    Bomber,
 }
 
 impl EnemyKind {
@@ -123,6 +127,8 @@ impl EnemyKind {
             EnemyKind::Elite => 0.0,
             EnemyKind::Wisp => 0.3,
             EnemyKind::Sprite => 0.0,
+            EnemyKind::Turret => 1.6,
+            EnemyKind::Bomber => 1.2,
         }
     }
 }
@@ -624,23 +630,29 @@ fn pick_enemy(rng: &mut Rng, kind: SectionKind) -> EnemyKind {
     match kind {
         SectionKind::Calm => EnemyKind::Chaser,
         SectionKind::Normal => {
-            if r < 0.66 {
+            if r < 0.58 {
                 EnemyKind::Chaser
-            } else if r < 0.86 {
+            } else if r < 0.74 {
                 EnemyKind::Darter
-            } else {
+            } else if r < 0.86 {
                 EnemyKind::Orbiter
+            } else {
+                EnemyKind::Turret
             }
         }
         _ => {
-            if r < 0.45 {
+            if r < 0.36 {
                 EnemyKind::Chaser
-            } else if r < 0.68 {
+            } else if r < 0.54 {
                 EnemyKind::Darter
-            } else if r < 0.86 {
+            } else if r < 0.67 {
                 EnemyKind::Splitter
-            } else {
+            } else if r < 0.78 {
                 EnemyKind::Orbiter
+            } else if r < 0.90 {
+                EnemyKind::Bomber
+            } else {
+                EnemyKind::Turret
             }
         }
     }
