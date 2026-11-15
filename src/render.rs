@@ -3560,6 +3560,35 @@ impl Renderer {
                 }
             }
         }
+        // The charge: a bright prism on a beam, with a pointer toward the Heart
+        if let Some(f) = w.fork {
+            let pulse = 1.0 + 0.15 * w.beat_pulse;
+            disc2(f, 70.0, 22, alpha(pal.accent, 0.22), alpha(pal.accent, 0.0));
+            seg(f, self.pj(f, 150.0), 20.0, alpha(pal.accent, 0.22), alpha(pal.accent, 0.0));
+            poly_lines(f, 3, 24.0 * pulse, self.time * 2.0, 3.0, WHITE);
+            poly_lines(f, 3, 24.0 * pulse, self.time * 2.0 + PI, 3.0, pal.accent);
+            arc(f, 40.0 * pulse, 0.0, TAU, 2.0, alpha(pal.accent, 0.8));
+            let d = (w.heart.pos - f).normalize_or_zero();
+            seg(f + d * 50.0, f + d * 120.0, 3.0, alpha(pal.accent, 0.8), alpha(pal.accent, 0.0));
+            wtext("CHARGE", f + vec2(0.0, -58.0), 20.0, pal.accent, tscale);
+        }
+        if w.carrying {
+            // carried: the ring to reach is drawn round the Heart, with a line to it
+            let p = w.player.pos;
+            let h = w.heart.pos;
+            let rr = HEART_R + FORK_DELIVER_R;
+            let pulse = 0.6 + 0.4 * (self.time * 8.0).sin();
+            arc(h, rr, 0.0, TAU, 3.0, alpha(pal.accent, pulse));
+            disc2(h, rr, 28, alpha(pal.accent, 0.0), alpha(pal.accent, 0.10));
+            let d = (h - p).normalize_or_zero();
+            let len = (p.distance(h) - rr).max(0.0);
+            let mut s0 = 34.0 + (self.time * 160.0) % 30.0;
+            while s0 < len {
+                line(p + d * s0, p + d * (s0 + 14.0).min(len), 2.5, alpha(pal.accent, 0.7));
+                s0 += 30.0;
+            }
+            poly_lines(p, 3, 34.0, -self.time * 3.0, 2.5, alpha(pal.accent, 0.95));
+        }
         // Ear-candy comets: a bright head with a ring, on the floor plane.
         for p in &w.painters {
             let tw = 0.7 + 0.3 * (self.time * 18.0).sin();
