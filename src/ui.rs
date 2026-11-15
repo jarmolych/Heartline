@@ -415,6 +415,64 @@ pub fn marquee(s: &str, x: f32, y: f32, size: f32, max_w: f32, col: Color, time:
     clip(None);
 }
 
+/// The launch into a run: the screen goes dark behind a heartline, then opens on the arena in
+/// two beats (a small opening, a hold, then all the way), like a heart. `k` runs 0..1.
+pub fn heartbeat_iris(k: f32, pal: &Palette) {
+    let (sw, sh) = (screen_width(), screen_height());
+    let u = sh / 1080.0;
+    let c = vec2(sw * 0.5, sh * 0.5);
+    let rmax = (sw * sw + sh * sh).sqrt() * 0.52;
+    let ease = |x: f32| {
+        let x = x.clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    };
+    let dark = Color::new(0.01, 0.0, 0.03, 1.0);
+    // how far the iris is open
+    let kb = ((k - 0.2) / 0.8).clamp(0.0, 1.0);
+    let r = if k < 0.2 { 0.0 } else { rmax * (0.16 * ease(kb / 0.22) + 0.84 * ease((kb - 0.42) / 0.58)) };
+    if k < 0.2 {
+        draw_rectangle(0.0, 0.0, sw, sh, a(dark, ease(k / 0.2)));
+    } else {
+        let n = 64;
+        let tau = std::f32::consts::TAU;
+        for i in 0..n {
+            let (a0, a1) = (tau * i as f32 / n as f32, tau * (i + 1) as f32 / n as f32);
+            let (d0, d1) = (vec2(a0.cos(), a0.sin()), vec2(a1.cos(), a1.sin()));
+            draw_triangle(c + d0 * r, c + d0 * rmax * 1.1, c + d1 * rmax * 1.1, dark);
+            draw_triangle(c + d0 * r, c + d1 * rmax * 1.1, c + d1 * r, dark);
+            // the lip of the opening glows
+            let fade = 1.0 - ease((kb - 0.7) / 0.3);
+            draw_line(c.x + d0.x * r, c.y + d0.y * r, c.x + d1.x * r, c.y + d1.y * r, 3.0 * u, a(pal.accent, 0.9 * fade));
+            draw_line(c.x + d0.x * r, c.y + d0.y * r, c.x + d1.x * r, c.y + d1.y * r, 12.0 * u, a(pal.accent, 0.14 * fade));
+        }
+    }
+    // the heartline: it runs in from the left, spikes in the middle, and stays outside the opening
+    let draw_to = (k / 0.2).min(1.0);
+    let la = 1.0 - ease((kb - 0.35) / 0.4);
+    if la > 0.01 {
+        let n = 160;
+        let amp = 70.0 * u;
+        let y_at = |f: f32| {
+            let x = (f - 0.5) * 22.0;
+            // a flat line with one complex: a small rise, a sharp spike, a dip, a bump
+            let v = 0.18 * (-(x + 1.6) * (x + 1.6) * 4.0).exp() + 1.0 * (-(x * x) * 30.0).exp() - 0.38 * (-(x - 0.35) * (x - 0.35) * 26.0).exp() + 0.22 * (-(x - 1.5) * (x - 1.5) * 3.0).exp();
+            c.y - v * amp
+        };
+        for i in 0..n {
+            let (f0, f1) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
+            if f1 > draw_to {
+                break;
+            }
+            let (x0, x1) = (f0 * sw, f1 * sw);
+            if ((x0 + x1) * 0.5 - c.x).abs() < r {
+                continue;
+            }
+            draw_line(x0, y_at(f0), x1, y_at(f1), 3.0 * u, a(pal.primary, la));
+            draw_line(x0, y_at(f0), x1, y_at(f1), 10.0 * u, a(pal.primary, 0.15 * la));
+        }
+    }
+}
+
 /// Limit drawing to a rectangle (screen coordinates), or lift the limit with `None`.
 pub fn clip(r: Option<(f32, f32, f32, f32)>) {
     let s = screen_dpi_scale();

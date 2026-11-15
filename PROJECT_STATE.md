@@ -75,7 +75,10 @@ merging the last one brings everything:
 45. `feat/menu-ror2-layout` — run setup rebuilt after Risk of Rain 2's layout, smooth font,
     rounded widgets, track corner, song swap, no camera change in silence, DROP RUSH
     cross-fades, crescent / signal / gate / comet skies, four more weathers, sea of sound /
-    equaliser skyline / dunes foregrounds; builds `Heartline-0.3.0-T11`
+    equaliser skyline / dunes foregrounds; then the second round the same day (see section 4
+    of the plan): smooth sea and dunes, mesas / cloud deck / striped hills, new palms and
+    horizon details, three more weathers, codex with live previews, heartbeat launch; builds
+    `Heartline-0.3.0-T13`
 
 The third playtest (2026-11-15) and what was done about it are in
 `docs/plans/0.4-playtest-3.md`. The depth pass that followed (every area of the game, planned
@@ -83,7 +86,7 @@ and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "
 spots" first. The newest round (menu layout, skies, foregrounds, run flow) is
 `docs/plans/0.6-menu-and-skies.md`.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T12-win-x64` (built from branch 45).
+**Test build:** `#UserTesting\Heartline-0.3.0-T13-win-x64` (built from branch 45).
 
 **Font:** Oxanium SemiBold is built into the exe (`assets/fonts/oxanium/`, SIL Open Font
 License 1.1; the player approved the download on 2026-11-15 as the free match for Risk of
@@ -251,6 +254,11 @@ tools, balance simulator, bot · `rng.rs` PRNG · `runner.rs` Highway side mode.
   8 s, runs can always carry on, no camera change in silence, DROP RUSH cross-fade, globe sky
   replaced, three new skies, four new weathers, three new foregrounds. 39 unit tests. T11.
   Then, with the player's go-ahead, Oxanium SemiBold as the built-in font. T12.
+- 2026-11-15 — Second round on T12 (plan 0.6 section 4): bars skyline and arch sky removed,
+  sea and dunes made smooth, three new foregrounds, palms redrawn, five new horizon details,
+  three new weathers, built-in tracks no longer mixed into the library, file / folder / live
+  only in run setup, codex rebuilt with clickable entries and live previews, heartbeat launch
+  animation. 39 unit tests. T13.
 - 2026-11-15 — Fifth pass of 0.5: Comb and Sweep patterns, track list, depth frames. 39 unit
   tests pass; shipped `Heartline-0.3.0-T9`.
 - 2026-11-15 — Fourth pass of 0.5: carry-a-charge objective, milestones, live pulses announced

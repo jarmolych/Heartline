@@ -34,7 +34,8 @@ change the track, and the backdrop changes with it. Hover anything for a tooltip
   the gems on the hats.
 - **LAN RALLY**: a beat-locked paddle duel for two PCs on the same network. Long rallies speed
   up; the practice bot is as sharp as your difficulty tier.
-- **CODEX**: what every Heart form, enemy and upgrade does, how the music becomes the level,
+- **CODEX**: pick a page by its icon and click an entry: it is described in a card and shown
+  live in the arena beside the list. What every Heart form, enemy, attack and upgrade does, how the music becomes the level,
   your best scores, and twelve milestones to earn.
 - **OPTIONS**: volumes, SYNC OFFSET (raise it if attacks land before you hear the beat), VISUALS
   (FULL / SUBTLE / OFF: how hard the scene pulses with the music), windowed or fullscreen.

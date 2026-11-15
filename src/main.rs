@@ -28,7 +28,7 @@ use analysis::{Analysis, Band, Feat, SectionKind, StreamAnalyzer, StreamOut};
 use decode::Track;
 use engine::{Audio, Sfx};
 use game::{Input, UpgradeId, World};
-use level::{Ev, Level, LevelEvent, LiveGen, Timeline};
+use level::{EnemyKind, Ev, Level, LevelEvent, LiveGen, Pattern, Timeline};
 use rally::{Character, FxKind, Rally, RallyInput, RallyMusic};
 use render::{text_center, text_left, text_shadow, text_w, HudInfo, Renderer};
 use ui::Icon;
@@ -399,6 +399,8 @@ struct LiveRun {
 
 /// For this long after a song starts in a run, Q / E trade it for another one.
 const SWAP_SECS: f32 = 8.0;
+/// Seconds the launch into a run takes (`ui::heartbeat_iris`).
+const LAUNCH_SECS: f32 = 1.3;
 /// Menu music plays at this fraction of the in-run music volume.
 const MENU_MUSIC_GAIN: f32 = 0.5;
 // Rows of the title menu: (icon, label, tooltip).
@@ -410,7 +412,110 @@ const M_OPTIONS: usize = 4;
 const M_QUIT: usize = 5;
 /// The title menu is in groups with a line between them: this many rows in each.
 const MENU_GROUPS: [usize; 3] = [3, 2, 1];
-const CODEX_TABS: [&str; 6] = ["THE HEART", "ENEMIES", "UPGRADES", "THE MUSIC", "RECORDS", "MILESTONES"];
+const CODEX_TABS: [(Icon, &str); 7] = [
+    (Icon::Heart, "THE HEART"),
+    (Icon::Target, "ENEMIES"),
+    (Icon::Bolt, "ATTACKS"),
+    (Icon::Shard, "UPGRADES"),
+    (Icon::Note, "THE MUSIC"),
+    (Icon::Trophy, "RECORDS"),
+    (Icon::Combo, "MILESTONES"),
+];
+
+/// What the codex's live arena shows for an entry.
+#[derive(Clone, Copy, PartialEq)]
+enum Demo {
+    None,
+    /// The Heart in the form it takes for this kind of section.
+    Form(SectionKind),
+    Charge,
+    Finale,
+    Purgatory,
+    Rage,
+    Relocation,
+    Enemy(EnemyKind),
+    Pattern(Pattern),
+    Darts,
+    Laser,
+    Tiles,
+    Wave,
+    Upgrade(UpgradeId),
+    /// Entry `n` of `CODEX_MUSIC`.
+    Music(u8),
+}
+
+/// One entry of a codex page.
+struct CodexItem {
+    name: String,
+    tag: String,
+    body: String,
+    demo: Demo,
+}
+
+/// The Heart's attacks: (name, what to do about it, what the arena shows).
+const CODEX_ATTACKS: [(&str, &str, Demo); 15] = [
+    ("RING", "A full ring leaving the Heart. Find the gap between two bullets and let it pass.", Demo::Pattern(Pattern::Ring)),
+    ("FAN", "A cone aimed at where you stand when it fires. Step to the side.", Demo::Pattern(Pattern::Fan)),
+    ("SPIRAL", "Two curved arms. Move with the turn, not against it.", Demo::Pattern(Pattern::Spiral)),
+    ("CROSS", "Four lines of bullets, one of them aimed at you.", Demo::Pattern(Pattern::Cross)),
+    ("FLOWER", "A ring whose bullets fly at different speeds, so it opens like petals. Slip between two.", Demo::Pattern(Pattern::Flower)),
+    ("ARC", "Three quarters of a ring. The missing quarter is the way out.", Demo::Pattern(Pattern::Arc)),
+    ("WALL", "A dense arc with one gap in it. Go through the gap.", Demo::Pattern(Pattern::Wall)),
+    ("BURST", "A fast line straight at you. One step is enough.", Demo::Pattern(Pattern::Burst)),
+    ("PINCER", "Two cones, one either side of you. The lane you stand in stays open: hold still.", Demo::Pattern(Pattern::Pincer)),
+    ("COMB", "Five short lines fanned around you. Step into a gap between two.", Demo::Pattern(Pattern::Comb)),
+    ("SWEEP", "A cone that arrives one side first, like a scythe. Go with it, or dash through.", Demo::Pattern(Pattern::Sweep)),
+    ("DARTS", "Single fast darts on the hi-hats in the hottest bars.", Demo::Darts),
+    ("LASER WALL", "A beam that sweeps the floor on a sustained note. Its path is shown first.", Demo::Laser),
+    ("TILE STRIKE", "Floor tiles light a bar ahead, then slam on the beat. Stand on a dark one.", Demo::Tiles),
+    ("SHOCKWAVE", "A wall of light leaving the Heart with gaps in it. Line up with a gap.", Demo::Wave),
+];
+
+/// The entries of codex page `tab` (empty for the pages that are tables).
+fn codex_items(tab: usize) -> Vec<CodexItem> {
+    let mk = |name: &str, tag: &str, body: &str, demo: Demo| CodexItem { name: name.to_string(), tag: tag.to_string(), body: body.to_string(), demo };
+    match tab {
+        0 => {
+            let demos = [
+                Demo::Charge,
+                Demo::Form(SectionKind::Calm),
+                Demo::Form(SectionKind::Normal),
+                Demo::Form(SectionKind::Intense),
+                Demo::Form(SectionKind::Drop),
+                Demo::Finale,
+                Demo::Purgatory,
+                Demo::Rage,
+                Demo::Relocation,
+                Demo::Form(SectionKind::Normal),
+            ];
+            CODEX_HEART.iter().zip(demos).map(|(e, d)| mk(e.0, "the Heart", e.1, d)).collect()
+        }
+        1 => {
+            let kinds = [
+                EnemyKind::Chaser,
+                EnemyKind::Darter,
+                EnemyKind::Orbiter,
+                EnemyKind::Splitter,
+                EnemyKind::Turret,
+                EnemyKind::Bomber,
+                EnemyKind::Wisp,
+                EnemyKind::Elite,
+                EnemyKind::Sprite,
+            ];
+            CODEX_ENEMIES.iter().zip(kinds).map(|(e, k)| mk(e.0, "enemy", e.1, Demo::Enemy(k))).collect()
+        }
+        2 => CODEX_ATTACKS.iter().map(|e| mk(e.0, "attack", e.1, e.2)).collect(),
+        3 => UpgradeId::ALL
+            .iter()
+            .map(|up| {
+                let lv = if up.max() > 1 { format!("levels 1-{}", up.max()) } else { "one level".to_string() };
+                mk(up.name(), &format!("{}upgrade, {lv}", if up.rare() { "rare " } else { "" }), up.desc(), Demo::Upgrade(*up))
+            })
+            .collect(),
+        4 => CODEX_MUSIC.iter().enumerate().map(|(i, e)| mk(e.0, "the music", e.1, Demo::Music(i as u8))).collect(),
+        _ => Vec::new(),
+    }
+}
 /// Milestones: (id kept in the scores file, name, how to earn it).
 const MILESTONES: [(&str, &str, &str); 12] = [
     ("heart", "HEARTBREAKER", "Break a Heart."),
@@ -583,6 +688,19 @@ struct App {
     load_in_arena: bool,
     /// Files dropped on the title menu: run setup opens and START plays them.
     staged: Vec<PathBuf>,
+    /// Seconds since a run was launched; the heartbeat opening plays while it is under
+    /// `LAUNCH_SECS`.
+    launch: f32,
+    /// Codex: the chosen entry, the first row in view, and the live arena beside the lists
+    /// (what it should show, what it is showing, its own clock, when the next thing is due
+    /// and how many it has sent).
+    codex_sel: usize,
+    codex_top: usize,
+    show_want: Demo,
+    show_demo: Demo,
+    show_t: f32,
+    show_next: f32,
+    show_n: usize,
     /// Where the difficulty strip is scrolled to (eases toward `diff`).
     diff_scroll: f32,
     /// Remix number chosen in run setup: added to the seed, so the same song deals a different
@@ -996,10 +1114,22 @@ impl App {
                     }
                 }
                 self.juke.last_t = t;
-                self.world.t = t;
+                let show = self.show_demo != Demo::None;
+                if !show {
+                    self.world.t = t;
+                }
                 while self.juke.cursor < ev.len() && ev[self.juke.cursor].at() <= t {
                     let e = ev[self.juke.cursor];
                     self.juke.cursor += 1;
+                    if show {
+                        // only the beat and the drum hits reach the showcase, on its own clock
+                        match e.ev {
+                            Ev::Beat { .. } | Ev::Hit { .. } => self.world.apply(&LevelEvent { t: self.world.t, lead: 0.0, ev: e.ev }),
+                            Ev::Section { palette, .. } => self.world.palette = palette,
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if let Ev::Candy { .. } = e.ev {
                         self.world.candy = 1.0;
                     }
@@ -1013,9 +1143,190 @@ impl App {
                 progress = t / loaded.level.duration.max(0.1);
             }
         }
-        let t = self.world.t;
-        self.world.update(dt, t, input, bp, &feat, intensity, false);
+        if self.show_demo != Demo::None {
+            self.show_t += dt;
+            let t = self.show_t;
+            self.world.update(dt, t, input, bp, &feat, intensity, true);
+        } else {
+            let t = self.world.t;
+            self.world.update(dt, t, input, bp, &feat, intensity, false);
+        }
         progress
+    }
+
+    /// Codex: build the little world that shows `demo`.
+    fn codex_demo_reset(&mut self, demo: Demo) {
+        let (mood, palette) = (self.world.mood, self.world.palette);
+        let bl = self.juke.loaded.as_ref().map(|(_, l)| if l.level.bpm > 1.0 { 60.0 / l.level.bpm } else { 0.5 }).unwrap_or(0.5);
+        let mut w = World::new(DIFFS[2].0.max(self.diff()), true);
+        w.demo = true;
+        w.begin_song(900.0, 0, 7);
+        w.mood = mood;
+        w.palette = palette;
+        w.beat_len = bl;
+        let kind = match demo {
+            Demo::Form(k) => k,
+            Demo::Charge | Demo::Finale | Demo::Purgatory | Demo::Rage | Demo::Upgrade(_) => SectionKind::Drop,
+            Demo::Relocation => SectionKind::Intense,
+            _ => SectionKind::Normal,
+        };
+        w.demo_setup(kind, demo == Demo::Finale, demo == Demo::Charge);
+        // a steady gun on the beat grid, so the player in the showcase can shoot back
+        let step = bl.clamp(0.3, 1.0);
+        w.gun = [1.0f32, 2.0, 4.0, 4.0, 8.0].iter().map(|d| (0..8000).map(|i| i as f32 * step / d).collect()).collect();
+        match demo {
+            Demo::Upgrade(up) => w.player.ups[up as usize] = up.max(),
+            Demo::Rage => w.rage = 4,
+            _ => {}
+        }
+        self.world = w;
+        self.show_demo = demo;
+        self.show_t = 0.0;
+        self.show_next = 0.5;
+        self.show_n = 0;
+    }
+
+    /// Codex: keep the showcase running. It is rebuilt when the entry changes or it has run
+    /// long, and every few beats it is sent the next thing to show, timed to land on a beat.
+    fn codex_demo_step(&mut self) {
+        let demo = self.show_want;
+        if demo == Demo::None {
+            return;
+        }
+        let over = self.world.heart.broken || (self.world.purgatory && demo != Demo::Purgatory);
+        if self.show_demo != demo || self.show_t > 50.0 || over {
+            self.codex_demo_reset(demo);
+        }
+        if demo == Demo::Purgatory {
+            self.world.purgatory = true;
+            self.world.purg_until = self.world.t + 4.5;
+        }
+        if self.show_t < self.show_next {
+            return;
+        }
+        let w = &mut self.world;
+        let bl = w.beat_len.clamp(0.3, 1.0);
+        let n = self.show_n;
+        self.show_n += 1;
+        // land on the beat after next, announced from now
+        let t_on = self.show_t + (1.0 - w.beat_phase) * bl + bl;
+        let lead = t_on - self.show_t;
+        let ev = |ev: Ev, extra: f32| LevelEvent { t: t_on + extra, lead: lead + extra, ev };
+        let speed = level::beat_speed(175.0, bl);
+        let pulse = |p: Pattern, count: u16, n: usize| Ev::Pulse { pattern: p, count, speed, rot: n as f32 * 0.45, soft: false };
+        let spots = [(300.0f32, -160.0f32), (320.0, 150.0), (-280.0, 170.0), (-300.0, -150.0)];
+        let (sx, sy) = spots[n % spots.len()];
+        let mut gap = 4.0;
+        match demo {
+            Demo::None => {}
+            Demo::Form(_) | Demo::Charge | Demo::Finale | Demo::Purgatory | Demo::Rage | Demo::Relocation => {
+                let p = [Pattern::Ring, Pattern::Fan, Pattern::Arc, Pattern::Flower][n % 4];
+                w.apply(&ev(pulse(p, 14, n), 0.0));
+                gap = 2.0;
+            }
+            Demo::Enemy(kind) => {
+                if w.enemies.len() + w.portals.len() < 2 {
+                    w.apply(&ev(Ev::Spawn { kind, x: sx, y: sy }, 0.0));
+                }
+                gap = 3.0;
+            }
+            Demo::Pattern(p) => {
+                let count = match p {
+                    Pattern::Burst => 6,
+                    Pattern::Fan | Pattern::Sweep => 9,
+                    Pattern::Pincer => 10,
+                    Pattern::Comb => 15,
+                    _ => 18,
+                };
+                w.apply(&ev(pulse(p, count, n), 0.0));
+            }
+            Demo::Darts => {
+                w.apply(&ev(Ev::Tick { speed: 420.0 }, 0.0));
+                gap = 0.5;
+            }
+            Demo::Laser => {
+                let horizontal = n % 2 == 0;
+                let reach = if horizontal { 240.0 } else { 440.0 };
+                w.apply(&ev(Ev::Laser { horizontal, from: -reach, to: reach, dur: 4.0 * bl }, bl));
+                gap = 8.0;
+            }
+            Demo::Tiles => {
+                let pattern = [level::TilePattern::Checker(0), level::TilePattern::Ring(1), level::TilePattern::Checker(1), level::TilePattern::Scatter(n as u32, 9)][n % 4];
+                w.apply(&ev(Ev::Tiles { pattern }, 2.0 * bl));
+                gap = 6.0;
+            }
+            Demo::Wave => w.apply(&ev(Ev::Shockwave { gap: 0.5, gaps: 3 }, bl)),
+            Demo::Upgrade(_) => {
+                // something to shoot at, and something to dodge
+                w.apply(&ev(pulse(Pattern::Fan, 7, n), 0.0));
+                if n % 2 == 0 && w.enemies.len() + w.portals.len() < 3 {
+                    w.apply(&ev(Ev::Spawn { kind: EnemyKind::Chaser, x: sx, y: sy }, 0.0));
+                }
+                gap = 3.0;
+            }
+            Demo::Music(k) => match k {
+                1 => {
+                    w.apply(&ev(Ev::Tiles { pattern: level::TilePattern::Checker((n % 2) as u8) }, 2.0 * bl));
+                    gap = 6.0;
+                }
+                2 => {
+                    if w.enemies.len() + w.portals.len() < 3 {
+                        w.apply(&ev(Ev::Spawn { kind: EnemyKind::Chaser, x: sx, y: sy }, 0.0));
+                    }
+                    gap = 2.0;
+                }
+                3 => {
+                    w.apply(&LevelEvent { t: self.show_t, lead: 0.0, ev: Ev::Shards { x: sx * 0.8, y: sy * 0.8, n: 3 } });
+                    w.apply(&ev(Ev::Tick { speed: 420.0 }, 0.0));
+                    gap = 1.0;
+                }
+                4 => {
+                    w.apply(&ev(Ev::Laser { horizontal: n % 2 == 0, from: -240.0, to: 240.0, dur: 4.0 * bl }, bl));
+                    gap = 8.0;
+                }
+                5 => {
+                    let pitch = 0.15 + 0.2 * (n % 4) as f32;
+                    let (cx, cy) = level::chime_point(pitch);
+                    w.apply(&LevelEvent { t: self.show_t, lead: 0.0, ev: Ev::Chime { pitch, strength: 1.0 } });
+                    if w.enemies.len() + w.portals.len() < 4 {
+                        w.apply(&ev(Ev::Spawn { kind: EnemyKind::Wisp, x: cx, y: cy }, 0.0));
+                    }
+                    gap = 2.0;
+                }
+                6 => {
+                    let pitch = 0.15 + 0.25 * (n % 3) as f32;
+                    w.apply(&LevelEvent { t: self.show_t, lead: 0.0, ev: Ev::Candy { kind: (n % 3) as u8, pitch, pitch_end: 0.9 - pitch * 0.5, dur: 2.0 } });
+                    gap = 8.0;
+                }
+                8 => {
+                    if w.res_t <= 0.0 {
+                        w.res_t = 8.0;
+                    }
+                    w.apply(&ev(pulse(Pattern::Ring, 14, n), 0.0));
+                    gap = 2.0;
+                }
+                _ => {
+                    let p = if k == 7 { Pattern::Fan } else { Pattern::Ring };
+                    w.apply(&ev(pulse(p, if k == 7 { 11 } else { 14 }, n), 0.0));
+                    gap = 2.0;
+                }
+            },
+        }
+        self.show_next = self.show_t + gap * bl;
+    }
+
+    /// Leave the codex: the showcase world goes, the menu's own scene comes back.
+    fn codex_leave(&mut self) {
+        self.show_want = Demo::None;
+        if self.show_demo != Demo::None {
+            let mood = self.world.mood;
+            self.show_demo = Demo::None;
+            self.world = World::new(self.diff(), self.diff == 0);
+            self.world.mood = mood;
+            self.juke.last_t = -1.0;
+        }
+        self.screen = Screen::Menu;
+        self.menu_sel = M_CODEX;
     }
 
     /// The track preview in the top right corner with its buttons and the library bar. It is
@@ -1618,6 +1929,12 @@ impl App {
         };
         self.was_silent = false;
         self.song_age = 0.0;
+        // The first song of a run opens with the heartbeat, not the speed lines that mark a
+        // change of song everywhere else.
+        if self.qi == 0 && !self.load_in_arena && (self.args.selftest.is_none() || self.args.screen == "launch") {
+            self.launch = 0.0;
+            self.world.warp = 0.0;
+        }
         self.load_in_arena = false;
         self.audio.play_ex(song.track.clone(), start as f64, false, fade);
         self.juke.playing = false;
@@ -3200,6 +3517,14 @@ async fn run(args: Args) {
         song_age: 0.0,
         load_in_arena: false,
         staged: Vec::new(),
+        launch: LAUNCH_SECS,
+        codex_sel: 0,
+        codex_top: 0,
+        show_want: Demo::None,
+        show_demo: Demo::None,
+        show_t: 0.0,
+        show_next: 0.0,
+        show_n: 0,
         diff_scroll: diff as f32,
         remix: 0,
         setup_mode: 0,
@@ -3276,6 +3601,9 @@ async fn run(args: Args) {
     } else if args.screen == "codex" {
         app.screen = Screen::Codex;
         app.menu_sel = args.mode.min(CODEX_TABS.len() - 1);
+        // debug: `--give N` picks the entry
+        app.codex_sel = args.give as usize;
+        app.show_want = codex_items(app.menu_sel).get(app.codex_sel).map_or(Demo::None, |i| i.demo);
     } else if args.live {
         // Devices are enumerated on the audio thread; give it a moment.
         for _ in 0..60 {
@@ -3369,6 +3697,10 @@ async fn run(args: Args) {
             app.lan_poll(dt);
         }
         let lan_match = app.screen == Screen::Lan && app.lan.as_ref().is_some_and(|l| l.in_match());
+        // The codex shows its entries live in the arena, set off to the right of its lists.
+        let codex_live = app.screen == Screen::Codex && app.show_want != Demo::None;
+        app.rend.show_shift = if codex_live { vec2(0.17, -0.045) } else { Vec2::ZERO };
+        app.rend.show_zoom = if codex_live { 0.6 } else { 1.0 };
         app.rend.update_view(&app.world);
 
         // ---- simulate ----
@@ -3424,15 +3756,25 @@ async fn run(args: Args) {
                 idle_target = 1.0;
                 progress = app.step_highway(dt);
             }
+            _ if codex_live => {
+                // Codex: a showcase in the arena, played by the bot, in time with the menu music.
+                app.codex_demo_step();
+                let input = tools::bot_input(&app.world);
+                progress = app.juke_step(dt, &input);
+                idle_target = 0.0;
+            }
             _ => {
                 // Menu-like screens: drift mode with the menu music; the player can still fly around.
+                if app.show_demo != Demo::None && app.screen != Screen::Codex {
+                    app.codex_leave();
+                }
                 let mut input = app.gather_input(false);
                 input.dash = false;
                 progress = app.juke_step(dt, &input);
             }
         }
         // Sound effects the simulation asked for (not in live mode: the capture would hear them).
-        let quiet = app.live.is_some();
+        let quiet = app.live.is_some() || app.show_demo != Demo::None;
         for (s, gain, pan) in app.world.sounds.drain(..) {
             if !quiet {
                 app.audio.sfx(s, gain, pan);
@@ -3443,6 +3785,14 @@ async fn run(args: Args) {
         let rate = if idle_target > app.idle { 1.3 } else { 1.0 };
         let prev_idle = app.idle;
         app.idle += (idle_target - app.idle).clamp(-rate * dt, rate * dt);
+        // Launching a run: once the screen is dark the view is already on the arena, so the
+        // opening shows it settled.
+        if app.launch < LAUNCH_SECS {
+            app.launch += dt;
+            if app.launch > 0.2 * LAUNCH_SECS && app.screen == Screen::Play {
+                app.idle = idle_target;
+            }
+        }
         if prev_idle <= 0.5 && app.idle > 0.5 && app.screen == Screen::Play {
             app.world.calm_down();
         }
@@ -3470,7 +3820,7 @@ async fn run(args: Args) {
             app.feed_signal();
             // Menu-like screens: no player or Heart in the vista, and the music sits lower than in a run.
             let in_run = matches!(app.screen, Screen::Play | Screen::Paused);
-            app.rend.menu = !in_run;
+            app.rend.menu = !in_run && !codex_live;
             let duck_to = if in_run { if matches!(app.phase, Phase::Dying(_)) { 0.35 } else { 1.0 } } else if app.screen == Screen::Runner { 1.0 } else { MENU_MUSIC_GAIN };
             app.music_gain += (duck_to - app.music_gain).clamp(-1.5 * dt, 1.5 * dt);
             app.audio.set_volume(if app.args.mute { 0.0 } else { app.volume * app.music_gain });
@@ -3524,6 +3874,9 @@ async fn run(args: Args) {
                     Some(M_CODEX) => {
                         app.screen = Screen::Codex;
                         app.menu_sel = 0;
+                        app.codex_sel = 0;
+                        app.codex_top = 0;
+                        app.show_want = codex_items(0).first().map_or(Demo::None, |i| i.demo);
                     }
                     Some(M_LAN) => app.lan_open(),
                     Some(M_OPTIONS) => {
@@ -4249,88 +4602,179 @@ async fn run(args: Args) {
                 }
             }
             Screen::Codex => {
-                dim(0.72);
-                let x = 110.0 * u;
-                render::vtext("CODEX", x, 130.0 * u, 64.0 * u, WHITE, -1);
                 let nt = CODEX_TABS.len();
+                let mut tab = app.menu_sel.min(nt - 1);
+                let x = 110.0 * u;
+                let time = app.rend.time;
+                let dim_w = |a: f32| Color::new(1.0, 1.0, 1.0, a);
+                let mut tip = ui::Tip::default();
+                // ---- pages: an icon each; Q / E or LEFT / RIGHT or a click ----
+                let mut to_tab: Option<usize> = None;
                 let dirk = (is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::E)) as i32 - (is_key_pressed(KeyCode::Left) || is_key_pressed(KeyCode::Q)) as i32;
                 if dirk != 0 {
-                    app.menu_sel = (app.menu_sel as i32 + dirk).rem_euclid(nt as i32) as usize;
+                    to_tab = Some((tab as i32 + dirk).rem_euclid(nt as i32) as usize);
+                }
+                if codex_items(tab).is_empty() {
+                    dim(0.7);
+                }
+                render::vtext("CODEX", x, 118.0 * u, 54.0 * u, WHITE, -1);
+                for (i, t) in CODEX_TABS.iter().enumerate() {
+                    let tx = x + i as f32 * 72.0 * u;
+                    let (hv, click) = ui::tile(tx, 142.0 * u, 62.0 * u, i == tab, false, pal.primary, 1.0, u);
+                    ui::icon(t.0, tx + 31.0 * u, 173.0 * u, 15.0 * u, if i == tab { WHITE } else if hv { pal.primary } else { dim_w(0.7) });
+                    if hv {
+                        tip.set(t.1, "", true);
+                    }
+                    if click {
+                        to_tab = Some(i);
+                    }
+                }
+                if let Some(i) = to_tab.filter(|i| *i != tab) {
+                    tab = i;
+                    app.menu_sel = i;
+                    app.codex_sel = 0;
+                    app.codex_top = 0;
                     app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
                 }
-                let tab = app.menu_sel.min(nt - 1);
-                let tabs: Vec<(Option<Icon>, &str)> = CODEX_TABS.iter().map(|t| (None, *t)).collect();
-                let (click, _) = ui::segments(x, 170.0 * u, 1100.0 * u, 50.0 * u, &tabs, tab, true, u, &pal);
-                if let Some(i) = click {
-                    app.menu_sel = i;
-                }
-                let soft = Color::new(1.0, 1.0, 1.0, 0.85);
-                let y0 = 280.0 * u;
-                let entry = |k: usize, name: &str, body: &str, step: f32| {
-                    let y = y0 + k as f32 * step * u;
-                    text_left(name, x, y, 26.0 * u, pal.accent);
-                    for (i, l) in ui::wrap(body, 22.0 * u, sw - x - 420.0 * u).iter().enumerate() {
-                        text_left(l, x + 240.0 * u, y + i as f32 * 26.0 * u, 22.0 * u, soft);
+                text_left(CODEX_TABS[tab].1, x, 246.0 * u, 30.0 * u, pal.primary);
+                let items = codex_items(tab);
+                let soft = dim_w(0.85);
+                if !items.is_empty() {
+                    // ---- the entries: click one, or UP / DOWN ----
+                    let n = items.len();
+                    let (lx, ly, lw, rh) = (x, 266.0 * u, 500.0 * u, 48.0 * u);
+                    let fit = (((sh - 120.0 * u - ly - 20.0 * u) / rh).floor().max(4.0) as usize).min(n);
+                    ui::panel(lx, ly, lw, fit as f32 * rh + 20.0 * u, u);
+                    let over_list = ui::hover(lx, ly, lw, fit as f32 * rh + 20.0 * u);
+                    let before = app.codex_sel.min(n - 1);
+                    let mut sel = before;
+                    let dv = is_key_pressed(KeyCode::Down) as i32 - is_key_pressed(KeyCode::Up) as i32;
+                    sel = (sel as i32 + dv).clamp(0, n as i32 - 1) as usize;
+                    let mut top = app.codex_top.min(n - fit);
+                    let (_, wheel) = mouse_wheel();
+                    if over_list && wheel != 0.0 {
+                        top = (top as i32 - wheel.signum() as i32).clamp(0, (n - fit) as i32) as usize;
+                    } else if dv != 0 {
+                        // keep the chosen entry in view
+                        top = top.min(sel).max((sel + 1).saturating_sub(fit));
                     }
-                };
-                match tab {
-                    0 => CODEX_HEART.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 66.0)),
-                    1 => CODEX_ENEMIES.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 72.0)),
-                    2 => {
-                        // two columns: emblem, name, what it does, how far it levels
-                        for (k, up) in UpgradeId::ALL.iter().enumerate() {
-                            let (col, row) = (k / 10, k % 10);
-                            let cx = x + col as f32 * 840.0 * u;
-                            let y = y0 + row as f32 * 68.0 * u;
-                            let c = if up.rare() { pal.danger } else { pal.accent };
-                            render::upgrade_emblem(*up, vec2(cx + 22.0 * u, y - 8.0 * u), 17.0 * u, 2.4 * u, WHITE, c, app.rend.time);
-                            text_left(up.name(), cx + 60.0 * u, y, 26.0 * u, c);
-                            text_left(&format!("{}{}", if up.rare() { "rare  " } else { "" }, if up.max() > 1 { format!("levels 1-{}", up.max()) } else { "one level".to_string() }), cx + 60.0 * u, y + 24.0 * u, 18.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
-                            text_left(up.desc(), cx + 280.0 * u, y, 22.0 * u, soft);
+                    for (r, k) in (top..top + fit).enumerate() {
+                        let ry = ly + 10.0 * u + r as f32 * rh;
+                        let on = k == sel;
+                        let hv = ui::hover(lx + 8.0 * u, ry, lw - 16.0 * u, rh - 4.0 * u);
+                        if on {
+                            ui::rrect(lx + 8.0 * u, ry, lw - 16.0 * u, rh - 4.0 * u, 8.0 * u, Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, 0.5));
+                            ui::rrect_lines(lx + 8.0 * u, ry, lw - 16.0 * u, rh - 4.0 * u, 8.0 * u, 1.5 * u, Color::new(pal.accent.r, pal.accent.g, pal.accent.b, 0.8));
+                        } else if hv {
+                            ui::rrect(lx + 8.0 * u, ry, lw - 16.0 * u, rh - 4.0 * u, 8.0 * u, dim_w(0.07));
+                        }
+                        let col = if on { WHITE } else { dim_w(if hv { 0.95 } else { 0.72 }) };
+                        let ic = vec2(lx + 36.0 * u, ry + rh * 0.5 - 2.0 * u);
+                        match items[k].demo {
+                            Demo::Upgrade(up) => render::upgrade_emblem(up, ic, 12.0 * u, 2.0 * u, col, if up.rare() { pal.danger } else { pal.accent }, time),
+                            Demo::Enemy(kind) => app.rend.draw_kind_icon(kind, ic, 12.0 * u, if on { pal.accent } else { col }),
+                            _ => ui::icon(CODEX_TABS[tab].0, ic.x, ic.y, 10.0 * u, if on { pal.accent } else { col }),
+                        }
+                        text_left(&items[k].name, lx + 66.0 * u, ry + rh * 0.5 + 6.0 * u, 24.0 * u, col);
+                        if let Demo::Upgrade(up) = items[k].demo {
+                            if up.rare() {
+                                render::text_right("rare", lx + lw - 24.0 * u, ry + rh * 0.5 + 5.0 * u, 17.0 * u, pal.danger);
+                            }
+                        }
+                        if hv && is_mouse_button_pressed(MouseButton::Left) {
+                            sel = k;
                         }
                     }
-                    3 => CODEX_MUSIC.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 66.0)),
-                    5 => {
+                    if n > fit {
+                        // where the list is scrolled to
+                        let track = fit as f32 * rh;
+                        let (bh, by) = (track * fit as f32 / n as f32, track * top as f32 / n as f32);
+                        ui::rrect(lx + lw - 9.0 * u, ly + 10.0 * u + by, 4.0 * u, bh, 2.0 * u, dim_w(0.35));
+                    }
+                    if sel != before {
+                        app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
+                    }
+                    app.codex_sel = sel;
+                    app.codex_top = top;
+                    // ---- the chosen entry: what it is, under the arena where it is being shown ----
+                    let it = &items[sel];
+                    let (cw, ch) = (780.0 * u, 196.0 * u);
+                    let (cx, cy) = (sw - 110.0 * u - cw, sh - 120.0 * u - ch);
+                    ui::panel(cx, cy, cw, ch, u);
+                    let cell = 112.0 * u;
+                    ui::rrect(cx + 20.0 * u, cy + 20.0 * u, cell, cell, 12.0 * u, dim_w(0.06));
+                    let cc = vec2(cx + 20.0 * u + cell * 0.5, cy + 20.0 * u + cell * 0.5);
+                    match it.demo {
+                        Demo::Upgrade(up) => render::upgrade_emblem(up, cc, 34.0 * u, 3.5 * u, WHITE, if up.rare() { pal.danger } else { pal.accent }, time),
+                        Demo::Enemy(kind) => {
+                            let c = match kind {
+                                EnemyKind::Darter | EnemyKind::Bomber => pal.accent,
+                                EnemyKind::Orbiter => pal.primary,
+                                EnemyKind::Turret | EnemyKind::Elite => pal.danger,
+                                EnemyKind::Wisp | EnemyKind::Sprite => Color::new(1.0, 0.95, 0.75, 1.0),
+                                _ => pal.secondary,
+                            };
+                            app.rend.draw_kind_icon(kind, cc, 38.0 * u, c);
+                        }
+                        Demo::Pattern(p) => app.rend.draw_pattern_icon(p, cc, 44.0 * u, pal.danger, pal.primary),
+                        _ => ui::icon(CODEX_TABS[tab].0, cc.x, cc.y, 30.0 * u, pal.accent),
+                    }
+                    let tx = cx + 40.0 * u + cell;
+                    text_left(&it.name, tx, cy + 52.0 * u, 36.0 * u, pal.accent);
+                    render::text_right(&it.tag, cx + cw - 24.0 * u, cy + 48.0 * u, 18.0 * u, dim_w(0.5));
+                    for (i, l) in ui::wrap(&it.body, 22.0 * u, cw - cell - 70.0 * u).iter().take(5).enumerate() {
+                        text_left(l, tx, cy + 88.0 * u + i as f32 * 27.0 * u, 22.0 * u, soft);
+                    }
+                    text_shadow("live: the bot is playing it", cx + cw - 24.0 * u, cy - 14.0 * u, 18.0 * u, dim_w(0.5), 1);
+                    app.show_want = it.demo;
+                } else {
+                    app.show_want = Demo::None;
+                    let y0 = 330.0 * u;
+                    ui::panel(x - 24.0 * u, 266.0 * u, sw - 2.0 * x + 48.0 * u, sh - 266.0 * u - 120.0 * u, u);
+                    if tab == 6 {
                         let have = MILESTONES.iter().filter(|m| app.scores.contains_key(&format!("ACH|{}", m.0))).count();
-                        text_left(&format!("{have} of {} earned", MILESTONES.len()), x, y0 - 34.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                        render::text_right(&format!("{have} of {} earned", MILESTONES.len()), sw - x, 246.0 * u, 20.0 * u, dim_w(0.6));
                         for (k, m) in MILESTONES.iter().enumerate() {
-                            let y = y0 + k as f32 * 54.0 * u;
+                            let y = y0 + k as f32 * 48.0 * u;
                             let done = app.scores.contains_key(&format!("ACH|{}", m.0));
-                            let c = if done { pal.accent } else { Color::new(1.0, 1.0, 1.0, 0.35) };
+                            let c = if done { pal.accent } else { dim_w(0.35) };
                             draw_poly_lines(x + 14.0 * u, y - 8.0 * u, 4, 13.0 * u, 0.0, 2.0 * u, c);
                             if done {
                                 draw_poly(x + 14.0 * u, y - 8.0 * u, 4, 7.0 * u, 0.0, c);
                             }
                             text_left(m.1, x + 44.0 * u, y, 26.0 * u, c);
-                            text_left(m.2, x + 360.0 * u, y, 22.0 * u, if done { soft } else { Color::new(1.0, 1.0, 1.0, 0.5) });
+                            text_left(m.2, x + 380.0 * u, y, 22.0 * u, if done { soft } else { dim_w(0.5) });
                         }
-                    }
-                    _ => {
+                    } else {
                         let mut rows: Vec<(&String, &(u64, u32))> = app.scores.iter().filter(|(k, _)| !k.starts_with("ACH|")).collect();
                         rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
                         if rows.is_empty() {
                             text_left("No scores yet. Finish a run or a Highway road and it will be kept here.", x, y0, 24.0 * u, soft);
                         }
-                        text_left("track", x, y0 - 34.0 * u, 18.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
-                        for (k, (key, v)) in rows.iter().take(16).enumerate() {
+                        text_left("track", x, y0 - 34.0 * u, 18.0 * u, dim_w(0.5));
+                        for (k, (key, v)) in rows.iter().take(13).enumerate() {
                             let y = y0 + k as f32 * 40.0 * u;
                             let mut it = key.split('|');
                             let (title, tier, mode) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
                             let title = ui::fit(title, 24.0 * u, 620.0 * u);
                             text_left(&title, x, y, 24.0 * u, WHITE);
-                            text_left(tier, x + 640.0 * u, y, 22.0 * u, pal.primary);
-                            text_left(mode, x + 860.0 * u, y, 22.0 * u, pal.secondary);
-                            text_left(&format!("{}", v.0), x + 1060.0 * u, y, 26.0 * u, pal.accent);
+                            text_left(tier, x + 660.0 * u, y, 22.0 * u, pal.primary);
+                            text_left(mode, x + 880.0 * u, y, 22.0 * u, pal.secondary);
+                            text_left(&format!("{}", v.0), x + 1090.0 * u, y, 26.0 * u, pal.accent);
                             if mode != "HIGHWAY" {
-                                text_left(&format!("depth {}", v.1), x + 1240.0 * u, y, 20.0 * u, soft);
+                                text_left(&format!("depth {}", v.1), x + 1280.0 * u, y, 20.0 * u, soft);
                             }
                         }
                     }
                 }
-                text_shadow("LEFT / RIGHT  change page        ESC  back", x, sh - 60.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.7), -1);
+                let hy = sh - 62.0 * u;
+                let mut kx = x;
+                for (k, what) in [("Q  E", "page"), ("UP  DOWN", "entry"), ("ESC", "back")] {
+                    kx = ui::keycap(k, what, kx, hy + 34.0 * u, u);
+                }
+                tip.draw(x, hy, u, &pal);
                 if is_key_pressed(KeyCode::Escape) {
-                    app.screen = Screen::Menu;
-                    app.menu_sel = M_CODEX;
+                    app.codex_leave();
                 }
             }
             Screen::Tracks => {
@@ -4402,7 +4846,11 @@ async fn run(args: Args) {
                 }
             }
             Screen::Lan => app.lan_ui(u, sw, sh),
-            Screen::Play => {}
+            Screen::Play => {
+                if app.launch < LAUNCH_SECS {
+                    ui::heartbeat_iris(app.launch / LAUNCH_SECS, &pal);
+                }
+            }
         }
 
         if app.message_t > 0.0 && !app.message.is_empty() {

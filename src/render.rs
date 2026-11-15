@@ -1137,7 +1137,7 @@ vec3 topdown(vec2 q) {
             float ring = smoothstep(0.42, 0.5, abs(fract(rr * 2.6 - u_time * 0.2) - 0.5));
             col += mix(u_sunA, u_grid, clamp(rr * 0.5, 0.0, 1.0)) * ring * (0.06 + 0.10 * u_mood2.z) * exp(-rr * 0.6);
         } else if (sc > 9.5 && sc < 12.5) {
-            // prism and gate: the far striped sun
+            // prism and the rising sun: the far striped sun
             col += scol * band * 0.11 * smoothstep(1.0, 0.985, d);
             col += u_sunB * 0.05 * exp(-d * d * 1.2) * (1.0 + 0.6 * u_swell);
         } else {
@@ -1504,24 +1504,20 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
         col += u_sunA * (0.30 * exp(-outc * 12.0) + 0.10 * exp(-outc * 3.0)) * (1.0 + 0.8 * u_bass);
         col = mix(col, cc * 0.8, smoothstep(R, R - 0.003, dd) * cm);
     } else if (sc > 11.5 && sc < 12.5) {
-        // gate: a tall arch of light standing on the horizon, striped like the sun where it
-        // meets the ground, with a thin frame that flares on the kick and a pillar of light
-        // going up from its crown
-        float yb = hz + off - p.y;                  // height above the horizon
-        float x = q.x;
-        float W = r * 0.5 * (1.0 + 0.03 * u_bass);
-        float Hs = r * 1.45;
-        float d = yb < Hs ? abs(x) - W : length(vec2(x, yb - Hs)) - W;
-        float yn = yb / (Hs + W);
-        vec3 gc = mix(u_sunB, u_sunA, clamp(yn * 1.1, 0.0, 1.0));
-        float bars = yn > 0.72 ? 1.0 : step(0.12 + 0.42 * (0.72 - yn), fract(yn * 12.0 + u_time * 0.2));
-        float outg = max(d, 0.0);
-        float above = step(0.0, yb);
-        col += u_sunB * (0.30 * exp(-outg * 14.0) + 0.12 * exp(-outg * 3.5)) * (1.0 + 0.6 * u_bass) * above;
-        col += mix(u_sunA, vec3(1.0), 0.3) * 0.16 * exp(-abs(x) / (W * 0.35)) * smoothstep(Hs + W, Hs + W + 0.3, yb + 0.3) * exp(-max(yb - Hs - W, 0.0) * 3.0) * (1.0 + 0.9 * u_mood2.z);
-        col = mix(col, gc * 0.78, smoothstep(0.003, 0.0, d) * bars * above);
-        float frame = abs(d - 0.02);
-        col += mix(u_grid, vec3(1.0), 0.4) * smoothstep(0.004 + px, 0.004 - px, frame) * (0.5 + 0.9 * u_mood2.z) * above;
+        // rising sun: half a striped disc on the horizon throwing broad rays up the sky. The
+        // rays turn slowly, swell with the bass and flare on the kick.
+        vec2 c = (p - vec2(0.5, hz + off)) * asp;
+        float R = r * 1.15 * (1.0 + 0.03 * u_bass);
+        float d = length(c);
+        float ang = atan(-c.y, c.x);
+        float wedge = smoothstep(0.0, 0.25, abs(fract(ang * 7.0 / 3.14159 + u_time * 0.03) - 0.5) * 2.0 - 0.5);
+        float reach = exp(-max(d - R, 0.0) * 1.9) * step(R, d);
+        col += mix(u_sunB, u_sunA, clamp(d * 1.4, 0.0, 1.0)) * wedge * reach * (0.20 + 0.16 * u_bass + 0.2 * u_mood2.z);
+        float yo = -c.y / R; // 0 at the horizon, 1 at the top of the disc
+        vec3 dc = mix(u_sunB, u_sunA, clamp(yo, 0.0, 1.0));
+        float bars = yo > 0.5 ? 1.0 : step(0.14 + 0.5 * (0.5 - yo), fract(yo * 8.0 + u_time * 0.18));
+        col += u_sunB * 0.26 * exp(-max(d - R, 0.0) * 9.0) * (1.0 + 0.6 * u_bass);
+        col = mix(col, dc * 0.72, smoothstep(R, R - 0.004, d) * bars);
     } else if (sc > 12.5) {
         // comet: a striped head with a long tail of light streaming back across the sky. Scan
         // bars flow down the tail and the kick brightens it.
@@ -2199,6 +2195,13 @@ pub struct Renderer {
     pub view: View,
     // camera / projection
     cam_s: Vec2,
+    /// Where the arena should sit, as an offset from the middle of the screen in screen
+    /// fractions, and how far the view is pulled back (the codex shows the arena beside its
+    /// lists). `shift_s` / `zoom_s` ease toward them.
+    pub show_shift: Vec2,
+    pub show_zoom: f32,
+    shift_s: Vec2,
+    zoom_s: f32,
     cam: Vec2,
     // music state (smoothed + history)
     clock: f32,
@@ -2367,6 +2370,10 @@ impl Renderer {
             time: 0.0,
             view: View { sw: screen_width(), sh: screen_height(), scale: 1.0, center: Vec2::ZERO },
             cam_s: Vec2::ZERO,
+            show_shift: Vec2::ZERO,
+            show_zoom: 1.0,
+            shift_s: Vec2::ZERO,
+            zoom_s: 1.0,
             cam: Vec2::ZERO,
             clock: 0.0,
             spec_s: [0.0; N_SPEC],
@@ -2465,7 +2472,12 @@ impl Renderer {
         let shake = vec2((t * 1.3).sin() + (t * 2.9).cos(), (t * 1.7).cos() + (t * 3.1).sin()) * sh_amp * 0.5;
         // music pulse: kick punch-in, bass breathing, build-up creep-in, drop snap-out
         let zoom = 1.0 + self.fx * (KICK_ZOOM * self.kick * self.glob() + BASS_ZOOM * self.bass_b + TENSION_ZOOM * self.tension - DROP_ZOOM * self.drop);
-        self.view = View { sw, sh, scale: scale * zoom, center: self.cam_s + shake };
+        let k = 1.0 - (-dt * 5.0).exp();
+        self.shift_s += (self.show_shift - self.shift_s) * k;
+        self.zoom_s += (self.show_zoom - self.zoom_s) * k;
+        let scale = scale * zoom * self.zoom_s;
+        let off = vec2(self.shift_s.x * sw, self.shift_s.y * sh) / scale;
+        self.view = View { sw, sh, scale, center: self.cam_s + shake - off };
         self.view
     }
 
@@ -5280,6 +5292,43 @@ impl Renderer {
     #[allow(dead_code)]
     pub fn draw_panel(&self, x: f32, y: f32, w: f32, h: f32, u: f32) {
         crate::ui::panel(x, y, w, h, u);
+    }
+}
+
+impl Renderer {
+    /// An enemy's wireframe, turning, drawn straight to the screen (the codex's lists and card).
+    pub fn draw_kind_icon(&self, kind: EnemyKind, c: Vec2, size: f32, col: Color) {
+        let m = Mat3::from_rotation_z(self.time * 0.7) * Mat3::from_rotation_x(0.9 + 0.3 * (self.time * 0.5).sin()) * Mat3::from_rotation_y(self.time * 0.9);
+        let th = (size * 0.07).max(1.5);
+        for ed in self.kinds[kind_index(kind)].iter() {
+            let (a, b) = (m * (ed[0] * size), m * (ed[1] * size));
+            let depth = ((a.z + b.z) * 0.5 / size).clamp(-1.0, 1.0) * 0.5 + 0.5;
+            draw_line(c.x + a.x, c.y + a.y - a.z * 0.25, c.x + b.x, c.y + b.y - b.z * 0.25, th, alpha(col, 0.4 + 0.6 * depth));
+        }
+    }
+
+    /// A Heart pulse as a diagram: the Heart, the player below it, and where the bullets go.
+    /// They breathe outward so the shape reads as something that moves.
+    pub fn draw_pattern_icon(&self, pattern: Pattern, c: Vec2, r: f32, col: Color, col2: Color) {
+        let count = match pattern {
+            Pattern::Burst => 5,
+            Pattern::Fan | Pattern::Sweep => 7,
+            Pattern::Pincer => 8,
+            Pattern::Comb => 15,
+            _ => 14,
+        };
+        let top = c + vec2(0.0, -r * 0.55);
+        let ph = (self.time * 0.6).fract();
+        draw_circle_lines(top.x, top.y, r * 0.16, (r * 0.05).max(1.2), col2);
+        let dot = (r * 0.065).max(1.5);
+        pulse_dirs(pattern, PI * 0.5, 0.0, count, |ang, sp| {
+            let reach = r * (0.32 + 0.85 * ph) * sp.clamp(0.4, 1.6);
+            let p = top + dir(ang) * reach;
+            draw_circle(p.x, p.y, dot, alpha(col, 1.0 - 0.6 * ph));
+        });
+        // the player
+        let pp = c + vec2(0.0, r * 0.85);
+        draw_triangle(pp + vec2(0.0, -r * 0.14), pp + vec2(-r * 0.11, r * 0.09), pp + vec2(r * 0.11, r * 0.09), WHITE);
     }
 }
 

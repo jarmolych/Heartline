@@ -1071,8 +1071,8 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
 /// Backdrops: 0 sunset (striped sun), 1 moonrise (full moon), 2 ocean dusk (sun in the sea),
 /// 3 crescent (a striped crescent moon with a star), 4 nebula, 5 ringed planet, 6 black hole,
 /// 7 binary sunset, 8 aurora, 9 tide (ranks of waves over the horizon), 10 prism (a striped
-/// triangle with rays), 11 signal (a core sending rings across the sky), 12 gate (a tall striped
-/// arch of light), 13 comet (a striped head with a streaming tail).
+/// triangle with rays), 11 signal (a core sending rings across the sky), 12 rising sun (half a
+/// disc on the horizon throwing rays), 13 comet (a striped head with a streaming tail).
 pub const N_SCENES: u8 = 14;
 /// Weather: 0 none, 1 rain of lines (pulses with the hats), 2 rising motes, 3 a veil of aurora,
 /// 4 snow, 5 storm (rain, cloud, a bolt on the kick), 6 mist on the horizon, 7 wind streaks,

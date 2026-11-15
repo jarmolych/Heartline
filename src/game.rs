@@ -771,6 +771,8 @@ pub struct World {
     pub feat: Feat,
     pub rng: Rng,
     pub no_fail: bool,
+    /// The codex's showcase: every attack and enemy it is sent appears, whatever the pressure.
+    pub demo: bool,
     pub diff: f32,
     pub ended: bool,
     pub dead: bool,
@@ -916,6 +918,7 @@ impl World {
             feat: Feat::default(),
             rng: Rng::new(0x51AB_C0DE),
             no_fail,
+            demo: false,
             diff,
             ended: false,
             dead: false,
@@ -966,6 +969,9 @@ impl World {
 
     /// Current difficulty multiplier applied to the planned level (about 0.2 .. 1.3).
     pub fn pressure(&self) -> f32 {
+        if self.demo {
+            return 1.0;
+        }
         let (r0, secs) = RAMP[(self.song_idx as usize).min(RAMP.len() - 1)];
         // Harder tiers start nearer full pressure and get there sooner.
         let h = hardness(self.diff);
@@ -1285,7 +1291,25 @@ impl World {
 
     /// The pressure at which a mechanic with base threshold `p` unlocks on this difficulty.
     fn gate(&self, p: f32) -> f32 {
+        if self.demo {
+            return 0.0;
+        }
         p * (1.0 - 0.5 * hardness(self.diff))
+    }
+
+    /// Set the Heart up for the codex: one long phase of `kind`. With `finale` it is the last
+    /// of three, so the finale's echoes play; with `charge_soon` the charge appears at once.
+    pub fn demo_setup(&mut self, kind: SectionKind, finale: bool, charge_soon: bool) {
+        if finale {
+            self.set_phases(&[(0.0, 1.0, SectionKind::Calm), (1.0, 2.0, SectionKind::Normal), (2.0, 1.0e6, kind)]);
+            self.enter_phase(2);
+        } else {
+            self.set_phases(&[(0.0, 1.0e6, kind)]);
+            self.enter_phase(0);
+        }
+        if charge_soon {
+            self.fork_cd = 1.5;
+        }
     }
 
     /// Reset per-song state; player upgrades, HP and score carry over.
