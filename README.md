@@ -11,8 +11,11 @@ Run `heartline.exe`. The menu plays music straight away: your **music library** 
 change the track, and the backdrop changes with it. Hover anything for a tooltip.
 
 - **PLAY** opens the run setup:
-  - **ENDLESS RUN** (this track, then the library keeps coming), **SINGLE TRACK**, or
-    **DAILY SEED** (an endless run on today's seed).
+  - **Mode:** ENDLESS (this track, then the library keeps coming), SINGLE, DAILY (today's seed),
+    DROP RUSH (every track cut down to its biggest section) or DODGE (no gun: score by slipping
+    close past bullets and staying alive).
+  - **Mutators:** optional rules (ALLEGRO, FORTE, SWARM, NO MERCY, GLASS). Each one, and each
+    harder tier, multiplies your score. Your best score per track, tier and mode is shown here.
   - **Difficulty**: seven tiers from LULLABY (no-fail) to FLATLINE (one life). Hover a tile to
     read what it does before choosing it.
   - **PLAY FILES / PLAY FOLDER** (or drop files, folders or playlists on the window), and
@@ -55,6 +58,7 @@ How it plays:
 | A drop | shockwave ring with gaps + an elite |
 | A calm part | upgrade orbs, heals |
 | Chimes, bells, plucks | wisps drift in from where the note sits in pitch |
+| A flourish the song rarely plays | "ear candy": a comet that trails shards, a keypad of shards, or a golden sprite to catch |
 | Silence / loading | the arena relaxes into the synthwave landscape until the music returns |
 
 - **The song's layers drive the level.** Beat, bass, snare, hats, lead and chimes are each tied to
@@ -64,6 +68,10 @@ How it plays:
   shield nodes. VALVE (groove): it opens for the first half of every bar. SPLIT (surge): break
   the lit core, then the next. OVERDRIVE (drop): exposed, extra damage. Beat a phase before its
   section ends and you get **purgatory**: a breather with a clock where everything is shootable.
+- **The Heart moves.** From PULSE up it relocates every few bars: its destination is ringed for
+  a beat before it glides there, and it holds its fire on the way.
+- **Bullets arrive on the beat.** Every pulse is timed to cross the ticked ring around the Heart
+  on a beat. Passing close to a bullet without being hit is a graze: score and combo.
 - **Rewards are graded.** Calm sections, purgatory and a cleared track grade how you did since
   the last reward (C to S). Better grades offer more choices and rare upgrades.
 - **Every song after the first is a depth** that adds one run modifier (shown in red).

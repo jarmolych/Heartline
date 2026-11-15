@@ -45,12 +45,22 @@ merging the last one brings everything:
 17. `chore/trim-agents` — four agents removed, self-check commands in `CLAUDE.md`
 18. `docs/playtest-3-t4` — `docs/plans/0.4-playtest-3.md` and this file
 
+19. `art/sky-polish` — sky rework in the sun's style, radio masts, city, rain, tide sky
+20. `feat/heart-moves` — the Heart relocates on bar lines
+21. `feat/beat-sync-graze` — pulses timed to the beat ring, graze scoring
+22. `feat/enemies-items` — Metronome and Cymbal enemies, six new upgrades
+23. `feat/mutators-modes-scores` — mutators, score multipliers, best scores, DROP RUSH, DODGE
+24. `art/chime-stars` — chimes light stars in the sky
+25. `docs/depth-t5` — plan progress, README and this file
+
 The third playtest (2026-11-15) and what was done about it are in
-`docs/plans/0.4-playtest-3.md`.
+`docs/plans/0.4-playtest-3.md`. The depth pass that followed (every area of the game, planned
+and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "Known weak
+spots" first.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T4-win-x64` (built from branch 18).
+**Test build:** `#UserTesting\Heartline-0.3.0-T5-win-x64` (built from branch 25).
 
-**Verified by machine only:** 37 unit tests, `--sim` balance runs, screenshots of the menu
+**Verified by machine only:** 38 unit tests, `--sim` balance runs, screenshots of the menu
 screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any
 of it feels or sounds, mouse hover tooltips and slider dragging, the firewall button (it was
 never run), a two-PC Rally match, live-mode pause with real audio.
@@ -61,7 +71,7 @@ Boss rush mode; per-mood rim and Heart shapes; live mode on the new generator an
 capture (`docs/plans/live-audio.md`, needs the player's answers to its section 6).
 
 Balance (`--sim`, 6 Straftat songs, 120 ms bot, hits per minute, LULLABY to FLATLINE):
-2.1 / 2.0 / 3.3 / 5.0 / 5.8 / 6.5 / 8.3 (after the 0.4 progression changes).
+about 2.0 / 2.8 / 3.7 / 4.2 / 5.2 / 6.2 / 7.8 (after the 0.5 depth pass).
 
 ## What the player said (2026-11-14 playtest of 0.1) — the brief for 0.2
 - Dies within ~30 s on any song; difficulty should NOT depend on the song (slow songs were much
@@ -197,13 +207,16 @@ Build / run / test:
   CRLF file to LF; use the Edit tool or `perl -pi`, then check with `file`.
 
 ## Source map
-`main.rs` app flow / menu / jukebox / settings / CLI · `ui.rs` menu widgets, icons, tooltips · `analysis.rs` DSP (offline +
+`main.rs` app flow / menu / jukebox / settings / best scores / CLI · `ui.rs` menu widgets, icons, tooltips · `analysis.rs` DSP (offline +
 `StreamAnalyzer`) · `level.rs` events + `generate` + `LiveGen` · `game.rs` simulation ·
 `render.rs` shaders / drawing / HUD / UI widgets · `engine.rs` audio thread (playback, crossfade,
 SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia · `tools.rs` CLI
 tools, balance simulator, bot · `rng.rs` PRNG.
 
 ## Session Log
+- 2026-11-15 — Depth pass (`docs/plans/0.5-depth.md`): sky rework, moving Heart, beat-timed
+  pulses and graze, two enemies, six upgrades, mutators, best scores, DROP RUSH and DODGE.
+  38 unit tests pass; shipped `Heartline-0.3.0-T5`.
 - 2026-11-15 — Third playtest (`docs/plans/0.4-playtest-3.md`): gun sync, progression, rage and
   encore, ear candy, rebuilt skies and transitions, item and Heart looks, agent roster trimmed.
   37 unit tests pass; shipped `Heartline-0.3.0-T4`.
