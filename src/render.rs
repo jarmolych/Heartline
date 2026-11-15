@@ -2348,8 +2348,11 @@ impl Renderer {
             let outer = k == 0 || k == 3;
             let (a, _) = proj(x, 0.0, 0.0);
             let (b, _) = proj(x, 1.0, 0.0);
-            let c = if outer { pal.primary } else { pal.grid };
-            seg(a, b, if outer { 3.5 } else { 2.0 } * px, alpha(c, 0.9 + 0.1 * w.beat_pulse), alpha(c, 0.12));
+            // in a surge or a drop the road's edges burn in the accent colour and pulse harder
+            let hot = r.hot();
+            let c = if outer { if hot { mixc(pal.accent, pal.danger, 0.5 + 0.5 * (self.time * 6.0).sin()) } else { pal.primary } } else { pal.grid };
+            let wd = if outer { if hot { 5.0 + 3.0 * w.beat_pulse } else { 3.5 } } else { 2.0 };
+            seg(a, b, wd * px, alpha(c, 0.9 + 0.1 * w.beat_pulse), alpha(c, if hot && outer { 0.4 } else { 0.12 }));
         }
         // beat lines rolling toward the player
         let i0 = r.beats.partition_point(|&b| b < r.t);
