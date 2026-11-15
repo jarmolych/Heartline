@@ -183,6 +183,9 @@ const LEVEL_PRESSURE: f32 = 0.02;
 /// Extra pressure per rage step (each time a Heart phase is broken early in this song).
 const RAGE_PRESSURE: f32 = 0.10;
 const RAGE_MAX: u32 = 5;
+/// Live audio: seconds of play a phase is sized for, out of a Heart sized for this many.
+const LIVE_PHASE_SECS: f32 = 30.0;
+pub const LIVE_HEART_SECS: f32 = 210.0;
 /// Purgatory lasts this long at most; if the section is still going the Heart returns.
 const PURGATORY_SECS: f32 = 9.0;
 /// How much of the player's measured damage rate the Heart's return and its later phases are
@@ -771,6 +774,9 @@ pub struct World {
     /// Shot times of the current song per TEMPO level (`level::gun_track`). Empty when the song
     /// is not known ahead of time (live audio, drift): the gun then locks to a beat subdivision.
     pub gun: Vec<Vec<f32>>,
+    /// Live audio: the song is not known ahead, so each section the generator announces becomes
+    /// a Heart phase on the spot (`push_live_phase`).
+    pub live_phases: bool,
     /// DODGE mode: no gun, the Heart cannot be hurt, grazes score triple.
     pub pacifist: bool,
     /// Mutators chosen in run setup (`MOD_*` bits); depth adds more on top.
@@ -893,6 +899,7 @@ impl World {
             last_hit_age: 0.0,
             mercy: 1.0,
             gun: Vec::new(),
+            live_phases: false,
             pacifist: false,
             base_mods: 0,
             score_mult: 1.0,
@@ -1021,7 +1028,8 @@ impl World {
     /// Purgatory ran out while the section is still playing: the Heart comes back, sized for
     /// the damage the player has just shown they can do.
     fn encore(&mut self) {
-        let bonus = (self.phase_dps * self.phase_left() * RAGE_KEEP_UP).max(self.heart.max_hp * 0.03);
+        let left = if self.live_phases { self.phase_left().max(12.0) } else { self.phase_left() };
+        let bonus = (self.phase_dps * left * RAGE_KEEP_UP).max(self.heart.max_hp * 0.03);
         self.heart.hp += bonus;
         self.heart.max_hp += bonus;
         self.purgatory = false;
@@ -1067,6 +1075,23 @@ impl World {
         }
     }
 
+    /// Live audio: start a Heart phase for the section that has just begun. It is sized for
+    /// `LIVE_PHASE_SECS` of play; if the music stays put longer the Heart returns after purgatory.
+    fn push_live_phase(&mut self, kind: SectionKind) {
+        if self.heart.broken {
+            return;
+        }
+        let quota = self.heart.max_hp * LIVE_PHASE_SECS / LIVE_HEART_SECS * HeartForm::of(kind).yield_();
+        let floor = (self.heart.hp - quota).max(0.0);
+        self.phases.push(HeartPhase { t0: self.t, t1: self.t + LIVE_PHASE_SECS, kind, floor });
+        self.enter_phase(self.phases.len() - 1);
+        // A new sky every third section: live audio has no song to give it an identity.
+        if self.phases.len() % 3 == 0 {
+            self.mood.scene = (self.mood.scene + 1 + self.rng.below(3) as u8) % N_SCENES;
+            self.mood.prop = self.rng.below(N_PROPS as usize) as u8;
+        }
+    }
+
     /// The point a shot should go to hurt the Heart from `from`, if anything can be hurt now.
     pub fn heart_target(&self, from: Vec2) -> Option<Vec2> {
         if self.heart.broken || self.purgatory || self.pacifist {
@@ -1096,7 +1121,9 @@ impl World {
             self.heart.hp = floor;
         }
         if self.heart.hp <= floor + 1e-3 {
-            if self.phases.is_empty() || self.phase_i + 1 >= self.phases.len() {
+            // Live phases are made as the music goes, so "the last one so far" is not the end.
+            let more_to_come = self.live_phases && floor > 0.0;
+            if self.phases.is_empty() || (self.phase_i + 1 >= self.phases.len() && !more_to_come) {
                 self.break_heart();
             } else {
                 self.enter_purgatory();
@@ -1405,7 +1432,11 @@ impl World {
                 self.palette = palette;
                 self.section_banner = 2.4;
                 self.heart.reform = 1.0;
-                self.enter_phase(idx as usize);
+                if self.live_phases {
+                    self.push_live_phase(kind);
+                } else {
+                    self.enter_phase(idx as usize);
+                }
                 self.groove_amt = match kind {
                     SectionKind::Calm => 0.15,
                     SectionKind::Normal => 0.28,
@@ -2031,7 +2062,7 @@ impl World {
             n.flash = (n.flash - dt * 7.0).max(0.0);
         }
         self.purg += ((self.purgatory as u8 as f32) - self.purg) * (dt * 3.0).min(1.0);
-        if self.purgatory && !self.heart.broken && self.t >= self.purg_until && self.phase_left() > 4.0 {
+        if self.purgatory && !self.heart.broken && self.t >= self.purg_until && (self.phase_left() > 4.0 || self.live_phases) {
             self.encore();
         }
         self.window.peak_mult = self.window.peak_mult.max(self.mult());

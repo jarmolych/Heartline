@@ -1007,7 +1007,8 @@ impl App {
         self.song = None;
         self.world = World::new(self.diff(), self.diff == 0);
         self.apply_diff_rules();
-        self.world.begin_song(210.0, 0, 0xC0FFEE);
+        self.world.begin_song(game::LIVE_HEART_SECS, 0, 0xC0FFEE);
+        self.world.live_phases = true;
         let lookahead = if delayed { (delay - 0.25).max(0.0) } else { 0.0 };
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

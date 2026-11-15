@@ -1432,7 +1432,7 @@ impl LiveGen {
                         };
                         // Only delayed (look-ahead) live mode knows a kick early enough to announce it.
                         let lead = if self.lookahead >= 0.5 { pulse_lead(self.beat_len, self.diff) } else { 0.0 };
-                        let speed = pulse_speed(pattern, i, self.kind, self.diff);
+                        let speed = beat_speed(pulse_speed(pattern, i, self.kind, self.diff), self.beat_len);
                         out.push(LevelEvent { t: o.t, lead, ev: Ev::Pulse { pattern, count, speed, rot, soft } });
                     }
                 }
