@@ -1185,20 +1185,16 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
         col = mix(col, suncol * 0.68, smoothstep(r, r - 0.003, dd) * mask);
         col += u_sunB * 0.16 * exp(-dd * dd * 12.0) * (1.0 + 0.6 * u_bass);
     } else if (sc < 1.5) {
-        // moonrise: a great full moon with seas and craters, its lower half cut by cloud bars
+        // moonrise: a great pale disc in the same language as the sun: a flat gradient, scan
+        // bars drifting through its lower half, a soft edge and a halo that breathes with the bass
         float R = r * 1.08;
-        vec2 n = q / R;
-        float limb = sqrt(max(1.0 - dot(n, n), 0.0));
-        float seas = fbm(n * 2.4 + 5.0);
-        float crat = fbm(n * 8.0 + 1.0);
-        vec3 mc = mix(vec3(0.50, 0.58, 0.80), vec3(0.96, 0.98, 1.0), smoothstep(0.36, 0.60, seas));
-        mc *= (0.82 + 0.18 * crat) * (0.45 + 0.55 * limb);
         float ym = q.y / R;
-        float bars = ym < 0.2 ? 1.0 : step(0.14 + 0.55 * (ym - 0.2), fract(ym * 6.0 - u_time * 0.12));
-        float disc = smoothstep(R, R - 0.003, dd);
-        col = mix(col, mc * 0.95, disc * bars);
+        vec3 mc = mix(vec3(0.97, 0.99, 1.0), vec3(0.52, 0.66, 1.0), clamp(ym * 0.6 + 0.5, 0.0, 1.0));
+        float bars = ym < -0.05 ? 1.0 : step(0.12 + 0.5 * (ym + 0.05), fract(ym * 6.0 - u_time * 0.18));
+        float disc = smoothstep(R, R - 0.004, dd);
         float outm = max(dd - R, 0.0);
-        col += vec3(0.40, 0.58, 1.0) * (0.34 * exp(-outm * 9.0) + 0.12 * exp(-outm * 2.5)) * (1.0 - disc) * (1.0 + 0.3 * u_bass);
+        col += vec3(0.40, 0.58, 1.0) * (0.36 * exp(-outm * 9.0) + 0.14 * exp(-outm * 2.5)) * (1.0 + 0.6 * u_bass);
+        col = mix(col, mc * 0.95, disc * bars);
         col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 40.0, 6.0 * u_res.y / 1080.0, 0.08) * (1.0 - t) * 0.7 * (1.0 - disc);
     } else if (sc < 2.5) {
         // ocean dusk: a huge sun going into the sea, long clouds lit from below
@@ -1260,38 +1256,33 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
             col += vec3(0.85, 0.92, 1.0) * (fl * 0.8 + exp(-dot(s2, s2) * 4000.0) * 1.5) * tw;
         }
     } else if (sc < 5.5) {
-        // ringed planet: a sunset-coloured giant with three clean rings, lit from the upper left
-        float R = r * 1.0;
+        // ringed planet: a flat gradient disc with scan bars like the sun's, inside three glowing
+        // rings that brighten on the kick
+        float R = r * 0.95;
         vec2 c = q - vec2(0.0, -0.02);
         float d = length(c);
-        vec2 n = c / R;
-        float z = sqrt(max(1.0 - dot(n, n), 0.0));
-        float lit = smoothstep(-0.2, 0.8, dot(vec3(n, z), normalize(vec3(-0.5, -0.55, 0.65))));
-        float lat = n.y + 0.05 * sin(n.x * 5.0 + u_time * 0.05);
-        float bands = smoothstep(0.2, 0.8, 0.5 + 0.5 * sin(lat * 13.0));
-        vec3 pc = mix(vec3(1.0, 0.80, 0.42), vec3(0.98, 0.36, 0.52), clamp(n.y * 0.6 + 0.5, 0.0, 1.0)) * (0.80 + 0.20 * bands);
-        pc = mix(pc, vec3(0.55, 0.22, 0.60), 0.35 * smoothstep(0.55, 1.0, 0.5 + 0.5 * sin(lat * 5.0 + 2.0)));
-        pc *= 0.05 + 0.95 * lit;
-        pc += vec3(1.0, 0.6, 0.8) * pow(1.0 - z, 2.5) * 0.55 * lit;
+        float yp = c.y / R;
+        vec3 pc = mix(vec3(1.0, 0.84, 0.46), vec3(0.96, 0.30, 0.62), clamp(yp * 0.6 + 0.5, 0.0, 1.0));
+        float bars = yp < 0.0 ? 1.0 : step(0.1 + 0.5 * yp, fract(yp * 5.0 - u_time * 0.22));
         vec2 rq = vec2(c.x * 0.94 - c.y * 0.34, (c.y * 0.94 + c.x * 0.34) * 3.8) / R;
         float rl = length(rq);
         float aa = 12.0 * px / R;
-        float b1 = smoothstep(1.32, 1.32 + aa, rl) * smoothstep(1.62, 1.62 - aa, rl);
-        float b2 = smoothstep(1.68, 1.68 + aa, rl) * smoothstep(2.02, 2.02 - aa, rl);
-        float b3 = smoothstep(2.10, 2.10 + aa, rl) * smoothstep(2.24, 2.24 - aa, rl);
-        float ring = b1 * 0.7 + b2 * 1.0 + b3 * 0.45;
-        vec3 rc = mix(vec3(1.0, 0.84, 0.62), vec3(0.85, 0.55, 0.95), smoothstep(1.3, 2.2, rl));
-        float disc = smoothstep(R + px, R - px, d);
+        float b1 = smoothstep(1.34, 1.34 + aa, rl) * smoothstep(1.60, 1.60 - aa, rl);
+        float b2 = smoothstep(1.70, 1.70 + aa, rl) * smoothstep(2.00, 2.00 - aa, rl);
+        float b3 = smoothstep(2.12, 2.12 + aa, rl) * smoothstep(2.24, 2.24 - aa, rl);
+        float ring = b1 * 0.7 + b2 * 1.0 + b3 * 0.5;
+        // light runs round the rings
+        float run = 0.85 + 0.15 * sin(atan(rq.y, rq.x) * 2.0 - u_time * 0.8);
+        vec3 rc = mix(vec3(1.0, 0.86, 0.62), vec3(0.80, 0.50, 1.0), smoothstep(1.3, 2.25, rl)) * run * (0.85 + 0.6 * u_mood2.z);
+        float disc = smoothstep(R, R - 0.004, d);
         float front = step(0.0, rq.y);
-        // the planet's shadow falls on the far side of the rings, away from the light
-        float shad = (1.0 - front) * smoothstep(0.1, 0.7, rq.x) * smoothstep(1.2, 0.8, abs(c.y) / R);
         float outp = max(d - R, 0.0);
-        col += vec3(1.0, 0.45, 0.6) * 0.22 * exp(-outp * 9.0) * (1.0 - disc);
-        col = mix(col, rc * (0.85 - 0.7 * shad), ring * (1.0 - front) * (1.0 - disc) * 0.9);
-        col = mix(col, pc, disc);
-        // the near rings cross the face and lay a thin shadow on it
-        col *= 1.0 - 0.45 * disc * smoothstep(0.0, 0.25, rq.y) * (smoothstep(1.3, 1.5, length(rq - vec2(0.0, 0.28))) * smoothstep(2.3, 2.1, length(rq - vec2(0.0, 0.28))));
-        col = mix(col, rc, ring * front * 0.95);
+        col += vec3(1.0, 0.45, 0.65) * (0.26 * exp(-outp * 9.0) + 0.10 * exp(-outp * 2.5)) * (1.0 + 0.6 * u_bass);
+        col += rc * 0.10 * exp(-pow((rl - 1.8) / 0.55, 2.0)) * (1.0 - disc);
+        col = mix(col, rc * 0.8, ring * (1.0 - front) * (1.0 - disc) * 0.9);
+        col = mix(col, pc * 0.9, disc * bars);
+        col = mix(col, rc * 1.1, ring * front * 0.97);
+        col += rc * ring * 0.3 * (1.0 - disc * (1.0 - front));
     } else if (sc < 6.5) {
         // black hole: a clean shadow with a photon ring, lensed light around it and an accretion
         // disc crossing in front
@@ -1429,26 +1420,42 @@ vec3 skyProp(float pr, vec2 p, vec3 col, float off) {
         }
         col = mix(col, dark, sil * step(0.0, q.y));
     } else if (pr > 1.5 && pr < 2.5) {
-        // pyramids with a lit edge
+        // radio masts: glowing lattice towers; the beacons on top fire on the kick and a ring
+        // of signal leaves them
         for (int i = 0; i < 3; i++) {
             float fi = float(i);
-            float cx = -0.62 + fi * 0.55 + (fi == 1.0 ? 0.22 : 0.0);
-            float h = 0.16 - 0.035 * fi + (fi == 1.0 ? 0.07 : 0.0);
-            float hw = h * 1.25;
-            float inside = step(abs(q.x - cx) / hw + q.y / h, 1.0) * step(0.0, q.y);
-            vec3 face = q.x > cx ? dark * 1.4 : u_c1 * 0.8 + u_sunB * 0.14;
-            float courses = 0.9 + 0.1 * step(0.5, fract(q.y / h * 9.0));
-            col = mix(col, face * courses, inside);
-            float edge = smoothstep(0.004, 0.0, abs(abs(q.x - cx) / hw + q.y / h - 1.0) * h) * step(0.0, q.y);
-            col += u_sunA * edge * 0.35;
+            float cx = -0.66 + fi * 0.62 + (fi == 1.0 ? 0.20 : 0.0);
+            float h = 0.30 - 0.05 * fi + (fi == 1.0 ? 0.08 : 0.0);
+            float bw = h * 0.16;
+            vec2 top = vec2(cx, h);
+            float d = min(sdSeg(q, vec2(cx - bw, 0.0), top), sdSeg(q, vec2(cx + bw, 0.0), top));
+            for (int k = 0; k < 6; k++) {
+                float k0 = float(k) / 6.0;
+                float k1 = float(k + 1) / 6.0;
+                vec2 l0 = vec2(cx - bw * (1.0 - k0), h * k0);
+                vec2 r0 = vec2(cx + bw * (1.0 - k0), h * k0);
+                vec2 l1 = vec2(cx - bw * (1.0 - k1), h * k1);
+                vec2 r1 = vec2(cx + bw * (1.0 - k1), h * k1);
+                d = min(d, min(sdSeg(q, l0, r1), sdSeg(q, r0, l1)));
+                d = min(d, sdSeg(q, l0, r0));
+            }
+            d = min(d, sdSeg(q, top, top + vec2(0.0, h * 0.14)));
+            float vis = step(0.0, q.y);
+            col = mix(col, dark, smoothstep(0.004, 0.002, d) * vis);
+            col += mix(u_grid, u_sunB, 0.4) * (smoothstep(0.0022 + px, 0.0022 - px, d) * 0.55 + exp(-d * 260.0) * 0.12) * vis;
+            vec2 bp = q - (top + vec2(0.0, h * 0.14));
+            float bl = length(bp);
+            col += vec3(1.0, 0.22, 0.34) * (smoothstep(0.007, 0.002, bl) * (0.6 + 1.8 * u_mood2.z) + exp(-bl * 60.0) * 0.5 * u_mood2.z);
+            float sig = fract(u_time * 0.5 + fi * 0.33);
+            col += vec3(1.0, 0.3, 0.45) * smoothstep(0.004, 0.0, abs(bl - sig * 0.22)) * (1.0 - sig) * 0.35 * step(bp.y, 0.02 + bl);
         }
     } else if (pr > 2.5 && pr < 3.5) {
-        // city: a hazy far row and a dark near row of towers. Each tower fills part of its lot,
-        // some have a narrower crown or a mast; windows sit on a regular grid and the near row's
-        // lights swell with the hats, the mast beacons with the kick.
+        // city: a hazy far row and a near row of towers with a lit front and a dark side wall,
+        // outlined in light like the mountains. The windows work as a level meter: each tower's
+        // lit floors rise and fall with the bass, flare on the hats, and the masts blink on the kick.
         for (int layer = 0; layer < 2; layer++) {
             float fl = float(layer); // 0 = far, 1 = near
-            float cw = mix(0.085, 0.060, fl);
+            float cw = mix(0.085, 0.064, fl);
             float xx = q.x + fl * 0.031;
             float id = floor(xx / cw);
             float fx = fract(xx / cw);
@@ -1456,27 +1463,41 @@ vec3 skyProp(float pr, vec2 p, vec3 col, float off) {
             float h2 = hash(vec2(id, 2.3 + fl * 7.0));
             float town = 0.55 + 0.45 * cos(clamp(q.x * 1.4, -3.1, 3.1));
             float tall = (mix(0.17, 0.10, fl) + mix(0.15, 0.24, fl) * h1 * h1) * town;
-            float wid = 0.55 + 0.4 * h2;
+            float wid = 0.50 + 0.32 * h2;
             float lo = 0.5 - wid * 0.5;
             float hi = 0.5 + wid * 0.5;
+            float sidew = 0.13;                       // the side wall, as a share of the lot
             float ex = px / cw;
+            // front face
             float inx = smoothstep(lo - ex, lo + ex, fx) * smoothstep(hi + ex, hi - ex, fx);
-            float body = inx * smoothstep(tall + px, tall - px, q.y);
-            float cl = lo + wid * 0.25;
-            float ch = hi - wid * 0.25;
-            float crown = step(0.55, h2) * smoothstep(cl - ex, cl + ex, fx) * smoothstep(ch + ex, ch - ex, fx) * smoothstep(tall * 1.16 + px, tall * 1.16 - px, q.y);
-            float mast = step(0.8, h1) * smoothstep(0.0016 + px, 0.0016 - px, abs((fx - 0.5) * cw)) * step(q.y, tall * 1.42);
-            float silh = max(max(body, crown), mast) * step(0.0, q.y);
-            vec3 bc = mix(mix(u_c1, u_sunB, 0.3) * 0.5, dark, fl);
-            col = mix(col, bc, silh * mix(0.8, 1.0, fl));
+            float front = inx * smoothstep(tall + px, tall - px, q.y);
+            // side wall: to the right of the front, its roof line slanting back
+            float sx = (fx - hi) / sidew;
+            float sroof = tall - sx * 0.022;
+            float side = step(0.0, sx) * step(sx, 1.0) * smoothstep(sroof + px, sroof - px, q.y) * step(sx * 0.022, q.y + 0.022);
+            float mast = step(0.8, h1) * smoothstep(0.0016 + px, 0.0016 - px, abs((fx - 0.5) * cw)) * step(q.y, tall * 1.36) * step(tall, q.y);
+            float vis = step(0.0, q.y);
+            vec3 haze = mix(u_c1, u_sunB, 0.3) * 0.5;
+            vec3 fcol = mix(haze, mix(dark, u_c1 * 0.55, 0.35 + 0.4 * q.y / max(tall, 0.01)), fl);
+            vec3 scol2 = mix(haze * 0.8, dark * 0.6, fl);
+            col = mix(col, scol2, side * vis * mix(0.8, 1.0, fl));
+            col = mix(col, fcol, max(front, mast) * vis * mix(0.8, 1.0, fl));
+            // outline: roof and both edges of the front face glow
+            float de = min(min(abs(fx - lo), abs(fx - hi)) * cw, abs(q.y - tall));
+            float edge = smoothstep(0.0022 + px, 0.0022 - px, de) * step(q.y, tall + 0.003) * step(lo - 0.02, fx) * step(fx, hi + 0.02) * vis;
+            col += mix(u_grid, u_sunB, 0.5) * edge * mix(0.18, 0.55, fl);
+            // windows as a level meter
             float ncol = 3.0 + floor(h2 * 3.0);
             vec2 wv = vec2((fx - lo) / wid * ncol, q.y / 0.0135);
             vec2 wf = fract(wv);
             float wm = smoothstep(0.2, 0.28, wf.x) * smoothstep(0.8, 0.72, wf.x) * smoothstep(0.24, 0.34, wf.y) * smoothstep(0.72, 0.62, wf.y);
-            float won = step(0.5, hash(floor(wv) + vec2(id * 13.0, fl * 50.0)));
-            vec3 wc = mix(vec3(1.0, 0.82, 0.45), vec3(0.45, 0.9, 1.0), step(0.7, h2));
-            col += wc * body * wm * won * mix(0.10, 0.26 + 0.5 * u_mood2.y, fl);
-            float tip = smoothstep(0.005, 0.0015, length(vec2((fx - 0.5) * cw, q.y - tall * 1.42))) * step(0.8, h1) * fl;
+            float level = tall * (0.25 + 0.75 * clamp(u_bass * (0.6 + 0.8 * h1) + 0.18 * sin(u_time * (1.5 + h2 * 2.0) + id * 1.7), 0.0, 1.0));
+            float below = step(q.y, level);
+            float stray = step(0.82, hash(floor(wv) + vec2(id * 13.0, fl * 50.0)));
+            vec3 wc = mix(vec3(1.0, 0.82, 0.45), vec3(0.45, 0.9, 1.0), step(0.6, h2));
+            wc = mix(wc, vec3(1.0, 0.35, 0.6), smoothstep(0.7, 1.0, q.y / max(tall, 0.01)));
+            col += wc * front * wm * (below * (0.55 + 0.6 * u_mood2.y) + stray * 0.25) * mix(0.3, 1.0, fl);
+            float tip = smoothstep(0.005, 0.0015, length(vec2((fx - 0.5) * cw, q.y - tall * 1.36))) * step(0.8, h1) * fl;
             col += vec3(1.0, 0.2, 0.3) * tip * (0.5 + 1.6 * u_mood2.z);
         }
     } else if (pr > 3.5) {
