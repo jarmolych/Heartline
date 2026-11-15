@@ -108,6 +108,8 @@ pub enum EnemyKind {
     Elite,
     /// A light drifting enemy that appears on the song's chimes.
     Wisp,
+    /// Ear candy made visible: a harmless golden sprite worth catching.
+    Sprite,
 }
 
 impl EnemyKind {
@@ -120,6 +122,7 @@ impl EnemyKind {
             EnemyKind::Mini => 0.4,
             EnemyKind::Elite => 0.0,
             EnemyKind::Wisp => 0.3,
+            EnemyKind::Sprite => 0.0,
         }
     }
 }
@@ -194,6 +197,9 @@ pub enum Ev {
     Layers { armed: u8 },
     /// A chime was heard (cosmetic; wisps arrive as `Spawn`). `pitch` is 0..1.
     Chime { pitch: f32, strength: f32 },
+    /// Ear candy (`analysis::CandyKind as u8`): a run paints a trail of shards from `pitch` to
+    /// `pitch_end`, keypad tones lay out a keypad of shards, a one-off sound releases a sprite.
+    Candy { kind: u8, pitch: f32, pitch_end: f32, dur: f32 },
     End,
 }
 
@@ -979,6 +985,13 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         ev.push(laser_event(&mut rng, t, dur, laser_lead));
     }
     let _ = nsec;
+
+    // ---- ear candy: every piece gets its own moment, whatever the director armed ----
+    for c in &an.candy {
+        if c.t > grace && !an.in_silence(c.t) {
+            ev.push(LevelEvent { t: c.t, lead: 0.0, ev: Ev::Candy { kind: c.kind as u8, pitch: c.pitch, pitch_end: c.pitch_end, dur: c.dur } });
+        }
+    }
 
     // ---- chimes: a sparkle for every one, and a wisp where the director armed them ----
     let mut last_wisp = -10.0f32;

@@ -326,6 +326,17 @@ pub const MOD_FORTE: u8 = 2;
 pub const MOD_SWARM: u8 = 4;
 pub const MOD_NO_MERCY: u8 = 8;
 
+/// A run of notes drawn across the arena: a comet that leaves shards behind it.
+#[derive(Clone, Copy, Debug)]
+pub struct Painter {
+    pub t0: f32,
+    pub t1: f32,
+    pub from: Vec2,
+    pub to: Vec2,
+    pub pos: Vec2,
+    next_drop: f32,
+}
+
 pub struct Shot {
     /// Wall bounces left (RICOCHET).
     pub bounce: u8,
@@ -668,6 +679,10 @@ pub struct World {
     /// Shot times of the current song per TEMPO level (`level::gun_track`). Empty when the song
     /// is not known ahead of time (live audio, drift): the gun then locks to a beat subdivision.
     pub gun: Vec<Vec<f32>>,
+    /// Ear-candy comets in flight.
+    pub painters: Vec<Painter>,
+    /// 0..1 envelope kicked by every piece of ear candy (visual flourish).
+    pub candy: f32,
     /// The current song's look (set by the app; the renderer reads it).
     pub mood: Mood,
     /// The Heart's phases for this song (empty when the song is not known ahead of time).
@@ -779,6 +794,8 @@ impl World {
             last_hit_age: 0.0,
             mercy: 1.0,
             gun: Vec::new(),
+            painters: Vec::new(),
+            candy: 0.0,
             mood: Mood::default(),
             phases: Vec::new(),
             phase_i: 0,
@@ -1057,6 +1074,7 @@ impl World {
         self.section_banner = 0.0;
         self.player.fire_phase = 0;
         self.gun.clear();
+        self.painters.clear();
         self.armed = 0;
         if self.player.up(UpgradeId::Encore) > 0 {
             self.player.shield = true;
@@ -1239,6 +1257,39 @@ impl World {
                 self.chime_pitch = pitch;
                 let (x, y) = chime_point(pitch);
                 self.burst(vec2(x, y), 3, 120.0, C_ACCENT, 3.0);
+            }
+            Ev::Candy { kind, pitch, pitch_end, dur } => {
+                let (x, y) = chime_point(pitch);
+                let at = vec2(x, y);
+                self.candy = 1.0;
+                self.add_score(250.0);
+                self.snd(Sfx::Shield, 0.5, x);
+                self.burst(at, 18, 300.0, C_ACCENT, 4.0);
+                self.text(at + vec2(0.0, -46.0), "EAR CANDY", C_ACCENT, 22.0, 1.8);
+                match kind {
+                    // A run of notes: a comet crosses the arena and leaves a trail to collect.
+                    0 => {
+                        let (x2, y2) = chime_point(pitch_end);
+                        let mut to = vec2(x2, y2);
+                        if to.distance(at) < 500.0 {
+                            to = vec2(-at.x, HALF_H * 0.55);
+                        }
+                        let t1 = e.t + dur.max(0.9) + 0.8;
+                        self.painters.push(Painter { t0: e.t, t1, from: at, to, pos: at, next_drop: e.t });
+                    }
+                    // Keypad tones: a 3 x 4 keypad of shards.
+                    1 => {
+                        let c = vec2(x.clamp(-HALF_W + 120.0, HALF_W - 120.0), y.clamp(-HALF_H + 150.0, HALF_H - 150.0));
+                        for r in 0..4 {
+                            for k in 0..3 {
+                                let p = c + vec2((k as f32 - 1.0) * 44.0, (r as f32 - 1.5) * 44.0);
+                                self.shards.push(Shard { pos: p, vel: Vec2::ZERO, life: 9.0, value: 1, heal: false, age: 0.0 });
+                            }
+                        }
+                    }
+                    // A one-off sound: a sprite to catch before it leaves.
+                    _ => self.make_enemy(EnemyKind::Sprite, at),
+                }
             }
             Ev::Orbs => self.spawn_reward(14.0),
             Ev::Heal { x, y } => {
@@ -1603,10 +1654,11 @@ impl World {
             EnemyKind::Splitter => (5.0, 22.0),
             EnemyKind::Mini => (1.0, 9.0),
             EnemyKind::Wisp => (1.0, 11.0),
+            EnemyKind::Sprite => (3.0, 16.0),
             EnemyKind::Elite => (22.0 + 8.0 * self.diff + 6.0 * self.song_idx as f32, 34.0),
         };
         // Ordinary enemies toughen with depth (elites already scale).
-        let hp = if matches!(kind, EnemyKind::Elite | EnemyKind::Wisp | EnemyKind::Mini) { hp } else { hp * (1.0 + 0.3 * self.song_idx as f32) };
+        let hp = if matches!(kind, EnemyKind::Elite | EnemyKind::Wisp | EnemyKind::Mini | EnemyKind::Sprite) { hp } else { hp * (1.0 + 0.3 * self.song_idx as f32) };
         let mut vel = Vec2::ZERO;
         let mut state = 0.0;
         match kind {
@@ -1615,7 +1667,7 @@ impl World {
                 vel = d * 640.0;
             }
             EnemyKind::Orbiter => state = pos.y.atan2(pos.x / 1.1),
-            EnemyKind::Wisp => state = self.rng.angle(),
+            EnemyKind::Wisp | EnemyKind::Sprite => state = self.rng.angle(),
             _ => {}
         }
         self.enemies.push(Enemy { kind, pos, vel, hp, max_hp: hp, r, rot: 0.0, age: 0.0, flash: 0.0, state });
@@ -1629,6 +1681,7 @@ impl World {
             EnemyKind::Splitter => (150.0, 3, C_SECONDARY),
             EnemyKind::Mini => (20.0, 1, C_SECONDARY),
             EnemyKind::Wisp => (30.0, 2, C_ACCENT),
+            EnemyKind::Sprite => (500.0, 7, C_ACCENT),
             EnemyKind::Elite => (600.0, 9, C_DANGER),
         };
         self.add_score(score);
@@ -1639,6 +1692,10 @@ impl World {
         self.burst(pos, 10 + shards * 4, 360.0, col, 5.0);
         if kind == EnemyKind::Elite {
             self.shake = self.shake.max(0.5);
+        }
+        if kind == EnemyKind::Sprite {
+            self.drop_shards(pos, 1, true);
+            self.text(pos + vec2(0.0, -40.0), "CAUGHT IT", C_ACCENT, 26.0, 1.6);
         }
         if kind == EnemyKind::Splitter {
             for k in 0..3 {
@@ -1667,6 +1724,29 @@ impl World {
         }
         self.mercy = (self.mercy + dt * MERCY_RECOVER).min(1.0);
         self.chime = (self.chime - dt * 3.0).max(0.0);
+        self.candy = (self.candy - dt * 0.7).max(0.0);
+        // Ear-candy comets: sweep from one side to the other on an arc, dropping shards.
+        let mut drops: Vec<Vec2> = Vec::new();
+        for p in self.painters.iter_mut() {
+            let k = ((t - p.t0) / (p.t1 - p.t0).max(0.1)).clamp(0.0, 1.0);
+            let mid = (p.from + p.to) * 0.5 + vec2(0.0, 260.0);
+            let a = p.from.lerp(mid, k);
+            let b = mid.lerp(p.to, k);
+            p.pos = a.lerp(b, k);
+            if t >= p.next_drop && k < 1.0 {
+                p.next_drop = t + 0.11;
+                drops.push(p.pos);
+            }
+        }
+        self.painters.retain(|p| t < p.t1);
+        for d in drops {
+            if d.length() > HEART_R + 30.0 {
+                self.shards.push(Shard { pos: d, vel: Vec2::ZERO, life: 8.0, value: 1, heal: false, age: 0.0 });
+            }
+            if self.parts.len() < MAX_PARTS {
+                self.parts.push(Particle { pos: d, vel: Vec2::ZERO, life: 0.5, max: 0.5, size: 12.0, col: C_ACCENT, rot: 0.0 });
+            }
+        }
         for (k, g) in self.layer_glow.iter_mut().enumerate() {
             let want = if self.armed >> k & 1 == 1 { 1.0 } else { 0.0 };
             *g += (want - *g) * (dt * 4.0).min(1.0);
@@ -2111,6 +2191,19 @@ impl World {
                         en.hp = -1.0; // left the arena
                     }
                 }
+                EnemyKind::Sprite => {
+                    // Loops around the arena on a figure of eight, then leaves.
+                    let a = en.state + en.age * 1.5;
+                    let target = vec2(a.cos() * HALF_W * 0.62, (2.0 * a).sin() * HALF_H * 0.5);
+                    en.pos += (target - en.pos) * (2.5 * dt).min(1.0);
+                    en.rot += dt * 5.0;
+                    if (en.age * 30.0) as i32 % 2 == 0 {
+                        trails.push(en.pos);
+                    }
+                    if en.age > 8.0 {
+                        en.hp = -1.0;
+                    }
+                }
                 EnemyKind::Wisp => {
                     // Drifts at the player on a weaving path and fades out if it is ignored.
                     let side = vec2(-to_p.y, to_p.x) / dist;
@@ -2128,7 +2221,7 @@ impl World {
                     en.rot += dt * 1.5;
                 }
             }
-            if active && dist < en.r + PLAYER_HIT_R + 4.0 {
+            if active && en.kind != EnemyKind::Sprite && dist < en.r + PLAYER_HIT_R + 4.0 {
                 touched = true;
                 if matches!(en.kind, EnemyKind::Mini | EnemyKind::Darter | EnemyKind::Wisp) {
                     en.hp = -1.0;

@@ -837,7 +837,7 @@ fn kind_index(k: EnemyKind) -> usize {
         EnemyKind::Darter | EnemyKind::Wisp => 1,
         EnemyKind::Orbiter => 2,
         EnemyKind::Splitter => 3,
-        EnemyKind::Elite => 4,
+        EnemyKind::Elite | EnemyKind::Sprite => 4,
     }
 }
 
@@ -2725,6 +2725,14 @@ impl Renderer {
                 disc(s.pos, 2.5, 6, alpha(WHITE, fade));
             }
         }
+        // Ear-candy comets: a bright head with a ring, on the floor plane.
+        for p in &w.painters {
+            let tw = 0.7 + 0.3 * (self.time * 18.0).sin();
+            disc2(p.pos, 34.0, 18, alpha(pal.accent, 0.35 * tw), alpha(pal.accent, 0.0));
+            disc(p.pos, 7.0, 12, WHITE);
+            poly_lines(p.pos, 4, 16.0, self.time * 6.0, 2.5, pal.accent);
+            poly_lines(p.pos, 4, 24.0, -self.time * 4.0, 1.5, alpha(WHITE, 0.7));
+        }
         for o in &w.orbs {
             let fade = (o.life / 2.0).min(1.0) * (o.age * 3.0).min(1.0);
             let pulse = 1.0 + 0.08 * (self.time * 5.0 + o.pos.x).sin();
@@ -2762,6 +2770,7 @@ impl Renderer {
                 EnemyKind::Chaser | EnemyKind::Mini | EnemyKind::Splitter => pal.secondary,
                 EnemyKind::Darter => pal.accent,
                 EnemyKind::Wisp => mixc(pal.accent, WHITE, 0.5),
+                EnemyKind::Sprite => mixc(pal.accent, WHITE, 0.5 + 0.5 * (self.time * 9.0).sin()),
                 EnemyKind::Orbiter => pal.primary,
                 EnemyKind::Elite => pal.danger,
             };
@@ -2775,6 +2784,7 @@ impl Renderer {
                 EnemyKind::Chaser | EnemyKind::Mini => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 3.0),
                 EnemyKind::Darter => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 5.0),
                 EnemyKind::Wisp => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_y(e.age * 4.0),
+                EnemyKind::Sprite => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 3.0),
                 EnemyKind::Orbiter => Mat3::from_rotation_z(e.age * 1.2) * Mat3::from_rotation_x(0.6) * Mat3::from_rotation_y(e.age * 0.9),
                 EnemyKind::Splitter => Mat3::from_rotation_z(e.age * 0.6) * Mat3::from_rotation_x(0.35),
                 EnemyKind::Elite => Mat3::from_rotation_z(e.age * 0.5) * Mat3::from_rotation_x(e.age * 0.7),
