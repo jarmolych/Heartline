@@ -708,6 +708,8 @@ pub struct Stats {
     pub phases_broken: u32,
     /// Hostile bullets slipped past at close range.
     pub grazes: u32,
+    /// Times resonance was set ringing.
+    pub resonances: u32,
     /// Sum of the damage multipliers of every shot the gun fired (1.0 = one nominal shot).
     pub gun_dmg: f32,
     /// Hits taken per source (`SRC_*`).
@@ -1417,6 +1419,7 @@ impl World {
         if self.resonance >= 1.0 {
             self.resonance = 0.0;
             self.res_t = RESONANCE_SECS;
+            self.stats.resonances += 1;
             let pos = self.player.pos;
             self.text(pos + vec2(0.0, -56.0), "RESONANCE", C_ACCENT, 34.0, 1.8);
             self.burst(pos, 40, 620.0, C_ACCENT, 5.0);
