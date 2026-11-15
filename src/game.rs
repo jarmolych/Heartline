@@ -49,10 +49,22 @@ pub enum UpgradeId {
     Downbeat,
     /// Rare: dashing turns nearby bullets into shootable notes.
     Transpose,
+    /// Rare: blades circle the player, cutting enemies and shootable notes.
+    Orbit,
+    /// Being hit clears every bullet nearby and hurts enemies.
+    Nova,
+    /// Damage grows with the combo multiplier.
+    Crescendo,
+    /// A chance for a shot to land much harder.
+    Accent,
+    /// Breaking a Heart phase heals.
+    Coda,
+    /// A dash started on the beat costs no cooldown.
+    Syncope,
 }
 
 /// Number of upgrades (`Player::ups` is indexed by `UpgradeId as usize`).
-pub const N_UPGRADES: usize = 13;
+pub const N_UPGRADES: usize = 19;
 
 impl UpgradeId {
     pub const ALL: [UpgradeId; N_UPGRADES] = [
@@ -69,10 +81,16 @@ impl UpgradeId {
         UpgradeId::Ricochet,
         UpgradeId::Downbeat,
         UpgradeId::Transpose,
+        UpgradeId::Orbit,
+        UpgradeId::Nova,
+        UpgradeId::Crescendo,
+        UpgradeId::Accent,
+        UpgradeId::Coda,
+        UpgradeId::Syncope,
     ];
     /// Rare upgrades are only offered for an A or S grade (`World::spawn_reward`).
     pub fn rare(self) -> bool {
-        matches!(self, UpgradeId::Ricochet | UpgradeId::Downbeat | UpgradeId::Transpose)
+        matches!(self, UpgradeId::Ricochet | UpgradeId::Downbeat | UpgradeId::Transpose | UpgradeId::Orbit)
     }
     pub fn name(self) -> &'static str {
         match self {
@@ -89,6 +107,12 @@ impl UpgradeId {
             UpgradeId::Ricochet => "RICOCHET",
             UpgradeId::Downbeat => "DOWNBEAT",
             UpgradeId::Transpose => "TRANSPOSE",
+            UpgradeId::Orbit => "ORBIT",
+            UpgradeId::Nova => "NOVA",
+            UpgradeId::Crescendo => "CRESCENDO",
+            UpgradeId::Accent => "ACCENT",
+            UpgradeId::Coda => "CODA",
+            UpgradeId::Syncope => "SYNCOPE",
         }
     }
     pub fn desc(self) -> &'static str {
@@ -106,6 +130,12 @@ impl UpgradeId {
             UpgradeId::Ricochet => "shots bounce off the walls",
             UpgradeId::Downbeat => "first shot of every bar is charged",
             UpgradeId::Transpose => "dash turns nearby bullets to notes",
+            UpgradeId::Orbit => "blades circle you and cut what they touch",
+            UpgradeId::Nova => "being hit clears bullets and hurts enemies",
+            UpgradeId::Crescendo => "more damage the higher your multiplier",
+            UpgradeId::Accent => "chance for a shot to hit 2.5x as hard",
+            UpgradeId::Coda => "breaking a Heart phase heals you",
+            UpgradeId::Syncope => "a dash on the beat has no cooldown",
         }
     }
     pub fn max(self) -> u8 {
@@ -123,6 +153,12 @@ impl UpgradeId {
             UpgradeId::Ricochet => 2,
             UpgradeId::Downbeat => 3,
             UpgradeId::Transpose => 1,
+            UpgradeId::Orbit => 2,
+            UpgradeId::Nova => 2,
+            UpgradeId::Crescendo => 3,
+            UpgradeId::Accent => 3,
+            UpgradeId::Coda => 2,
+            UpgradeId::Syncope => 2,
         }
     }
 }
@@ -261,6 +297,14 @@ impl Player {
     pub fn drones(&self) -> usize {
         self.up(UpgradeId::Echo) as usize
     }
+    /// ORBIT: how many blades circle the player, and where blade `k` is.
+    pub fn blades(&self) -> usize {
+        2 * self.up(UpgradeId::Orbit) as usize
+    }
+    pub fn blade_pos(&self, k: usize) -> Vec2 {
+        let a = -self.drone_ang * 1.7 + k as f32 * TAU / self.blades().max(1) as f32;
+        self.pos + vec2(a.cos(), a.sin()) * BLADE_ORBIT_R
+    }
     pub fn drone_pos(&self, k: usize) -> Vec2 {
         let n = self.drones().max(1) as f32;
         let a = self.drone_ang + k as f32 * TAU / n;
@@ -289,6 +333,19 @@ pub struct Bullet {
     /// The player has already been paid for slipping past this one.
     pub grazed: bool,
 }
+
+/// ORBIT blades: orbit radius, reach, and damage per second to what they touch.
+pub const BLADE_ORBIT_R: f32 = 68.0;
+const BLADE_REACH: f32 = 17.0;
+const BLADE_DPS: f32 = 7.0;
+/// ACCENT: chance per level, and what a hit is multiplied by.
+const ACCENT_CHANCE: f32 = 0.12;
+const ACCENT_MUL: f32 = 2.5;
+/// SYNCOPE: a dash started within this many seconds of a beat is "on the beat".
+const SYNCOPE_WINDOW: f32 = 0.09;
+/// Cymbal (bomber): arms within this distance; its ring has this many bullets.
+const BOMBER_ARM_R: f32 = 175.0;
+const BOMBER_RING: usize = 10;
 
 /// Slipping past a hostile bullet this close (without being hit) is a graze.
 const GRAZE_R: f32 = 34.0;
@@ -902,6 +959,8 @@ impl World {
             * (1.0 + 0.2 * p.up(UpgradeId::Echo) as f32)
             * (1.0 + 0.1 * p.up(UpgradeId::Pierce) as f32)
             * (1.0 + 0.1 * p.up(UpgradeId::Downbeat) as f32)
+            * (1.0 + ACCENT_CHANCE * (ACCENT_MUL - 1.0) * p.up(UpgradeId::Accent) as f32)
+            * (1.0 + 0.1 * p.up(UpgradeId::Crescendo) as f32)
     }
 
     /// On a bar line: decide whether the Heart relocates. It goes home for Shell (the shield
@@ -1065,6 +1124,7 @@ impl World {
         self.text(vec2(0.0, -120.0), "PURGATORY", C_ACCENT, 54.0, 2.6);
         self.text(vec2(0.0, -78.0), "phase broken early - everything is shootable", C_WHITE, 22.0, 2.6);
         self.window.broke_phase = true;
+        self.coda();
         // The first two breaks of a song are rewarded with a graded offer, later ones with shards.
         let left = self.phase_left().min(PURGATORY_SECS);
         if left > 5.0 && self.rage <= 2 {
@@ -1074,7 +1134,19 @@ impl World {
         }
     }
 
+    /// CODA: breaking a Heart phase heals.
+    fn coda(&mut self) {
+        let n = self.player.up(UpgradeId::Coda) as i32;
+        if n > 0 && self.player.hp < self.player.max_hp {
+            self.player.hp = (self.player.hp + n).min(self.player.max_hp);
+            let pos = self.player.pos;
+            self.text(pos + vec2(0.0, -40.0), "CODA", C_PRIMARY, 24.0, 1.2);
+            self.snd(Sfx::Heal, 0.8, pos.x);
+        }
+    }
+
     fn break_heart(&mut self) {
+        self.coda();
         self.heart.hp = 0.0;
         self.heart.broken = true;
         self.window.broke_phase = true;
@@ -1263,6 +1335,8 @@ impl World {
                     // Tougher kinds only appear once the run has warmed up.
                     let kind = match kind {
                         EnemyKind::Wisp => EnemyKind::Wisp,
+                        EnemyKind::Turret if p < 0.65 => EnemyKind::Chaser,
+                        EnemyKind::Bomber if p < 0.75 => EnemyKind::Chaser,
                         EnemyKind::Elite if p < self.gate(P_ELITE) => EnemyKind::Orbiter,
                         EnemyKind::Splitter if p < 0.8 => EnemyKind::Chaser,
                         EnemyKind::Darter if p < 0.7 => EnemyKind::Chaser,
@@ -1408,8 +1482,32 @@ impl World {
         let ppos = self.player.pos;
         let speed = 210.0 + 90.0 * self.intensity;
         let mut new_bullets: Vec<Bullet> = Vec::new();
+        let mut blasts: Vec<Vec2> = Vec::new();
         for en in self.enemies.iter_mut() {
             match en.kind {
+                // Metronome: a three-shot fan at the player on every downbeat.
+                EnemyKind::Turret if down && en.age > 0.6 => {
+                    let d = (ppos - en.pos).normalize_or_zero();
+                    let a0 = d.y.atan2(d.x);
+                    for off in [-0.24f32, 0.0, 0.24] {
+                        let v = dir(a0 + off);
+                        new_bullets.push(Bullet { pos: en.pos + v * en.r, vel: v * 235.0, r: 7.0, soft: false, age: 0.0, fade: 1.0, kind: B_ORB, pat: 10, grazed: false });
+                    }
+                    en.flash = 0.8;
+                }
+                // Cymbal: armed ones count the beats down and burst.
+                EnemyKind::Bomber if en.state > 0.0 => {
+                    en.state -= 1.0;
+                    en.flash = 1.0;
+                    if en.state < 1.0 {
+                        for k in 0..BOMBER_RING {
+                            let v = dir(en.rot + k as f32 * TAU / BOMBER_RING as f32);
+                            new_bullets.push(Bullet { pos: en.pos + v * en.r, vel: v * 240.0, r: 7.0, soft: false, age: 0.0, fade: 1.0, kind: B_ORB, pat: 10, grazed: false });
+                        }
+                        blasts.push(en.pos);
+                        en.hp = -1.0;
+                    }
+                }
                 EnemyKind::Orbiter if even => {
                     let d = (ppos - en.pos).normalize_or_zero();
                     new_bullets.push(Bullet { pos: en.pos + d * en.r, vel: d * speed, r: 7.0, soft: false, age: 0.0, fade: 1.0, kind: B_ORB, pat: 10, grazed: false });
@@ -1430,6 +1528,11 @@ impl World {
         if self.bullets.len() + new_bullets.len() < MAX_BULLETS {
             self.bullets.extend(new_bullets);
         }
+        for b in blasts {
+            self.burst(b, 26, 520.0, C_DANGER, 5.0);
+            self.snd(Sfx::Slam, 0.6, b.x);
+        }
+        self.enemies.retain(|e| e.hp > -0.5);
         // Echo drones fire on every beat at the nearest target.
         let n = self.player.drones();
         let dmg = (1.0 + 0.5 * self.player.up(UpgradeId::Gain) as f32) * (self.beat_len / 0.5).clamp(0.5, 2.0);
@@ -1702,6 +1805,24 @@ impl World {
         self.shake = self.shake.max(0.7);
         self.flash = self.flash.max(0.45);
         self.burst(pos, 22, 460.0, C_DANGER, 5.0);
+        // NOVA: the hit throws out a blast that clears far more and hurts what it reaches.
+        let nova = self.player.up(UpgradeId::Nova);
+        if nova > 0 {
+            let reach = 300.0 + 180.0 * nova as f32;
+            for b in self.bullets.iter_mut() {
+                if b.pos.distance(pos) < reach {
+                    b.fade = b.fade.min(0.99);
+                }
+            }
+            for en in self.enemies.iter_mut() {
+                if en.pos.distance(pos) < reach && en.kind != EnemyKind::Sprite {
+                    en.hp -= 3.0 * nova as f32;
+                    en.flash = 1.0;
+                }
+            }
+            self.burst(pos, 50, 900.0, C_ACCENT, 6.0);
+            self.text(pos + vec2(0.0, -64.0), "NOVA", C_ACCENT, 26.0, 1.0);
+        }
         // Mercy: clear nearby bullets and shove enemies away.
         for b in self.bullets.iter_mut() {
             if b.pos.distance(pos) < HIT_CLEAR_R {
@@ -1739,6 +1860,8 @@ impl World {
             EnemyKind::Mini => (1.0, 9.0),
             EnemyKind::Wisp => (1.0, 11.0),
             EnemyKind::Sprite => (3.0, 16.0),
+            EnemyKind::Turret => (6.0, 19.0),
+            EnemyKind::Bomber => (3.0, 16.0),
             EnemyKind::Elite => (22.0 + 8.0 * self.diff + 6.0 * self.song_idx as f32, 34.0),
         };
         // Ordinary enemies toughen with depth (elites already scale).
@@ -1766,6 +1889,8 @@ impl World {
             EnemyKind::Mini => (20.0, 1, C_SECONDARY),
             EnemyKind::Wisp => (30.0, 2, C_ACCENT),
             EnemyKind::Sprite => (500.0, 7, C_ACCENT),
+            EnemyKind::Turret => (140.0, 3, C_DANGER),
+            EnemyKind::Bomber => (110.0, 3, C_ACCENT),
             EnemyKind::Elite => (600.0, 9, C_DANGER),
         };
         self.add_score(score);
@@ -1928,6 +2053,7 @@ impl World {
             }
         }
         self.collide_shots();
+        self.update_blades(dt);
 
         // ---- portals -> enemies ----
         let mut k = 0;
@@ -1973,15 +2099,27 @@ impl World {
         }
         let mv = if input.mv.length_squared() > 1.0 { input.mv.normalize() } else { input.mv };
         let mut dashed = false;
+        let mut on_beat_dash = false;
         if input.dash && p.dash_cd <= 0.0 && p.dash_t <= 0.0 {
             p.dash_t = 0.16;
             p.dash_cd = p.dash_cd_max;
+            // SYNCOPE: on the beat the dash is free (half price at level 1).
+            let syn = p.ups[UpgradeId::Syncope as usize];
+            let off_beat = self.beat_phase.min(1.0 - self.beat_phase) * self.beat_len;
+            if syn > 0 && off_beat < SYNCOPE_WINDOW {
+                p.dash_cd = if syn >= 2 { 0.0 } else { p.dash_cd_max * 0.35 };
+                on_beat_dash = true;
+            }
             p.dash_dir = if mv.length_squared() > 0.01 { mv.normalize() } else { p.aim_dir };
             dashed = true;
         }
         if dashed {
             let pos = p.pos;
             self.snd(Sfx::Dash, 0.5, pos.x);
+            if on_beat_dash {
+                self.text(pos + vec2(0.0, -34.0), "ON BEAT", C_ACCENT, 18.0, 0.7);
+                self.snd(Sfx::Shard, 0.7, pos.x);
+            }
             // TRANSPOSE: the dash rewrites nearby bullets into shootable notes.
             if self.player.up(UpgradeId::Transpose) > 0 {
                 let mut n = 0;
@@ -2081,6 +2219,11 @@ impl World {
         // DOWNBEAT: the first shot after each downbeat is charged.
         let charged = std::mem::take(&mut self.downbeat_ready);
         let scale = if charged { scale * (1.0 + 1.5 * self.player.up(UpgradeId::Downbeat) as f32) } else { scale };
+        // CRESCENDO: the combo multiplier feeds the gun. ACCENT: some shots land much harder.
+        let scale = scale * (1.0 + 0.06 * self.player.up(UpgradeId::Crescendo) as f32 * (self.mult() - 1.0));
+        let accent = self.player.up(UpgradeId::Accent);
+        let crit = accent > 0 && self.rng.chance(ACCENT_CHANCE * accent as f32);
+        let scale = if crit { scale * ACCENT_MUL } else { scale };
         let p = &mut self.player;
         let bounce = p.ups[UpgradeId::Ricochet as usize];
         let n = 1 + p.ups[UpgradeId::Chord as usize] as usize;
@@ -2099,6 +2242,49 @@ impl World {
         if scale >= GUN_TICK_FROM {
             self.snd(Sfx::Shot, (0.3 + 0.3 * (scale - GUN_TICK_FROM)).min(0.6), x);
         }
+    }
+
+    /// ORBIT: the blades cut enemies they touch and pop shootable notes.
+    fn update_blades(&mut self, dt: f32) {
+        let n = self.player.blades();
+        if n == 0 || self.dead {
+            return;
+        }
+        let pts: Vec<Vec2> = (0..n).map(|k| self.player.blade_pos(k)).collect();
+        let mut killed: Vec<(EnemyKind, Vec2)> = Vec::new();
+        let mut i = 0;
+        while i < self.enemies.len() {
+            let en = &mut self.enemies[i];
+            if en.kind != EnemyKind::Sprite && pts.iter().any(|p| p.distance(en.pos) < BLADE_REACH + en.r) {
+                en.hp -= BLADE_DPS * dt;
+                en.flash = en.flash.max(0.5);
+                if en.hp <= 0.0 {
+                    let dead = self.enemies.swap_remove(i);
+                    killed.push((dead.kind, dead.pos));
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        for (kind, pos) in killed {
+            self.kill_enemy(kind, pos);
+        }
+        let mut popped = 0u32;
+        for b in self.bullets.iter_mut() {
+            if b.soft && b.fade >= 1.0 && pts.iter().any(|p| p.distance(b.pos) < BLADE_REACH + b.r) {
+                b.fade = 0.99;
+                popped += 1;
+            }
+        }
+        if popped > 0 {
+            self.stats.notes_shot += popped;
+            self.add_score(15.0 * popped as f32);
+        }
+    }
+
+    /// 0..1 through the current bar.
+    pub fn bar_phase(&self) -> f32 {
+        ((self.bar_beat as f32 + self.beat_phase) / 4.0).clamp(0.0, 1.0)
     }
 
     fn collide_shots(&mut self) {
@@ -2281,6 +2467,23 @@ impl World {
                     if en.pos.x.abs() > HALF_W + 90.0 || en.pos.y.abs() > HALF_H + 90.0 {
                         en.hp = -1.0; // left the arena
                     }
+                }
+                EnemyKind::Turret => {
+                    // Stands its ground and turns to face the player.
+                    en.rot = to_p.y.atan2(to_p.x);
+                    en.pos.x = en.pos.x.clamp(-HALF_W + 40.0, HALF_W - 40.0);
+                    en.pos.y = en.pos.y.clamp(-HALF_H + 40.0, HALF_H - 40.0);
+                }
+                EnemyKind::Bomber => {
+                    // Drifts in; once close it stops and arms (`state` counts the beats left).
+                    if en.state <= 0.0 {
+                        en.pos += to_p / dist * 100.0 * dt * slow;
+                        if dist < BOMBER_ARM_R && active {
+                            en.state = 2.99;
+                            en.flash = 1.0;
+                        }
+                    }
+                    en.rot += dt * (2.0 + 6.0 * en.state);
                 }
                 EnemyKind::Sprite => {
                     // Loops around the arena on a figure of eight, then leaves.

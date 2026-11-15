@@ -848,8 +848,8 @@ fn kind_index(k: EnemyKind) -> usize {
     match k {
         EnemyKind::Chaser | EnemyKind::Mini => 0,
         EnemyKind::Darter | EnemyKind::Wisp => 1,
-        EnemyKind::Orbiter => 2,
-        EnemyKind::Splitter => 3,
+        EnemyKind::Orbiter | EnemyKind::Bomber => 2,
+        EnemyKind::Splitter | EnemyKind::Turret => 3,
         EnemyKind::Elite | EnemyKind::Sprite => 4,
     }
 }
@@ -3416,6 +3416,8 @@ impl Renderer {
                 EnemyKind::Darter => pal.accent,
                 EnemyKind::Wisp => mixc(pal.accent, WHITE, 0.5),
                 EnemyKind::Sprite => mixc(pal.accent, WHITE, 0.5 + 0.5 * (self.time * 9.0).sin()),
+                EnemyKind::Turret => mixc(pal.danger, pal.accent, 0.35),
+                EnemyKind::Bomber => if e.state > 0.0 { mixc(pal.danger, WHITE, 0.5 + 0.5 * (self.time * 22.0).sin()) } else { pal.accent },
                 EnemyKind::Orbiter => pal.primary,
                 EnemyKind::Elite => pal.danger,
             };
@@ -3430,6 +3432,8 @@ impl Renderer {
                 EnemyKind::Darter => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 5.0),
                 EnemyKind::Wisp => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_y(e.age * 4.0),
                 EnemyKind::Sprite => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 3.0),
+                EnemyKind::Turret => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(0.35),
+                EnemyKind::Bomber => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 2.0),
                 EnemyKind::Orbiter => Mat3::from_rotation_z(e.age * 1.2) * Mat3::from_rotation_x(0.6) * Mat3::from_rotation_y(e.age * 0.9),
                 EnemyKind::Splitter => Mat3::from_rotation_z(e.age * 0.6) * Mat3::from_rotation_x(0.35),
                 EnemyKind::Elite => Mat3::from_rotation_z(e.age * 0.5) * Mat3::from_rotation_x(e.age * 0.7),
@@ -3460,6 +3464,32 @@ impl Renderer {
                 EnemyKind::Chaser => {
                     let eye = self.pj(e.pos + dir(e.rot) * sc * 0.6, z);
                     disc(eye, 3.0, 8, alpha(WHITE, a));
+                }
+                EnemyKind::Turret => {
+                    // a ring that fills through the bar: it fires when the ring closes
+                    let f = w.bar_phase();
+                    arc(e.pos, e.r + 9.0, 0.0, TAU, 1.0, alpha(WHITE, 0.2 * a));
+                    arc(e.pos, e.r + 9.0, -PI * 0.5, -PI * 0.5 + TAU * f, 3.5, alpha(pal.danger, (0.5 + 0.5 * f) * a));
+                    // its three lanes, brightening as the downbeat comes
+                    for off in [-0.24f32, 0.0, 0.24] {
+                        let d = dir(e.rot + off);
+                        seg(e.pos + d * (e.r + 12.0), e.pos + d * (e.r + 70.0 + 120.0 * f), 2.0, alpha(pal.danger, 0.55 * f * f * a), alpha(pal.danger, 0.0));
+                    }
+                }
+                EnemyKind::Bomber => {
+                    if e.state > 0.0 {
+                        // armed: a closing ring and the spokes its bullets will fly along
+                        let beats = e.state.ceil();
+                        let rr = e.r + 14.0 + 22.0 * (e.state - (beats - 1.0));
+                        arc(e.pos, rr, 0.0, TAU, 3.0, alpha(pal.danger, a));
+                        disc2(e.pos, 46.0, 16, alpha(pal.danger, 0.22 * a), alpha(pal.danger, 0.0));
+                        for k in 0..10 {
+                            let d = dir(e.rot + k as f32 * TAU / 10.0);
+                            seg(e.pos + d * (e.r + 6.0), e.pos + d * 120.0, 1.5, alpha(pal.danger, 0.45 * a), alpha(pal.danger, 0.0));
+                        }
+                    } else {
+                        arc(e.pos, e.r + 7.0, self.time * 3.0, self.time * 3.0 + PI, 1.5, alpha(pal.accent, 0.6 * a));
+                    }
                 }
                 _ => {}
             }
@@ -3516,6 +3546,18 @@ impl Renderer {
             return;
         }
         let blink = if p.invuln > 0.0 && p.dash_t <= 0.0 { 0.45 + 0.55 * ((self.time * 30.0).sin() * 0.5 + 0.5) } else { 1.0 };
+        // ORBIT blades: turning crescents with a faint ring showing their path
+        if p.blades() > 0 {
+            arc(p.pos, BLADE_ORBIT_R, 0.0, TAU, 1.0, alpha(pal.accent, 0.12));
+            for k in 0..p.blades() {
+                let bp = p.blade_pos(k);
+                let a = self.time * 14.0 + k as f32;
+                poly_lines(bp, 3, 13.0, a, 2.5, alpha(WHITE, 0.95));
+                poly_lines(bp, 3, 18.0, -a * 0.7, 1.5, alpha(pal.accent, 0.7));
+                let tail = p.pos + (bp - p.pos).rotate(dir(0.35));
+                seg(bp, tail, 4.0, alpha(pal.accent, 0.5), alpha(pal.accent, 0.0));
+            }
+        }
         for k in 0..p.drones() {
             let dp = p.drone_pos(k);
             diamond_fill(dp, 5.5, alpha(pal.accent, 0.95));
@@ -4341,6 +4383,47 @@ fn upgrade_emblem(up: UpgradeId, c: Vec2, r: f32, th: f32, col: Color, col2: Col
             arc(p(-0.55, 0.0), r * 0.38, 0.0, TAU, th, col2);
             l(p(-0.05, 0.0), p(0.25, 0.0));
             poly_lines(p(0.68, 0.0), 4, r * 0.48, PI * 0.25, th, col);
+        }
+        // ORBIT: two blades on a ring
+        UpgradeId::Orbit => {
+            arc(c, r * 0.8, 0.0, TAU, th * 0.6, col2);
+            for k in 0..2 {
+                let q = c + dir(time * 3.0 + k as f32 * PI) * r * 0.8;
+                poly_lines(q, 3, r * 0.34, time * 6.0, th, col);
+            }
+            disc(c, r * 0.16, 8, col);
+        }
+        // NOVA: a burst of rays
+        UpgradeId::Nova => {
+            for k in 0..8 {
+                let d = dir(k as f32 * TAU / 8.0);
+                let far = if k % 2 == 0 { 1.0 } else { 0.65 };
+                line(c + d * r * 0.3, c + d * r * far, th, if k % 2 == 0 { col } else { col2 });
+            }
+        }
+        // CRESCENDO: the hairpin, opening to the right
+        UpgradeId::Crescendo => {
+            l(p(-0.9, 0.0), p(0.9, -0.7));
+            l(p(-0.9, 0.0), p(0.9, 0.7));
+        }
+        // ACCENT: the accent mark over a note
+        UpgradeId::Accent => {
+            l(p(-0.8, -0.9), p(0.7, -0.45));
+            l(p(0.7, -0.45), p(-0.8, 0.0));
+            disc(p(0.0, 0.6), r * 0.3, 10, col2);
+        }
+        // CODA: the coda sign
+        UpgradeId::Coda => {
+            arc(c, r * 0.6, 0.0, TAU, th, col);
+            line(p(0.0, -1.0), p(0.0, 1.0), th, col2);
+            line(p(-1.0, 0.0), p(1.0, 0.0), th, col2);
+        }
+        // SYNCOPE: a dash leaving a beat tick
+        UpgradeId::Syncope => {
+            line(p(-0.8, -0.7), p(-0.8, 0.7), th * 1.6, col2);
+            l(p(-0.4, 0.0), p(0.9, 0.0));
+            l(p(0.45, -0.4), p(0.9, 0.0));
+            l(p(0.45, 0.4), p(0.9, 0.0));
         }
     }
 }
