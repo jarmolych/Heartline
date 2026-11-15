@@ -378,6 +378,10 @@ struct LiveRun {
     last_beat_t: f32,
     beat_n: u32,
     last_clock: f32,
+    /// Difficulty multiplier the generator was built with.
+    gen_diff: f32,
+    /// Capture-timeline time of the last beat a pulse was announced for (reactive live mode).
+    last_pred: f32,
     delay: f32,
     hearts: u32,
     /// Estimated seconds per beat (median of recent kick-to-kick gaps).
@@ -1251,6 +1255,8 @@ impl App {
             last_beat_t: -1.0,
             beat_n: 0,
             last_clock: 0.0,
+            gen_diff: self.diff(),
+            last_pred: -10.0,
             delay,
             hearts: 0,
             period: 0.5,
@@ -1692,6 +1698,22 @@ impl App {
         }
         let intensity = live.gen.intensity;
         // Prefer the analyser's tempo tracker once it is confident; until then follow the kicks.
+        // Reactive mode has no look-ahead, so a pulse fired on a kick as it is heard gets no
+        // warning. With a confident beat the next one can be predicted: announce its pulse a
+        // full warning ahead, and stop reacting to kicks.
+        let predict = !info.delayed && live_beat.conf > 0.4 && live_beat.period > 0.2;
+        live.gen.predicted = predict;
+        if predict && !idle_now {
+            let per = live_beat.period;
+            let next = live_beat.phase_t + ((clock - live_beat.phase_t) / per).ceil() * per;
+            let lead = level::pulse_lead(per, live.gen_diff);
+            if next - clock <= lead + 0.04 && next > live.last_pred + 0.5 * per {
+                live.last_pred = next;
+                let mut ahead: Vec<LevelEvent> = Vec::new();
+                live.gen.on_predicted_beat(next, &mut ahead);
+                live.pending.extend(ahead);
+            }
+        }
         let live_bp = if live_beat.conf > 0.4 && live_beat.period > 0.2 {
             live.period = live_beat.period;
             live.gen.beat_len = live.period;

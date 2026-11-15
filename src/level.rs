@@ -1289,6 +1289,9 @@ pub struct LiveGen {
     uses: [u32; 8],
     shard_ang: f32,
     pub intensity: f32,
+    /// Set by the app while the live beat tracker is confident: pulses then come from predicted
+    /// beats, not from kicks as they are heard.
+    pub predicted: bool,
     rate: f32,
     last_feat_t: f32,
     pending_section: bool,
@@ -1332,6 +1335,7 @@ impl LiveGen {
             uses: [0; 8],
             shard_ang: 0.0,
             intensity: 0.4,
+            predicted: false,
             rate: 0.0,
             last_feat_t: 0.0,
             pending_section: true,
@@ -1347,6 +1351,44 @@ impl LiveGen {
         } else {
             (t + telegraph - self.lookahead, telegraph)
         }
+    }
+
+    /// Reactive live mode: the beat tracker is confident that a beat falls at `t_beat`, a little
+    /// in the future. Announce the pulse for it now, with a full warning.
+    pub fn on_predicted_beat(&mut self, t_beat: f32, out: &mut Vec<LevelEvent>) {
+        let lead = pulse_lead(self.beat_len, self.diff);
+        self.make_pulse(t_beat, 0.6, lead, out);
+    }
+
+    /// One Heart pulse at `t` if the motif and the bullet budget allow it.
+    fn make_pulse(&mut self, t: f32, strength: f32, lead: f32, out: &mut Vec<LevelEvent>) {
+        let i = self.intensity;
+        let ki = kind_idx(self.kind);
+        let calm = if self.kind == SectionKind::Calm { 0.6 } else { 1.0 };
+        let target = PULSE_INTERVAL[ki] / self.diff.sqrt();
+        let since = t - self.last_pulse;
+        if since < 0.62 * target || (strength < 0.3 && since < target) {
+            return;
+        }
+        self.bullets.fill(t, BULLETS_PER_SEC * self.diff * energy(i) * calm);
+        // No bar grid live: walk the motif one beat per pulse.
+        let pos = ((self.pulse_n * 2) % 8) as usize;
+        let deck = self.decks[ki];
+        let pattern = deck.moves[pos];
+        let count = self.bullets.pulse_count(pattern, self.diff);
+        if count == 0 {
+            return;
+        }
+        self.last_pulse = t;
+        self.pulse_n += 1;
+        let rot = pulse_rot(pattern, &deck, &mut self.phase, self.uses[pos]);
+        self.uses[pos] += 1;
+        let soft = pos != 0 && {
+            self.soft_n += 1;
+            self.soft_n % deck.soft_every == 0
+        };
+        let speed = beat_speed(pulse_speed(pattern, i, self.kind, self.diff), self.beat_len);
+        out.push(LevelEvent { t, lead, ev: Ev::Pulse { pattern, count, speed, rot, soft } });
     }
 
     /// Call when audio resumes after silence: forces a fresh section.
@@ -1412,29 +1454,11 @@ impl LiveGen {
         let hot = matches!(self.kind, SectionKind::Intense | SectionKind::Drop);
         match o.band {
             Band::Low => {
-                let target = PULSE_INTERVAL[ki] / self.diff.sqrt();
-                let since = o.t - self.last_pulse;
-                if since >= 0.62 * target && !(o.strength < 0.3 && since < target) {
-                    self.bullets.fill(o.t, BULLETS_PER_SEC * self.diff * energy(i) * calm);
-                    // No bar grid live: walk the motif one beat per pulse.
-                    let pos = ((self.pulse_n * 2) % 8) as usize;
-                    let deck = self.decks[ki];
-                    let pattern = deck.moves[pos];
-                    let count = self.bullets.pulse_count(pattern, self.diff);
-                    if count > 0 {
-                        self.last_pulse = o.t;
-                        self.pulse_n += 1;
-                        let rot = pulse_rot(pattern, &deck, &mut self.phase, self.uses[pos]);
-                        self.uses[pos] += 1;
-                        let soft = pos != 0 && {
-                            self.soft_n += 1;
-                            self.soft_n % deck.soft_every == 0
-                        };
-                        // Only delayed (look-ahead) live mode knows a kick early enough to announce it.
-                        let lead = if self.lookahead >= 0.5 { pulse_lead(self.beat_len, self.diff) } else { 0.0 };
-                        let speed = beat_speed(pulse_speed(pattern, i, self.kind, self.diff), self.beat_len);
-                        out.push(LevelEvent { t: o.t, lead, ev: Ev::Pulse { pattern, count, speed, rot, soft } });
-                    }
+                // With a confident beat and no look-ahead, pulses are announced from the predicted
+                // beat instead (`on_predicted_beat`), so they still get their warning.
+                if !self.predicted || self.lookahead >= 0.5 {
+                    let lead = if self.lookahead >= 0.5 { pulse_lead(self.beat_len, self.diff) } else { 0.0 };
+                    self.make_pulse(o.t, o.strength, lead, out);
                 }
                 if TILE_INTERVAL[ki] > 0.0 && o.t >= self.next_tiles && o.strength > 0.4 {
                     let deck = self.decks[ki];
