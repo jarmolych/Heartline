@@ -39,8 +39,9 @@ change the track, and the backdrop changes with it. Hover anything for a tooltip
 - **OPTIONS**: volumes, SYNC OFFSET (raise it if attacks land before you hear the beat), VISUALS
   (FULL / SUBTLE / OFF: how hard the scene pulses with the music), windowed or fullscreen.
 
-Settings are saved in `heartline.cfg` next to the exe. Text is drawn in Windows' Bahnschrift;
-to use another font, put its TTF next to the exe as `heartline-font.ttf`.
+Settings are saved in `heartline.cfg` next to the exe. Text is drawn in Oxanium (SIL Open Font
+License, see `OFL.txt`); to use another font, put its TTF next to the exe as
+`heartline-font.ttf`.
 
 | Input | Action |
 |---|---|

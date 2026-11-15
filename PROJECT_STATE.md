@@ -83,11 +83,13 @@ and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "
 spots" first. The newest round (menu layout, skies, foregrounds, run flow) is
 `docs/plans/0.6-menu-and-skies.md`.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T11-win-x64` (built from branch 45).
+**Test build:** `#UserTesting\Heartline-0.3.0-T12-win-x64` (built from branch 45).
 
-**Font:** the game loads `heartline-font.ttf` from next to the exe, else Windows' Bahnschrift,
-else the built-in pixel font. No font file is in the repo. The player wants the look of Risk
-of Rain 2's font; a closer free match needs a download they have not yet approved.
+**Font:** Oxanium SemiBold is built into the exe (`assets/fonts/oxanium/`, SIL Open Font
+License 1.1; the player approved the download on 2026-11-15 as the free match for Risk of
+Rain 2's font). `heartline-font.ttf` next to the exe overrides it; Bahnschrift and then the
+pixel font are fallbacks. It must be a fixed-weight TTF: macroquad's rasteriser draws a
+variable font at its thinnest weight. `OFL.txt` ships beside the exe.
 
 **Verified by machine only:** 39 unit tests, `--sim` balance runs, screenshots of the menu
 screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any
@@ -248,6 +250,7 @@ tools, balance simulator, bot · `rng.rs` PRNG · `runner.rs` Highway side mode.
   menus, smooth font, round corners, icons, results screen, Q / E song swap in a track's first
   8 s, runs can always carry on, no camera change in silence, DROP RUSH cross-fade, globe sky
   replaced, three new skies, four new weathers, three new foregrounds. 39 unit tests. T11.
+  Then, with the player's go-ahead, Oxanium SemiBold as the built-in font. T12.
 - 2026-11-15 — Fifth pass of 0.5: Comb and Sweep patterns, track list, depth frames. 39 unit
   tests pass; shipped `Heartline-0.3.0-T9`.
 - 2026-11-15 — Fourth pass of 0.5: carry-a-charge objective, milestones, live pulses announced

@@ -364,19 +364,21 @@ thread_local! {
 /// the same nominal size. This brings the smooth font to about the same width.
 const FONT_SCALE: f32 = 0.86;
 
+/// Oxanium SemiBold (SIL Open Font License 1.1, see `assets/fonts/oxanium/OFL.txt`), built into
+/// the game. It is the fixed-weight file: the text rasteriser cannot pick a weight out of a
+/// variable font and would draw its thinnest one.
+const FONT_OXANIUM: &[u8] = include_bytes!("../assets/fonts/oxanium/Oxanium-SemiBold.ttf");
+
 /// Load the interface font. Order: `heartline-font.ttf` next to the game (any TTF the player
-/// drops there), then Bahnschrift from the Windows fonts folder. With neither, text stays in
-/// the built-in pixel font.
+/// drops there), then the built-in Oxanium, then Bahnschrift from the Windows fonts folder.
+/// If none of them loads, text stays in macroquad's pixel font.
 pub fn init_font() {
-    let mut cands: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
-        cands.push(dir.join("heartline-font.ttf"));
-    }
-    if let Some(win) = std::env::var_os("WINDIR") {
-        cands.push(std::path::Path::new(&win).join("Fonts").join("bahnschrift.ttf"));
-    }
-    for p in cands {
-        let Ok(bytes) = std::fs::read(&p) else { continue };
+    let read = |p: std::path::PathBuf| std::fs::read(p).ok();
+    let own = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("heartline-font.ttf"))).and_then(read);
+    let system = std::env::var_os("WINDIR").map(|w| std::path::Path::new(&w).join("Fonts").join("bahnschrift.ttf"));
+    let sources: [Box<dyn Fn() -> Option<Vec<u8>>>; 3] = [Box::new(move || own.clone()), Box::new(|| Some(FONT_OXANIUM.to_vec())), Box::new(move || system.clone().and_then(read))];
+    for src in sources {
+        let Some(bytes) = src() else { continue };
         if let Ok(mut f) = load_ttf_font_from_bytes(&bytes) {
             f.set_filter(FilterMode::Linear);
             UI_FONT.with(|c| *c.borrow_mut() = Some(f));
