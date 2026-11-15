@@ -14,6 +14,8 @@ change the track, and the backdrop changes with it. Hover anything for a tooltip
   - **Mode:** ENDLESS (this track, then the library keeps coming), SINGLE, DAILY (today's seed),
     DROP RUSH (every track cut down to its biggest section) or DODGE (no gun: score by slipping
     close past bullets and staying alive).
+  - **REMIX** (R, beside the track): the same song dealt differently. Other patterns, enemies
+    and upgrade offers on the same beats.
   - **Mutators:** optional rules (ALLEGRO, FORTE, SWARM, NO MERCY, GLASS). Each one, and each
     harder tier, multiplies your score. Your best score per track, tier and mode is shown here.
   - **Difficulty**: seven tiers from LULLABY (no-fail) to FLATLINE (one life). Hover a tile to

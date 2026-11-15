@@ -58,13 +58,18 @@ merging the last one brings everything:
 29. `feat/rally-heat` — rally speeds up; practice bot follows the tier
 30. `feat/codex-finale` — Codex screen, Finale, HUD fixes
 31. `docs/second-pass-t6` — plan progress, README and this file
+32. `feat/highway-depth` — Highway overdrive sections, close calls, rank
+33. `feat/elite-kinds` — Gunner, Summoner and Leaper elites
+34. `feat/remix` — REMIX in run setup
+35. `art/prism-sky` — the eleventh sky
+36. `docs/third-pass-t7` — plan progress, README and this file
 
 The third playtest (2026-11-15) and what was done about it are in
 `docs/plans/0.4-playtest-3.md`. The depth pass that followed (every area of the game, planned
 and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "Known weak
 spots" first.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T6-win-x64` (built from branch 31).
+**Test build:** `#UserTesting\Heartline-0.3.0-T7-win-x64` (built from branch 36).
 
 **Verified by machine only:** 39 unit tests, `--sim` balance runs, screenshots of the menu
 screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any
@@ -220,6 +225,8 @@ SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia
 tools, balance simulator, bot · `rng.rs` PRNG · `runner.rs` Highway side mode.
 
 ## Session Log
+- 2026-11-15 — Third pass of 0.5: Highway overdrive / close calls / rank, three elite kinds,
+  REMIX, the prism sky. 39 unit tests pass; shipped `Heartline-0.3.0-T7`.
 - 2026-11-15 — Second pass of 0.5 (player away, "take the wheel"): live-mode phases, Heart
   charge, Resonance, Highway mode, rally heat, Codex, Finale. 39 unit tests pass; shipped
   `Heartline-0.3.0-T6`.
