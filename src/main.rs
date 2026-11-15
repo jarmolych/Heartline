@@ -532,6 +532,9 @@ struct App {
     /// Run setup: ENDLESS RUN (true) or SINGLE TRACK, and the focused button of the last row.
     /// Index into `SETUP_MODES`.
     setup_mode: usize,
+    /// Remix number chosen in run setup: added to the seed, so the same song deals a different
+    /// level (0 = the song's own).
+    remix: u64,
     /// Mutators chosen in run setup (`game::MOD_*` bits), and the focused one.
     mutators: u8,
     mut_col: usize,
@@ -2844,6 +2847,7 @@ async fn run(args: Args) {
         menu_sel: 0,
         quit_armed: false,
         runner: None,
+        remix: 0,
         setup_mode: 0,
         mutators: 0,
         mut_col: 0,
@@ -3305,6 +3309,17 @@ async fn run(args: Args) {
                         app.menu_sel = S_TRACK;
                     }
                 }
+                // remix: the same song, dealt differently
+                let (hx, cx2) = ui::button(x + w + 14.0 * u, ky, 190.0 * u, 56.0 * u, None, &format!("REMIX {}", app.remix), false, app.remix > 0, u, &pal);
+                let rkey = !busy && is_key_pressed(KeyCode::R);
+                if (cx2 && !busy) || rkey {
+                    let back = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) || is_mouse_button_down(MouseButton::Right);
+                    app.remix = if back { 0 } else { (app.remix + 1) % 100 };
+                    pick = true;
+                }
+                if hx {
+                    tip.set("REMIX", "The same song, dealt differently: other patterns, enemies and upgrade offers on the same beats. R or click for the next one, SHIFT+R back to the song's own. Scores share one best.", true);
+                }
                 if hl || hr || hm || row == S_TRACK {
                     tip.set("STARTING TRACK", "The song the run starts on: the one the menu is playing. Q / E or the arrows step through your library.", hl || hr || hm);
                 }
@@ -3369,7 +3384,7 @@ async fn run(args: Args) {
                     app.args.seed = if app.setup_mode == MODE_DAILY {
                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 86_400).unwrap_or(0)
                     } else {
-                        app.base_seed
+                        app.base_seed.wrapping_add(app.remix.wrapping_mul(0x9E37_79B9))
                     };
                     app.start_from_juke(0, endless);
                 } else if let Some(i) = other {
