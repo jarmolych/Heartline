@@ -1040,7 +1040,7 @@ pub const N_SCENES: u8 = 10;
 pub const N_WEATHER: u8 = 4;
 /// Floor: 0 full grid, 1 open grid (every other line), 2 marks at the intersections.
 pub const N_FLOORS: u8 = 3;
-/// Horizon props: 0 none, 1 palm trees, 2 pyramids, 3 city skyline, 4 meteors.
+/// Horizon props: 0 none, 1 palm trees, 2 radio masts, 3 city skyline, 4 meteors.
 pub const N_PROPS: u8 = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
