@@ -326,6 +326,8 @@ enum Screen {
     Runner,
     /// Codex: what everything in the game is, and the best scores.
     Codex,
+    /// Track list: pick the starting track from the whole library (opened from run setup).
+    Tracks,
     LiveSetup,
     /// LAN Rally: host/join, lobby, countdown, match and results (`App::lan` holds the stage).
     Lan,
@@ -552,6 +554,8 @@ struct App {
     /// Run setup: ENDLESS RUN (true) or SINGLE TRACK, and the focused button of the last row.
     /// Index into `SETUP_MODES`.
     setup_mode: usize,
+    /// Track list: the highlighted row.
+    track_sel: usize,
     /// Remix number chosen in run setup: added to the seed, so the same song deals a different
     /// level (0 = the song's own).
     remix: u64,
@@ -1295,7 +1299,7 @@ impl App {
             }
         }
         // Keep the next track warming up in the background.
-        if self.loader.is_none() && !matches!(self.screen, Screen::Menu | Screen::Options | Screen::Setup | Screen::Codex) && self.live.is_none() {
+        if self.loader.is_none() && !matches!(self.screen, Screen::Menu | Screen::Options | Screen::Setup | Screen::Codex | Screen::Tracks) && self.live.is_none() {
             let want = if self.song.is_some() && self.phase == Phase::Song { self.qi + 1 } else { self.qi };
             let have = self.ready.as_ref().map(|r| r.0);
             if want < self.queue.len() && have != Some(want) {
@@ -2931,6 +2935,7 @@ async fn run(args: Args) {
         menu_sel: 0,
         quit_armed: false,
         runner: None,
+        track_sel: 0,
         remix: 0,
         setup_mode: 0,
         mutators: 0,
@@ -3375,6 +3380,14 @@ async fn run(args: Args) {
                 let (hl, cl) = ui::button(x, ky, bw, 56.0 * u, None, "<", false, false, u, &pal);
                 let (hr, cr) = ui::button(x + w - bw, ky, bw, 56.0 * u, None, ">", false, false, u, &pal);
                 let hm = ui::hover(x + bw, ky, w - 2.0 * bw, 56.0 * u);
+                // the title opens the whole library as a list
+                if !busy && ((hm && is_mouse_button_pressed(MouseButton::Left)) || is_key_pressed(KeyCode::T)) {
+                    app.track_sel = app.juke.idx;
+                    // drop the key that opened the list so it does not count as a letter jump
+                    while get_char_pressed().is_some() {}
+                    app.screen = Screen::Tracks;
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                }
                 draw_rectangle(x + bw + 8.0 * u, ky, w - 2.0 * bw - 16.0 * u, 56.0 * u, Color::new(0.0, 0.0, 0.05, 0.5));
                 if row == S_TRACK {
                     draw_rectangle(x - 10.0 * u, ky, 3.0 * u, 56.0 * u, pal.accent);
@@ -3405,7 +3418,7 @@ async fn run(args: Args) {
                     tip.set("REMIX", "The same song, dealt differently: other patterns, enemies and upgrade offers on the same beats. R or click for the next one, SHIFT+R back to the song's own. Scores share one best.", true);
                 }
                 if hl || hr || hm || row == S_TRACK {
-                    tip.set("STARTING TRACK", "The song the run starts on: the one the menu is playing. Q / E or the arrows step through your library.", hl || hr || hm);
+                    tip.set("STARTING TRACK", "The song the run starts on: the one the menu is playing. Q / E or the arrows step through your library; click the title or press T for the whole list.", hl || hr || hm);
                 }
 
                 // ---- start ----
@@ -3936,6 +3949,74 @@ async fn run(args: Args) {
                 if is_key_pressed(KeyCode::Escape) {
                     app.screen = Screen::Menu;
                     app.menu_sel = M_CODEX;
+                }
+            }
+            Screen::Tracks => {
+                dim(0.75);
+                let x = 110.0 * u;
+                render::vtext("PICK A TRACK", x, 130.0 * u, 64.0 * u, WHITE, -1);
+                let n = app.juke.list.len();
+                let rows = 16usize;
+                let mut pick: Option<usize> = None;
+                if n > 0 {
+                    let step = is_key_pressed(KeyCode::Down) as i32 - is_key_pressed(KeyCode::Up) as i32 + (is_key_pressed(KeyCode::PageDown) as i32 - is_key_pressed(KeyCode::PageUp) as i32) * rows as i32;
+                    let (_, wheel) = mouse_wheel();
+                    let step = step - wheel.signum() as i32 * 3 * (wheel != 0.0) as i32;
+                    if step != 0 {
+                        app.track_sel = (app.track_sel as i32 + step).clamp(0, n as i32 - 1) as usize;
+                    }
+                    // typing a letter jumps to the next title that starts with it
+                    while let Some(c) = get_char_pressed() {
+                        if c.is_alphanumeric() {
+                            let want = c.to_ascii_lowercase();
+                            if let Some(k) = (1..=n).map(|d| (app.track_sel + d) % n).find(|&k| track_title(&app.juke.list[k]).to_lowercase().starts_with(want)) {
+                                app.track_sel = k;
+                            }
+                        }
+                    }
+                    let top = app.track_sel.saturating_sub(rows / 2).min(n.saturating_sub(rows));
+                    for (r, k) in (top..(top + rows).min(n)).enumerate() {
+                        let y = 190.0 * u + r as f32 * 46.0 * u;
+                        let hv = ui::hover(x, y, 1300.0 * u, 42.0 * u);
+                        if hv && mouse_delta_position() != Vec2::ZERO {
+                            app.track_sel = k;
+                        }
+                        let on = k == app.track_sel;
+                        if on {
+                            draw_rectangle(x, y, 1300.0 * u, 42.0 * u, Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, 0.3));
+                            draw_rectangle(x, y, 4.0 * u, 42.0 * u, pal.accent);
+                        }
+                        let title = track_title(&app.juke.list[k]);
+                        let playing = k == app.juke.idx;
+                        text_left(&title, x + 18.0 * u, y + 29.0 * u, 24.0 * u, if playing { pal.accent } else if on { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.72) });
+                        if let Some((s, d)) = app.scores.get(&app.score_key(&title)) {
+                            text_left(&format!("best {s}   depth {d}"), x + 980.0 * u, y + 29.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                        }
+                        if hv && is_mouse_button_pressed(MouseButton::Left) {
+                            pick = Some(k);
+                        }
+                    }
+                    text_left(&format!("{} of {}", app.track_sel + 1, n), x + 1100.0 * u, 130.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                    if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
+                        pick = Some(app.track_sel);
+                    }
+                } else {
+                    text_left("No music found. Set a MUSIC LIBRARY on the title menu.", x, 220.0 * u, 24.0 * u, WHITE);
+                }
+                text_shadow("UP / DOWN  move     type a letter to jump     ENTER  choose     ESC  back", x, sh - 60.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.7), -1);
+                if let Some(k) = pick {
+                    if k != app.juke.idx {
+                        app.juke.idx = k;
+                        app.juke.loader = None;
+                        app.juke.fails = 0;
+                        app.juke.played = 0.0;
+                    }
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                    app.screen = Screen::Setup;
+                    app.menu_sel = S_TRACK;
+                } else if is_key_pressed(KeyCode::Escape) {
+                    app.screen = Screen::Setup;
+                    app.menu_sel = S_TRACK;
                 }
             }
             Screen::Lan => app.lan_ui(u, sw, sh),

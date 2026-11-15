@@ -2829,6 +2829,20 @@ impl Renderer {
     /// Heartline around the arena rim (spikes on kicks/snares, travels clockwise). In drift it
     /// straightens out into the ECG trace across the vista.
     fn draw_rim(&self, w: &World, e: f32) {
+        // Depth: one more frame of danger-coloured light around the arena for every song deep
+        // the run is (up to four), breathing with the bar.
+        let depth = (w.song_idx as usize).min(4);
+        if depth > 0 && e < 0.99 {
+            let lv = 1.0 - e;
+            for d in 0..depth {
+                let o = 22.0 + 15.0 * d as f32;
+                let a = (0.30 - 0.05 * d as f32) * lv * (0.7 + 0.3 * w.bar_pulse);
+                let c = [vec2(-HALF_W - o, -HALF_H - o), vec2(HALF_W + o, -HALF_H - o), vec2(HALF_W + o, HALF_H + o), vec2(-HALF_W - o, HALF_H + o)];
+                for k in 0..4 {
+                    line(c[k], c[(k + 1) % 4], 2.0, alpha(self.pal.danger, a));
+                }
+            }
+        }
         let pal = &self.pal;
         let lv = 1.0 - e;
         let bright = 0.65 + (0.35 * w.bar_pulse + SNARE_RIM * self.snare * self.fx) * lv;
