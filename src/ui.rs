@@ -24,6 +24,28 @@ pub enum Icon {
     Display,
     Back,
     Road,
+    Prev,
+    Next,
+    List,
+    Dice,
+    Book,
+    Heart,
+    Skull,
+    Glass,
+    Allegro,
+    Forte,
+    Swarm,
+    Calendar,
+    Bolt,
+    Shard,
+    Combo,
+    Cross,
+    Retry,
+    Home,
+    Trophy,
+    Target,
+    Note,
+    Playlist,
 }
 
 fn a(c: Color, alpha: f32) -> Color {
@@ -134,7 +156,270 @@ pub fn icon(k: Icon, cx: f32, cy: f32, s: f32, col: Color) {
             poly(&[(0.9, 0.0), (-0.8, 0.0)], cx, cy, s, th, col, false);
             poly(&[(-0.2, -0.6), (-0.8, 0.0), (-0.2, 0.6)], cx, cy, s, th, col, false);
         }
+        Icon::Prev => {
+            poly(&[(0.55, -0.8), (-0.45, 0.0), (0.55, 0.8)], cx, cy, s, th, col, true);
+            poly(&[(-0.8, -0.8), (-0.8, 0.8)], cx, cy, s, th, col, false);
+        }
+        Icon::Next => {
+            poly(&[(-0.55, -0.8), (0.45, 0.0), (-0.55, 0.8)], cx, cy, s, th, col, true);
+            poly(&[(0.8, -0.8), (0.8, 0.8)], cx, cy, s, th, col, false);
+        }
+        Icon::List => {
+            for y in [-0.6, 0.0, 0.6] {
+                draw_circle(cx - 0.75 * s, cy + y * s, th * 0.8, col);
+                poly(&[(-0.35, y), (0.9, y)], cx, cy, s, th, col, false);
+            }
+        }
+        Icon::Dice => {
+            poly(&[(-0.8, -0.8), (0.8, -0.8), (0.8, 0.8), (-0.8, 0.8)], cx, cy, s, th, col, true);
+            for (x, y) in [(-0.38, -0.38), (0.38, 0.38), (0.0, 0.0), (0.38, -0.38), (-0.38, 0.38)] {
+                draw_circle(cx + x * s, cy + y * s, th * 0.75, col);
+            }
+        }
+        Icon::Book => {
+            poly(&[(0.0, -0.6), (-0.9, -0.8), (-0.9, 0.65), (0.0, 0.85), (0.9, 0.65), (0.9, -0.8)], cx, cy, s, th, col, true);
+            poly(&[(0.0, -0.6), (0.0, 0.85)], cx, cy, s, th, col, false);
+        }
+        Icon::Heart => poly(
+            &[(0.0, 0.9), (-0.9, 0.0), (-0.9, -0.5), (-0.5, -0.85), (0.0, -0.45), (0.5, -0.85), (0.9, -0.5), (0.9, 0.0)],
+            cx,
+            cy,
+            s,
+            th,
+            col,
+            true,
+        ),
+        Icon::Skull => {
+            arc(cx, cy - 0.15 * s, 0.75 * s, tau * 0.42, tau * 1.08, th, col);
+            poly(&[(-0.62, 0.28), (-0.4, 0.85), (0.4, 0.85), (0.62, 0.28)], cx, cy, s, th, col, false);
+            draw_circle(cx - 0.3 * s, cy - 0.15 * s, th * 1.1, col);
+            draw_circle(cx + 0.3 * s, cy - 0.15 * s, th * 1.1, col);
+            poly(&[(0.0, 0.5), (0.0, 0.85)], cx, cy, s, th * 0.8, col, false);
+        }
+        Icon::Glass => {
+            poly(&[(0.0, -0.95), (0.75, 0.0), (0.0, 0.95), (-0.75, 0.0)], cx, cy, s, th, col, true);
+            poly(&[(0.0, -0.95), (-0.15, -0.2), (0.2, 0.1), (0.0, 0.95)], cx, cy, s, th * 0.8, col, false);
+        }
+        Icon::Allegro => {
+            for x in [-0.75, -0.05] {
+                poly(&[(x, -0.75), (x + 0.7, 0.0), (x, 0.75)], cx, cy, s, th, col, false);
+            }
+        }
+        Icon::Forte => {
+            for (i, hh) in [0.45f32, 0.95, 1.45].iter().enumerate() {
+                let x = -0.65 + 0.65 * i as f32;
+                poly(&[(x, 0.8), (x, 0.8 - hh)], cx, cy, s, th * 1.6, col, false);
+            }
+        }
+        Icon::Swarm => {
+            for (x, y) in [(0.0, -0.5), (-0.55, 0.45), (0.55, 0.45)] {
+                poly(&[(x, y - 0.38), (x + 0.36, y + 0.3), (x - 0.36, y + 0.3)], cx, cy, s, th, col, true);
+            }
+        }
+        Icon::Calendar => {
+            poly(&[(-0.85, -0.65), (0.85, -0.65), (0.85, 0.85), (-0.85, 0.85)], cx, cy, s, th, col, true);
+            poly(&[(-0.85, -0.2), (0.85, -0.2)], cx, cy, s, th, col, false);
+            poly(&[(-0.4, -0.95), (-0.4, -0.5)], cx, cy, s, th, col, false);
+            poly(&[(0.4, -0.95), (0.4, -0.5)], cx, cy, s, th, col, false);
+            draw_circle(cx, cy + 0.33 * s, th * 1.0, col);
+        }
+        Icon::Bolt => poly(&[(0.3, -0.95), (-0.55, 0.15), (0.0, 0.15), (-0.3, 0.95), (0.55, -0.15), (0.0, -0.15)], cx, cy, s, th, col, true),
+        Icon::Shard => {
+            poly(&[(0.0, -0.95), (0.6, -0.2), (0.0, 0.95), (-0.6, -0.2)], cx, cy, s, th, col, true);
+            poly(&[(-0.6, -0.2), (0.6, -0.2)], cx, cy, s, th * 0.8, col, false);
+        }
+        Icon::Combo => {
+            for y in [-0.55, 0.0, 0.55] {
+                poly(&[(-0.7, y + 0.3), (0.0, y - 0.3), (0.7, y + 0.3)], cx, cy, s, th, col, false);
+            }
+        }
+        Icon::Cross => {
+            poly(&[(-0.7, -0.7), (0.7, 0.7)], cx, cy, s, th * 1.2, col, false);
+            poly(&[(0.7, -0.7), (-0.7, 0.7)], cx, cy, s, th * 1.2, col, false);
+        }
+        Icon::Retry => {
+            arc(cx, cy, 0.75 * s, -tau * 0.15, tau * 0.65, th, col);
+            poly(&[(0.2, -0.95), (0.62, -0.55), (0.1, -0.35)], cx, cy, s, th, col, false);
+        }
+        Icon::Home => {
+            poly(&[(-0.9, 0.0), (0.0, -0.85), (0.9, 0.0)], cx, cy, s, th, col, false);
+            poly(&[(-0.6, -0.1), (-0.6, 0.85), (0.6, 0.85), (0.6, -0.1)], cx, cy, s, th, col, false);
+        }
+        Icon::Trophy => {
+            poly(&[(-0.55, -0.85), (0.55, -0.85), (0.45, 0.0), (0.0, 0.3), (-0.45, 0.0)], cx, cy, s, th, col, true);
+            poly(&[(0.0, 0.3), (0.0, 0.75)], cx, cy, s, th, col, false);
+            poly(&[(-0.45, 0.85), (0.45, 0.85)], cx, cy, s, th, col, false);
+            arc(cx - 0.6 * s, cy - 0.5 * s, 0.3 * s, tau * 0.25, tau * 0.75, th * 0.8, col);
+            arc(cx + 0.6 * s, cy - 0.5 * s, 0.3 * s, -tau * 0.25, tau * 0.25, th * 0.8, col);
+        }
+        Icon::Target => {
+            draw_circle_lines(cx, cy, 0.7 * s, th, col);
+            draw_circle(cx, cy, th * 1.0, col);
+            for (x, y) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                poly(&[(x * 0.45, y * 0.45), (x, y)], cx, cy, s, th, col, false);
+            }
+        }
+        Icon::Note => {
+            draw_circle_lines(cx - 0.25 * s, cy + 0.55 * s, 0.32 * s, th, col);
+            poly(&[(0.07, 0.55), (0.07, -0.85), (0.65, -0.45)], cx, cy, s, th, col, false);
+        }
+        Icon::Playlist => {
+            for (y, x1) in [(-0.7, 0.9), (-0.15, 0.25), (0.4, 0.05)] {
+                poly(&[(-0.9, y), (x1, y)], cx, cy, s, th, col, false);
+            }
+            draw_circle_lines(cx + 0.45 * s, cy + 0.6 * s, 0.26 * s, th, col);
+            poly(&[(0.71, 0.6), (0.71, -0.3), (0.95, -0.1)], cx, cy, s, th, col, false);
+        }
     }
+}
+
+/// The icon of mutator `i` (the order of `game::MODS`).
+pub fn mod_icon(i: usize) -> Icon {
+    [Icon::Allegro, Icon::Forte, Icon::Swarm, Icon::Skull, Icon::Glass][i.min(4)]
+}
+
+// ---------------------------------------------------------------------------------------------
+// Soft-edged shapes
+// ---------------------------------------------------------------------------------------------
+
+/// Corner radius of panels and buttons, in 1080p pixels (multiply by `u`).
+pub const RADIUS: f32 = 10.0;
+
+fn rounded_pts(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<Vec2> {
+    let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
+    let q = std::f32::consts::FRAC_PI_2;
+    let n = 6;
+    let mut pts = Vec::with_capacity(4 * (n + 1));
+    for (cx, cy, a0) in [(x + w - r, y + r, -q), (x + w - r, y + h - r, 0.0), (x + r, y + h - r, q), (x + r, y + r, 2.0 * q)] {
+        for i in 0..=n {
+            let t = a0 + q * i as f32 / n as f32;
+            pts.push(vec2(cx + t.cos() * r, cy + t.sin() * r));
+        }
+    }
+    pts
+}
+
+/// A filled rectangle with rounded corners.
+pub fn rrect(x: f32, y: f32, w: f32, h: f32, r: f32, col: Color) {
+    let pts = rounded_pts(x, y, w, h, r);
+    let c = vec2(x + w * 0.5, y + h * 0.5);
+    for i in 0..pts.len() {
+        draw_triangle(c, pts[i], pts[(i + 1) % pts.len()], col);
+    }
+}
+
+/// The outline of a rounded rectangle.
+pub fn rrect_lines(x: f32, y: f32, w: f32, h: f32, r: f32, th: f32, col: Color) {
+    let pts = rounded_pts(x, y, w, h, r);
+    for i in 0..pts.len() {
+        let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
+        draw_line(p.x, p.y, q.x, q.y, th, col);
+    }
+}
+
+/// The dark backing of a group of controls.
+pub fn panel(x: f32, y: f32, w: f32, h: f32, u: f32) {
+    rrect(x, y, w, h, 14.0 * u, Color::new(0.02, 0.0, 0.07, 0.74));
+    rrect_lines(x, y, w, h, 14.0 * u, 1.2 * u, Color::new(1.0, 1.0, 1.0, 0.12));
+}
+
+/// A coloured bar that names the group under it.
+#[allow(clippy::too_many_arguments)]
+pub fn header(x: f32, y: f32, w: f32, h: f32, ic: Icon, label: &str, col: Color, focus: bool, u: f32) {
+    rrect(x, y, w, h, 8.0 * u, Color::new(col.r * 0.55, col.g * 0.55, col.b * 0.6, 0.9));
+    rrect_lines(x, y, w, h, 8.0 * u, if focus { 2.5 } else { 1.5 } * u, if focus { WHITE } else { a(col, 0.95) });
+    icon(ic, x + h * 0.6, y + h * 0.5, h * 0.26, WHITE);
+    text_center(label, x + w * 0.5, y + h * 0.5 + 8.0 * u, 25.0 * u, WHITE);
+}
+
+/// A thin line between groups.
+pub fn sep(x: f32, y: f32, w: f32, u: f32) {
+    draw_line(x, y, x + w, y, 1.0 * u, Color::new(1.0, 1.0, 1.0, 0.16));
+}
+
+/// A square tile for one icon. The caller draws the icon. Returns (hovered, clicked).
+#[allow(clippy::too_many_arguments)]
+pub fn tile(x: f32, y: f32, s: f32, on: bool, focus: bool, col: Color, alpha: f32, u: f32) -> (bool, bool) {
+    let hv = hover(x, y, s, s);
+    let r = RADIUS * u;
+    let fill = if on { Color::new(col.r * 0.4, col.g * 0.4, col.b * 0.45, 0.85 * alpha) } else { Color::new(0.03, 0.02, 0.09, if hv { 0.85 } else { 0.7 } * alpha) };
+    rrect(x, y, s, s, r, fill);
+    let edge = if on { a(col, alpha) } else { Color::new(1.0, 1.0, 1.0, if hv || focus { 0.6 } else { 0.2 } * alpha) };
+    rrect_lines(x, y, s, s, r, if on { 2.5 } else { 1.2 } * u, edge);
+    if on {
+        // the small marker under the chosen tile
+        let (cx, cy, d) = (x + s * 0.5, y + s, 6.0 * u);
+        draw_triangle(vec2(cx - d, cy), vec2(cx, cy - d), vec2(cx + d, cy), a(WHITE, alpha));
+        draw_triangle(vec2(cx - d, cy), vec2(cx, cy + d), vec2(cx + d, cy), a(WHITE, alpha));
+    }
+    if focus {
+        rrect_lines(x - 4.0 * u, y - 4.0 * u, s + 8.0 * u, s + 8.0 * u, r + 3.0 * u, 1.5 * u, a(WHITE, 0.75 * alpha));
+    }
+    (hv, hv && is_mouse_button_pressed(MouseButton::Left))
+}
+
+/// A key cap with what the key does after it. Returns the x where the next one can start.
+pub fn keycap(key: &str, what: &str, x: f32, y: f32, u: f32) -> f32 {
+    let size = 17.0 * u;
+    let kw = text_w(key, size) + 16.0 * u;
+    let h = 26.0 * u;
+    rrect(x, y - h * 0.5, kw, h, 6.0 * u, Color::new(1.0, 1.0, 1.0, 0.1));
+    rrect_lines(x, y - h * 0.5, kw, h, 6.0 * u, 1.0 * u, Color::new(1.0, 1.0, 1.0, 0.35));
+    text_left(key, x + 8.0 * u, y + 6.0 * u, size, Color::new(1.0, 1.0, 1.0, 0.9));
+    text_left(what, x + kw + 8.0 * u, y + 6.0 * u, 18.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+    x + kw + 8.0 * u + text_w(what, 18.0 * u) + 26.0 * u
+}
+
+/// `s` cut down to fit `max_w`, ending in "..." when something was cut.
+pub fn fit(s: &str, size: f32, max_w: f32) -> String {
+    if text_w(s, size) <= max_w {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let t: String = chars[..mid].iter().chain("...".chars().collect::<Vec<_>>().iter()).collect();
+        if text_w(&t, size) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    chars[..lo].iter().collect::<String>().trim_end().to_string() + "..."
+}
+
+/// One line of text in a space `max_w` wide. Text that is too long slides back and forth so
+/// all of it can be read. Do not call it while a `clip` is set.
+pub fn marquee(s: &str, x: f32, y: f32, size: f32, max_w: f32, col: Color, time: f32) {
+    let tw = text_w(s, size);
+    if tw <= max_w {
+        text_left(s, x, y, size, col);
+        return;
+    }
+    let over = tw - max_w;
+    let speed = size * 1.5;
+    let (hold, travel) = (1.6, over / speed);
+    let p = time % (2.0 * (hold + travel));
+    let off = if p < hold {
+        0.0
+    } else if p < hold + travel {
+        (p - hold) * speed
+    } else if p < 2.0 * hold + travel {
+        over
+    } else {
+        over - (p - 2.0 * hold - travel) * speed
+    };
+    clip(Some((x, y - size, max_w, size * 1.45)));
+    text_left(s, x - off, y, size, col);
+    clip(None);
+}
+
+/// Limit drawing to a rectangle (screen coordinates), or lift the limit with `None`.
+pub fn clip(r: Option<(f32, f32, f32, f32)>) {
+    let s = screen_dpi_scale();
+    let gl = unsafe { get_internal_gl() };
+    gl.quad_gl.scissor(r.map(|(x, y, w, h)| ((x * s) as i32, (y * s) as i32, (w * s) as i32, (h * s) as i32)));
 }
 
 /// Difficulty icon: a heartbeat trace that gets taller and busier with the tier; the last tier
@@ -236,9 +521,8 @@ impl Tip {
         let (mx, my) = mouse_position();
         let bx = (mx + 22.0 * u).min(screen_width() - w - 8.0 * u);
         let by = if my + 26.0 * u + h > screen_height() { my - h - 12.0 * u } else { my + 26.0 * u };
-        draw_rectangle(bx, by, w, h, Color::new(0.02, 0.0, 0.07, 0.94));
-        draw_rectangle_lines(bx, by, w, h, 1.5 * u, a(pal.accent, 0.9));
-        draw_rectangle(bx, by, 4.0 * u, h, pal.accent);
+        rrect(bx, by, w, h, RADIUS * u, Color::new(0.02, 0.0, 0.07, 0.95));
+        rrect_lines(bx, by, w, h, RADIUS * u, 1.5 * u, a(pal.accent, 0.9));
         text_left(&self.title, bx + pad, by + pad + 18.0 * u, 24.0 * u, pal.accent);
         for (i, l) in lines.iter().enumerate() {
             text_left(l, bx + pad, by + pad + 44.0 * u + i as f32 * 24.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.88));
@@ -247,12 +531,13 @@ impl Tip {
 }
 
 fn frame(x: f32, y: f32, w: f32, h: f32, on: bool, focus: bool, u: f32, pal: &Palette) {
+    let r = RADIUS * u;
     if on {
-        draw_rectangle(x, y, w, h, a(pal.secondary, 0.38));
-        draw_rectangle_lines(x, y, w, h, 2.0 * u, pal.accent);
+        rrect(x, y, w, h, r, a(pal.secondary, 0.42));
+        rrect_lines(x, y, w, h, r, 2.0 * u, pal.accent);
     } else {
-        draw_rectangle(x, y, w, h, Color::new(0.0, 0.0, 0.05, if focus { 0.6 } else { 0.42 }));
-        draw_rectangle_lines(x, y, w, h, 1.0 * u, Color::new(1.0, 1.0, 1.0, if focus { 0.55 } else { 0.18 }));
+        rrect(x, y, w, h, r, Color::new(0.02, 0.0, 0.07, if focus { 0.72 } else { 0.55 }));
+        rrect_lines(x, y, w, h, r, 1.2 * u, Color::new(1.0, 1.0, 1.0, if focus { 0.55 } else { 0.18 }));
     }
 }
 
@@ -260,18 +545,20 @@ fn frame(x: f32, y: f32, w: f32, h: f32, on: bool, focus: bool, u: f32, pal: &Pa
 #[allow(clippy::too_many_arguments)]
 pub fn icon_row(x: f32, y: f32, w: f32, h: f32, ic: Icon, label: &str, selected: bool, u: f32, pal: &Palette, time: f32) -> (bool, bool) {
     let hv = hover(x, y, w, h);
+    let r = RADIUS * u;
     if selected {
         let pulse = 0.85 + 0.15 * (time * 4.0).sin();
-        draw_rectangle(x, y, w, h, a(pal.secondary, 0.3));
-        draw_rectangle_lines(x, y, w, h, 1.0 * u, a(pal.secondary, 0.6));
-        draw_rectangle(x, y, 4.0 * u, h, a(pal.accent, pulse));
+        rrect(x, y, w, h, r, a(pal.secondary, 0.42));
+        rrect_lines(x, y, w, h, r, 1.5 * u, a(pal.accent, 0.55 + 0.35 * pulse));
     } else {
-        draw_rectangle(x, y, w, h, Color::new(0.0, 0.0, 0.05, 0.42));
-        draw_line(x, y + h, x + w * 0.7, y + h, 1.0 * u, Color::new(1.0, 1.0, 1.0, 0.14));
+        rrect(x, y, w, h, r, Color::new(0.02, 0.0, 0.07, if hv { 0.7 } else { 0.5 }));
+        rrect_lines(x, y, w, h, r, 1.0 * u, Color::new(1.0, 1.0, 1.0, 0.1));
     }
-    let col = if selected { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.75) };
-    icon(ic, x + 36.0 * u, y + h * 0.5, h * 0.27, if selected { pal.accent } else { col });
-    text_left(label, x + 70.0 * u, y + h * 0.5 + 9.0 * u, 28.0 * u, col);
+    let col = if selected { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.78) };
+    // the icon sits in its own cell, like a portrait
+    rrect(x + 6.0 * u, y + 6.0 * u, h - 12.0 * u, h - 12.0 * u, r * 0.7, Color::new(1.0, 1.0, 1.0, if selected { 0.12 } else { 0.05 }));
+    icon(ic, x + h * 0.5, y + h * 0.5, h * 0.24, if selected { pal.accent } else { col });
+    text_left(label, x + h + 12.0 * u, y + h * 0.5 + 9.0 * u, 28.0 * u, col);
     (hv, hv && is_mouse_button_pressed(MouseButton::Left))
 }
 
@@ -336,7 +623,7 @@ pub fn segments(x: f32, y: f32, w: f32, h: f32, labels: &[(Option<Icon>, &str)],
         }
     }
     if focus {
-        draw_rectangle(x - 10.0 * u, y, 3.0 * u, h, pal.accent);
+        rrect(x - 11.0 * u, y + 4.0 * u, 4.0 * u, h - 8.0 * u, 2.0 * u, pal.accent);
     }
     (click, hov)
 }
@@ -346,12 +633,12 @@ pub fn segments(x: f32, y: f32, w: f32, h: f32, labels: &[(Option<Icon>, &str)],
 pub fn slider(x: f32, y: f32, w: f32, h: f32, v: f32, focus: bool, u: f32, pal: &Palette) -> Option<f32> {
     let cy = y + h * 0.5;
     let col = if focus { pal.accent } else { pal.primary };
-    draw_rectangle(x, cy - 1.5 * u, w, 3.0 * u, Color::new(1.0, 1.0, 1.0, 0.22));
-    draw_rectangle(x, cy - 1.5 * u, w * v, 3.0 * u, col);
-    draw_circle(x + w * v, cy, if focus { 8.0 } else { 6.0 } * u, WHITE);
-    draw_circle_lines(x + w * v, cy, if focus { 11.0 } else { 9.0 } * u, 1.5 * u, col);
+    rrect(x, cy - 3.0 * u, w, 6.0 * u, 3.0 * u, Color::new(1.0, 1.0, 1.0, 0.2));
+    rrect(x, cy - 3.0 * u, (w * v).max(6.0 * u), 6.0 * u, 3.0 * u, col);
+    draw_circle(x + w * v, cy, if focus { 9.0 } else { 7.0 } * u, WHITE);
+    draw_circle_lines(x + w * v, cy, if focus { 12.0 } else { 10.0 } * u, 1.5 * u, col);
     if focus {
-        draw_rectangle(x - 10.0 * u, y, 3.0 * u, h, pal.accent);
+        rrect(x - 11.0 * u, y + 4.0 * u, 4.0 * u, h - 8.0 * u, 2.0 * u, pal.accent);
     }
     if is_mouse_button_down(MouseButton::Left) && hover(x - 14.0 * u, y, w + 28.0 * u, h) {
         let (mx, _) = mouse_position();
@@ -363,15 +650,10 @@ pub fn slider(x: f32, y: f32, w: f32, h: f32, v: f32, focus: bool, u: f32, pal: 
 /// A square difficulty tile. Returns (hovered, clicked).
 #[allow(clippy::too_many_arguments)]
 pub fn diff_tile(x: f32, y: f32, s: f32, tier: usize, n_tiers: usize, on: bool, focus: bool, u: f32, pal: &Palette) -> (bool, bool) {
-    let hv = hover(x, y, s, s);
     let col = diff_color(tier, n_tiers, pal);
-    draw_rectangle(x, y, s, s, if on { a(col, 0.28) } else { Color::new(0.0, 0.0, 0.05, 0.5) });
-    draw_rectangle_lines(x, y, s, s, if on { 3.0 } else { 1.0 } * u, if on { col } else { a(col, if hv { 0.9 } else { 0.4 }) });
+    let (hv, click) = tile(x, y, s, on, on && focus, col, 1.0, u);
     diff_icon(tier, n_tiers, x + s * 0.5, y + s * 0.5, s * 0.32, if on || hv { col } else { a(col, 0.7) });
-    if on && focus {
-        draw_rectangle(x, y + s + 5.0 * u, s, 3.0 * u, pal.accent);
-    }
-    (hv, hv && is_mouse_button_pressed(MouseButton::Left))
+    (hv, click)
 }
 
 /// A plain button with an optional icon. Returns (hovered, clicked).
@@ -379,8 +661,8 @@ pub fn diff_tile(x: f32, y: f32, s: f32, tier: usize, n_tiers: usize, on: bool, 
 pub fn button(x: f32, y: f32, w: f32, h: f32, ic: Option<Icon>, label: &str, focus: bool, strong: bool, u: f32, pal: &Palette) -> (bool, bool) {
     let hv = hover(x, y, w, h);
     if strong {
-        draw_rectangle(x, y, w, h, a(pal.secondary, if hv || focus { 0.55 } else { 0.32 }));
-        draw_rectangle_lines(x, y, w, h, 2.0 * u, pal.accent);
+        rrect(x, y, w, h, RADIUS * u, a(pal.secondary, if hv || focus { 0.62 } else { 0.4 }));
+        rrect_lines(x, y, w, h, RADIUS * u, 2.0 * u, pal.accent);
     } else {
         frame(x, y, w, h, false, hv || focus, u, pal);
     }
@@ -394,8 +676,32 @@ pub fn button(x: f32, y: f32, w: f32, h: f32, ic: Option<Icon>, label: &str, foc
     }
     text_left(label, x0 + iw, y + h * 0.5 + size * 0.33, size, col);
     if focus {
-        draw_rectangle(x - 10.0 * u, y, 3.0 * u, h, pal.accent);
+        rrect_lines(x - 4.0 * u, y - 4.0 * u, w + 8.0 * u, h + 8.0 * u, (RADIUS + 3.0) * u, 1.5 * u, Color::new(1.0, 1.0, 1.0, 0.75));
     }
+    (hv, hv && is_mouse_button_pressed(MouseButton::Left))
+}
+
+/// The big go button: a solid colour with a soft glow that breathes.
+#[allow(clippy::too_many_arguments)]
+pub fn go_button(x: f32, y: f32, w: f32, h: f32, ic: Icon, label: &str, focus: bool, col: Color, u: f32, time: f32) -> (bool, bool) {
+    let hv = hover(x, y, w, h);
+    let breathe = 0.5 + 0.5 * (time * 3.0).sin();
+    for k in 1..=3 {
+        let g = k as f32 * 5.0 * u;
+        rrect(x - g, y - g, w + 2.0 * g, h + 2.0 * g, 14.0 * u + g, a(col, (0.05 + 0.04 * breathe) * if hv || focus { 1.6 } else { 1.0 }));
+    }
+    let k = if hv { 0.95 } else { 0.8 };
+    rrect(x, y, w, h, 14.0 * u, Color::new(col.r * k, col.g * k, col.b * k, 0.95));
+    rrect(x + 4.0 * u, y + 4.0 * u, w - 8.0 * u, h * 0.42, 10.0 * u, Color::new(1.0, 1.0, 1.0, 0.12));
+    rrect_lines(x, y, w, h, 14.0 * u, 2.0 * u, if focus || hv { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.55) });
+    let size = 38.0 * u;
+    let tw = text_w(label, size);
+    let iw = h * 0.5 + 6.0 * u;
+    let x0 = x + (w - tw - iw) * 0.5;
+    let ink = Color::new(0.02, 0.0, 0.07, 1.0);
+    icon(ic, x0 + h * 0.2, y + h * 0.5, h * 0.2, ink);
+    text_left(label, x0 + iw + 1.5 * u, y + h * 0.5 + size * 0.3 + 1.5 * u, size, Color::new(1.0, 1.0, 1.0, 0.35));
+    text_left(label, x0 + iw, y + h * 0.5 + size * 0.3, size, ink);
     (hv, hv && is_mouse_button_pressed(MouseButton::Left))
 }
 

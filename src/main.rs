@@ -71,6 +71,8 @@ pub struct Args {
     song_idx: u32,
     diff_set: bool,
     screen: String,
+    /// Debug: use this folder or playlist as the music library for this launch (not saved).
+    library: Option<PathBuf>,
     live_in: String,
     live_out: String,
     /// LAN test: host a Rally match with this song.
@@ -149,6 +151,7 @@ fn parse_args() -> Args {
                 a.live = true;
             }
             "--screen" => a.screen = val(),
+            "--library" => a.library = Some(PathBuf::from(val())),
             "--live" => a.live = true,
             "--lan-host" => a.lan_host = Some(PathBuf::from(val())),
             "--lan-join" => a.lan_join = Some(val()),
@@ -398,9 +401,10 @@ const M_PLAY: usize = 0;
 const M_HIGHWAY: usize = 1;
 const M_LAN: usize = 2;
 const M_CODEX: usize = 3;
-const M_LIBRARY: usize = 4;
-const M_OPTIONS: usize = 5;
-const M_QUIT: usize = 6;
+const M_OPTIONS: usize = 4;
+const M_QUIT: usize = 5;
+/// The title menu is in groups with a line between them: this many rows in each.
+const MENU_GROUPS: [usize; 3] = [3, 2, 1];
 const CODEX_TABS: [&str; 6] = ["THE HEART", "ENEMIES", "UPGRADES", "THE MUSIC", "RECORDS", "MILESTONES"];
 /// Milestones: (id kept in the scores file, name, how to earn it).
 const MILESTONES: [(&str, &str, &str); 12] = [
@@ -452,39 +456,46 @@ const CODEX_MUSIC: [(&str, &str); 10] = [
     ("RESONANCE", "The meter under the combo bar. Full, it rings for eight seconds: more damage, double score."),
     ("GRADES", "Calm sections, purgatory and a cleared track grade you from C to S. Better grades offer more, and rarer, upgrades."),
 ];
-const MENU_ROWS: [(Icon, &str, &str); 7] = [
-    (Icon::Play, "PLAY", "Set up a run: endless or a single track, the difficulty, the starting song. Live audio and loose files are in there too."),
+const MENU_ROWS: [(Icon, &str, &str); 6] = [
+    (Icon::Play, "PLAY", "Set up a run on the track that is playing: the mode, the difficulty, mutators."),
     (Icon::Road, "HIGHWAY", "A side mode on this track: race down the grid. Switch lanes around the walls (kicks), jump the bars (snares), collect the gems (hats). Uses the difficulty chosen in PLAY."),
     (Icon::Lan, "LAN RALLY", "A beat-locked paddle duel against a second PC on your network. The host picks the song."),
-    (Icon::Files, "CODEX", "What everything is: the Heart's forms, the enemies, every upgrade, how the music becomes the level, and your best scores."),
-    (Icon::Library, "MUSIC LIBRARY", "The folder or .m3u playlist that runs and this menu draw from. ENTER picks a folder, SHIFT+ENTER a playlist, or drop either on this row."),
+    (Icon::Book, "CODEX", "What everything is: the Heart's forms, the enemies, every upgrade, how the music becomes the level, and your best scores."),
     (Icon::Options, "OPTIONS", "Volumes, sync offset, how hard the scene pulses with the music, windowed or fullscreen."),
     (Icon::Quit, "QUIT", "Close Heartline."),
 ];
 // Rows of the run setup screen.
 const S_MODE: usize = 0;
-const S_DIFF: usize = 1;
-const S_MUT: usize = 2;
-const S_TRACK: usize = 3;
-const S_START: usize = 4;
-const S_OTHER: usize = 5;
+const S_REMIX: usize = 1;
+const S_TRACK: usize = 2;
+const S_DIFF: usize = 3;
+const S_MUT: usize = 4;
+const S_START: usize = 5;
 const SETUP_MODES: [(Icon, &str, &str); 5] = [
-    (Icon::Endless, "ENDLESS", "ENDLESS RUN: this track, then the library keeps coming. HP, upgrades and score carry over until you fall."),
-    (Icon::Single, "SINGLE", "SINGLE TRACK: just this song. You can still carry on into more songs from the results screen."),
-    (Icon::Sync, "DAILY", "DAILY SEED: an endless run on today's seed. The same songs give everyone the same levels and upgrade offers today."),
-    (Icon::Sfx, "DROP RUSH", "DROP RUSH: every track is cut down to its biggest section. Short, dense, endless."),
-    (Icon::Visuals, "DODGE", "DODGE: no gun. The Heart cannot be hurt. Score by slipping close past bullets and by staying alive."),
+    (Icon::Endless, "ENDLESS", "This track, then the library keeps coming. HP, upgrades and score carry over until you fall."),
+    (Icon::Single, "SINGLE", "Just this song. You can still carry on into more songs from the results screen."),
+    (Icon::Calendar, "DAILY", "An endless run on today's seed. The same songs give everyone the same levels and upgrade offers today."),
+    (Icon::Bolt, "DROP RUSH", "Every track is cut down to its biggest section. Short, dense, endless."),
+    (Icon::Visuals, "DODGE", "No gun, and the Heart cannot be hurt. Score by slipping close past bullets and by staying alive."),
 ];
+/// The buttons under the track preview in the top right corner: (icon, name, what it does).
+const CORNER: [(Icon, &str, &str); 8] = [
+    (Icon::Prev, "PREVIOUS TRACK  (Q)", "Step back through your library."),
+    (Icon::Next, "NEXT TRACK  (E)", "Step forward through your library."),
+    (Icon::List, "TRACK LIST  (T)", "Pick from the whole library. Type a letter to jump to it."),
+    (Icon::Files, "PLAY FILES", "Pick audio files or an .m3u playlist and play them in order. Dropping files on the window does the same."),
+    (Icon::Folder, "PLAY A FOLDER", "Pick a folder and play everything in it, without changing your library."),
+    (Icon::Live, "LIVE AUDIO", "Play against whatever your PC is playing right now. The level is built on the fly."),
+    (Icon::Folder, "LIBRARY FROM A FOLDER", "Choose the folder that runs and this menu draw from."),
+    (Icon::Playlist, "LIBRARY FROM A PLAYLIST", "Choose an .m3u playlist that runs and this menu draw from."),
+];
+/// How far below the top of the track preview the run-setup panel starts.
+const CORNER_H: f32 = 232.0;
 const MODE_DAILY: usize = 2;
 const MODE_RUSH: usize = 3;
 const MODE_DODGE: usize = 4;
 /// Score multiplier of each difficulty tier.
 const TIER_SCORE: [f32; 7] = [0.5, 0.8, 1.0, 1.25, 1.5, 1.8, 2.2];
-const SETUP_OTHER: [(Icon, &str, &str); 3] = [
-    (Icon::Files, "PLAY FILES...", "Pick audio files or an .m3u playlist and play them in order. Dropping files on the window does the same."),
-    (Icon::Folder, "PLAY FOLDER...", "Pick a folder and play everything in it."),
-    (Icon::Live, "LIVE AUDIO", "Play against whatever your PC is playing right now. The level is built on the fly."),
-];
 // Rows of the options screen: (icon, label, tooltip).
 const O_MUSIC: usize = 0;
 const O_SFX: usize = 1;
@@ -556,6 +567,10 @@ struct App {
     setup_mode: usize,
     /// Track list: the highlighted row.
     track_sel: usize,
+    /// The screen the track list goes back to.
+    tracks_back: Screen,
+    /// Where the difficulty strip is scrolled to (eases toward `diff`).
+    diff_scroll: f32,
     /// Remix number chosen in run setup: added to the seed, so the same song deals a different
     /// level (0 = the song's own).
     remix: u64,
@@ -827,11 +842,10 @@ impl App {
     /// What the menu jukebox is playing: (title, hint line).
     fn juke_title(&self) -> (String, String) {
         let (title, hint) = match (&self.juke.loaded, self.juke.list.get(self.juke.idx)) {
-            (_, None) => ("no music found".to_string(), "choose MUSIC LIBRARY or drop files on the window".to_string()),
+            (_, None) => ("no music found".to_string(), "set a music library below, or drop files on the window".to_string()),
             (Some((p, l)), Some(want)) if p == want => (l.track.name.clone(), "Q / E  change track".to_string()),
             (_, Some(want)) => (track_title(want), "reading the music...".to_string()),
         };
-        let title: String = if title.chars().count() > 38 { title.chars().take(35).chain("...".chars()).collect() } else { title };
         (title, hint)
     }
 
@@ -967,6 +981,100 @@ impl App {
         let t = self.world.t;
         self.world.update(dt, t, input, bp, &feat, intensity, false);
         progress
+    }
+
+    /// The track preview in the top right corner with its buttons and the library bar. It is
+    /// the same on the title menu and in run setup, so the song never moves. `focus` is the
+    /// button the keyboard is on, `enter` presses it.
+    fn track_corner(&mut self, tip: &mut ui::Tip, progress: f32, focus: Option<usize>, enter: bool, u: f32, sw: f32) {
+        let pal = self.rend.pal;
+        let (x, y, w) = (sw - 700.0 * u, 110.0 * u, 590.0 * u);
+        let (title, hint) = self.juke_title();
+        self.rend.draw_now_playing(x, y, w, u, &self.world, &title, &hint, progress);
+        let busy = self.dialog.is_some();
+        let lib_name = self.music_dir.as_ref().and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("none chosen").to_string();
+        let n_lib = self.juke.list.len().saturating_sub(synth::THEME_COUNT);
+        let (ts, gap) = (54.0 * u, 10.0 * u);
+        let ty = y + 108.0 * u;
+        let mut act: Option<usize> = None;
+        let soft = |a: f32| Color::new(1.0, 1.0, 1.0, a);
+        // row one: the track on the left, other things to play on the right
+        for (i, c) in CORNER.iter().enumerate().take(6) {
+            let tx = if i < 3 { x + i as f32 * (ts + gap) } else { x + w - (6 - i) as f32 * (ts + gap) + gap };
+            let f = focus == Some(i);
+            let (hv, click) = ui::tile(tx, ty, ts, false, f, pal.accent, 1.0, u);
+            ui::icon(c.0, tx + ts * 0.5, ty + ts * 0.5, ts * 0.25, if hv || f { pal.accent } else { soft(0.82) });
+            if hv || f {
+                tip.set(c.1, c.2, hv);
+            }
+            if click && !busy {
+                act = Some(i);
+            }
+        }
+        render::text_right("or play", x + w - 3.0 * (ts + gap) - 6.0 * u, ty + ts * 0.5 + 6.0 * u, 17.0 * u, soft(0.45));
+        // row two: the library, with room for a long name
+        let (ly, lh) = (ty + ts + 10.0 * u, 48.0 * u);
+        ui::rrect(x, ly, w, lh, ui::RADIUS * u, Color::new(0.02, 0.0, 0.07, 0.7));
+        ui::rrect_lines(x, ly, w, lh, ui::RADIUS * u, 1.2 * u, soft(0.14));
+        ui::icon(Icon::Library, x + 26.0 * u, ly + lh * 0.5, 11.0 * u, pal.primary);
+        let bs = 38.0 * u;
+        let count = format!("{n_lib} tracks");
+        let cw = text_w(&count, 17.0 * u);
+        let bx0 = x + w - 2.0 * (bs + 6.0 * u);
+        render::text_right(&count, bx0 - 12.0 * u, ly + lh * 0.5 + 6.0 * u, 17.0 * u, soft(0.5));
+        let name_w = bx0 - 24.0 * u - cw - (x + 52.0 * u);
+        ui::marquee(&lib_name, x + 52.0 * u, ly + lh * 0.5 + 8.0 * u, 22.0 * u, name_w, soft(0.9), self.rend.time);
+        if ui::hover(x, ly, bx0 - x, lh) {
+            tip.set("MUSIC LIBRARY", &format!("{lib_name}, {n_lib} tracks. Runs and this menu draw from it. The two buttons choose a folder or an .m3u playlist."), true);
+        }
+        for i in 6..8 {
+            let c = &CORNER[i];
+            let tx = bx0 + (i - 6) as f32 * (bs + 6.0 * u);
+            let f = focus == Some(i);
+            let (hv, click) = ui::tile(tx, ly + (lh - bs) * 0.5, bs, false, f, pal.accent, 1.0, u);
+            ui::icon(c.0, tx + bs * 0.5, ly + lh * 0.5, bs * 0.26, if hv || f { pal.accent } else { soft(0.82) });
+            if hv || f {
+                tip.set(c.1, c.2, hv);
+            }
+            if click && !busy {
+                act = Some(i);
+            }
+        }
+        if !busy {
+            if enter {
+                act = focus;
+            }
+            if is_key_pressed(KeyCode::Q) {
+                act = Some(0);
+            } else if is_key_pressed(KeyCode::E) {
+                act = Some(1);
+            } else if is_key_pressed(KeyCode::T) {
+                act = Some(2);
+            }
+        }
+        match act {
+            Some(0) => self.juke_next(-1),
+            Some(1) => self.juke_next(1),
+            Some(2) => {
+                self.track_sel = self.juke.idx;
+                // drop the key that opened the list so it does not count as a letter jump
+                while get_char_pressed().is_some() {}
+                self.tracks_back = self.screen;
+                self.screen = Screen::Tracks;
+                self.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+            }
+            Some(3) => self.open_files_dialog(),
+            Some(4) => self.open_folder_dialog(false, false),
+            Some(5) => {
+                self.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                self.audio.refresh_devices();
+                self.screen = Screen::LiveSetup;
+                self.menu_sel = 0;
+            }
+            Some(6) => self.open_folder_dialog(true, false),
+            Some(7) => self.open_folder_dialog(true, true),
+            _ => {}
+        }
     }
 
     /// Start a run with the track the menu is playing, plus `extra` more from the playlist.
@@ -1141,6 +1249,18 @@ impl App {
     }
 
     fn to_menu(&mut self) {
+        // The menu moves on to the track after the one the run (or the road) ended on.
+        let n = self.juke.list.len();
+        if n > 1 && self.live.is_none() && (self.runner.is_some() || !self.queue.is_empty()) {
+            let last = self.queue.get(self.qi.min(self.queue.len().saturating_sub(1)));
+            let at = last.and_then(|p| self.juke.list.iter().position(|q| q == p)).unwrap_or(self.juke.idx);
+            self.juke.idx = (at + 1) % n;
+            self.juke.loader = None;
+            self.juke.fails = 0;
+            self.juke.played = 0.0;
+        }
+        self.queue.clear();
+        self.qi = 0;
         self.runner = None;
         self.juke.playing = false;
         self.audio.stop();
@@ -1222,7 +1342,7 @@ impl App {
             self.world.player.ups[up as usize] = (self.world.player.ups[up as usize] + 1).min(up.max());
         }
         self.died = false;
-        self.loader = Some(spawn_loader(0, self.queue[0].clone(), self.args.seed, self.diff()));
+        self.loader = Some(spawn_loader(0, self.queue[0].clone(), self.track_seed(0), self.diff()));
         self.screen = Screen::Play;
         self.phase = Phase::Loading;
     }
@@ -1303,7 +1423,7 @@ impl App {
             let want = if self.song.is_some() && self.phase == Phase::Song { self.qi + 1 } else { self.qi };
             let have = self.ready.as_ref().map(|r| r.0);
             if want < self.queue.len() && have != Some(want) {
-                self.loader = Some(spawn_loader(want, self.queue[want].clone(), self.args.seed, self.diff()));
+                self.loader = Some(spawn_loader(want, self.queue[want].clone(), self.track_seed(want), self.diff()));
             }
         }
     }
@@ -1311,6 +1431,10 @@ impl App {
     /// The next library track that is not already in this run (wraps around when all are used).
     fn next_library_track(&mut self) -> Option<PathBuf> {
         let n = self.juke.list.len();
+        if n == 0 {
+            // No library at all: go round what the run already played.
+            return self.queue.first().cloned();
+        }
         for _ in 0..n {
             self.juke_seq = (self.juke_seq + 1) % n;
             let p = &self.juke.list[self.juke_seq];
@@ -1319,6 +1443,13 @@ impl App {
             }
         }
         self.juke.list.get(self.juke_seq).cloned()
+    }
+
+    /// The level seed of queue entry `idx`. A track that comes round again in the same run is
+    /// dealt differently each time.
+    fn track_seed(&self, idx: usize) -> u64 {
+        let laps = self.queue.get(idx).map_or(0, |p| self.queue[..idx].iter().filter(|q| *q == p).count()) as u64;
+        self.args.seed.wrapping_add(laps.wrapping_mul(0xA24B_AED4_963E_E407))
     }
 
     /// Carry on after the last queued track: same build, next track from the library.
@@ -2686,8 +2817,8 @@ impl App {
                 for (k, (who, name, ch, ready, on)) in cards.iter().enumerate() {
                     let cx = x + k as f32 * 600.0 * u;
                     let cy = 220.0 * u;
-                    draw_rectangle(cx, cy, 560.0 * u, 170.0 * u, Color::new(0.0, 0.0, 0.05, 0.5));
-                    draw_rectangle_lines(cx, cy, 560.0 * u, 170.0 * u, 2.0 * u, if *ready { pal.accent } else { Color::new(1.0, 1.0, 1.0, 0.25) });
+                    ui::rrect(cx, cy, 560.0 * u, 170.0 * u, 8.0 * u, Color::new(0.0, 0.0, 0.05, 0.5));
+                    ui::rrect_lines(cx, cy, 560.0 * u, 170.0 * u, 8.0 * u, 2.0 * u, if *ready { pal.accent } else { Color::new(1.0, 1.0, 1.0, 0.25) });
                     text_left(&format!("{who}   {name}"), cx + 20.0 * u, cy + 36.0 * u, 22.0 * u, soft);
                     if *on {
                         let c = Character::from_index(*ch).unwrap_or(Character::Sub);
@@ -2707,8 +2838,8 @@ impl App {
                 let bar = |y: f32, label: &str, f: f32| {
                     let w = 700.0 * u;
                     text_left(label, x, y, 22.0 * u, soft);
-                    draw_rectangle(x + 300.0 * u, y - 16.0 * u, w, 18.0 * u, Color::new(0.0, 0.0, 0.05, 0.6));
-                    draw_rectangle(x + 300.0 * u, y - 16.0 * u, w * f.clamp(0.0, 1.0), 18.0 * u, pal.secondary);
+                    ui::rrect(x + 300.0 * u, y - 16.0 * u, w, 18.0 * u, 8.0 * u, Color::new(0.0, 0.0, 0.05, 0.6));
+                    ui::rrect(x + 300.0 * u, y - 16.0 * u, w * f.clamp(0.0, 1.0), 8.0 * u, 18.0 * u, pal.secondary);
                 };
                 y += 44.0 * u;
                 if lan.xfer.1 > 0 {
@@ -2904,6 +3035,7 @@ fn dim(a: f32) {
 // ---------------------------------------------------------------------------------------------
 
 async fn run(args: Args) {
+    render::init_font();
     let audio = Audio::new();
     let rend = Renderer::new(args.ss);
     let diff = args.diff;
@@ -2936,6 +3068,8 @@ async fn run(args: Args) {
         quit_armed: false,
         runner: None,
         track_sel: 0,
+        tracks_back: Screen::Setup,
+        diff_scroll: diff as f32,
         remix: 0,
         setup_mode: 0,
         mutators: 0,
@@ -2986,6 +3120,9 @@ async fn run(args: Args) {
         display::set_borderless(true);
     }
     app.music_dir = cfg.get("music_dir").map(PathBuf::from).filter(|p| p.is_dir() || is_playlist(p)).or_else(|| music_folder().filter(|p| p.is_dir()));
+    if let Some(lib) = args.library.clone() {
+        app.music_dir = Some(lib);
+    }
     app.world = World::new(app.diff(), app.diff == 0);
     app.juke_rescan();
     app.audio.set_volume(if args.mute { 0.0 } else { app.volume });
@@ -3000,6 +3137,9 @@ async fn run(args: Args) {
     } else if args.screen == "setup" {
         app.screen = Screen::Setup;
         app.menu_sel = S_START;
+    } else if args.screen == "results" {
+        app.screen = Screen::Results;
+        app.world.score = 1_234_560;
     } else if args.screen == "options" {
         app.screen = Screen::Options;
     } else if args.screen == "codex" {
@@ -3054,16 +3194,9 @@ async fn run(args: Args) {
         // ---- dropped files / dialog results ----
         let dropped: Vec<PathBuf> = get_dropped_files().into_iter().filter_map(|f| f.path).collect();
         if !dropped.is_empty() && matches!(app.screen, Screen::Menu | Screen::Options | Screen::Setup | Screen::Results | Screen::LiveSetup) {
-            let as_library = app.screen == Screen::Menu && app.menu_sel == M_LIBRARY && dropped.len() == 1 && (dropped[0].is_dir() || is_playlist(&dropped[0]));
-            if as_library {
-                app.music_dir = Some(dropped[0].clone());
-                app.juke_rescan();
-                app.save_settings();
-            } else {
-                let paths = expand_paths(&dropped);
-                app.endless = false;
-                app.start_run(paths);
-            }
+            let paths = expand_paths(&dropped);
+            app.endless = app.setup_mode != 1;
+            app.start_run(paths);
         }
         let mut picked: Option<Vec<PathBuf>> = None;
         if let Some(rx) = &app.dialog {
@@ -3083,7 +3216,9 @@ async fn run(args: Args) {
                     app.save_settings();
                 }
             } else if !p.is_empty() {
-                app.endless = false;
+                // Loose files follow the chosen mode: anything but SINGLE carries on into the
+                // library when they run out.
+                app.endless = app.setup_mode != 1;
                 let paths = expand_paths(&p);
                 app.start_run(paths);
             }
@@ -3213,25 +3348,26 @@ async fn run(args: Args) {
         match app.screen {
             Screen::Menu => {
                 app.rend.draw_logo(110.0 * u, 96.0 * u, u, &app.world);
-                let lib_name = app
-                    .music_dir
-                    .as_ref()
-                    .and_then(|d| d.file_name())
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("none")
-                    .to_string();
-                let n_lib = app.juke.list.len().saturating_sub(synth::THEME_COUNT);
                 let mut tip = ui::Tip::default();
-                let items: Vec<(Icon, String)> = MENU_ROWS
-                    .iter()
-                    .enumerate()
-                    .map(|(i, r)| (r.0, if i == M_LIBRARY { format!("{}   {lib_name}  ({n_lib})", r.1) } else { r.1.to_string() }))
-                    .collect();
+                let items: Vec<(Icon, String)> = MENU_ROWS.iter().map(|r| (r.0, r.1.to_string())).collect();
                 let x = 110.0 * u;
-                let ys: Vec<f32> = (0..items.len()).map(|i| 300.0 * u + i as f32 * 68.0 * u).collect();
+                let (rw, rh) = (430.0 * u, 54.0 * u);
+                // rows in groups, with a line between the groups
+                let mut ys: Vec<f32> = Vec::new();
+                let mut y = 300.0 * u;
+                for (g, n) in MENU_GROUPS.iter().enumerate() {
+                    if g > 0 {
+                        ui::sep(x, y + 9.0 * u, rw, u);
+                        y += 20.0 * u;
+                    }
+                    for _ in 0..*n {
+                        ys.push(y);
+                        y += rh + 8.0 * u;
+                    }
+                }
                 app.menu_sel = app.menu_sel.min(items.len() - 1);
                 let before = app.menu_sel;
-                let (act, hov) = if app.dialog.is_none() { ui::icon_list(&items, &ys, &mut app.menu_sel, x, 520.0 * u, 58.0 * u, u, &pal, app.rend.time) } else { (None, None) };
+                let (act, hov) = if app.dialog.is_none() { ui::icon_list(&items, &ys, &mut app.menu_sel, x, rw, rh, u, &pal, app.rend.time) } else { (None, None) };
                 if act.is_some() {
                     app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
                 } else if app.menu_sel != before {
@@ -3239,10 +3375,6 @@ async fn run(args: Args) {
                 }
                 let shown = hov.unwrap_or(app.menu_sel);
                 tip.set(MENU_ROWS[shown].1, MENU_ROWS[shown].2, hov.is_some());
-                let track_dirk = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32;
-                if track_dirk != 0 && app.dialog.is_none() {
-                    app.juke_next(track_dirk);
-                }
                 match act {
                     Some(M_PLAY) => {
                         app.screen = Screen::Setup;
@@ -3254,11 +3386,6 @@ async fn run(args: Args) {
                         app.menu_sel = 0;
                     }
                     Some(M_LAN) => app.lan_open(),
-                    Some(M_LIBRARY) => {
-                        // SHIFT + ENTER picks an .m3u playlist instead of a folder.
-                        let playlist = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
-                        app.open_folder_dialog(true, playlist);
-                    }
                     Some(M_OPTIONS) => {
                         app.screen = Screen::Options;
                         app.menu_sel = 0;
@@ -3266,102 +3393,241 @@ async fn run(args: Args) {
                     Some(M_QUIT) => break,
                     _ => {}
                 }
-                let (title, hint) = app.juke_title();
-                app.rend.draw_now_playing(sw - 700.0 * u, 110.0 * u, 590.0 * u, u, &app.world, &title, &hint, progress);
-                let hy = sh - 60.0 * u;
-                text_shadow("WASD move   mouse aim   SPACE dash   F auto-fire   ESC / P pause   F11 fullscreen", 110.0 * u, hy + 28.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.55), -1);
+                app.track_corner(&mut tip, progress, None, false, u, sw);
+                let hy = sh - 62.0 * u;
+                let mut kx = 110.0 * u;
+                for (k, what) in [("WASD", "move"), ("MOUSE", "aim"), ("SPACE", "dash"), ("F", "auto-fire"), ("ESC", "pause"), ("F11", "fullscreen")] {
+                    kx = ui::keycap(k, what, kx, hy + 34.0 * u, u);
+                }
                 tip.draw(110.0 * u, hy, u, &pal);
                 if app.dialog.is_some() {
                     text_shadow("waiting for the file dialog...", sw * 0.5, sh * 0.5, 28.0 * u, pal.accent, 0);
                 }
             }
             Screen::Setup => {
-                dim(0.62);
-                let x = 110.0 * u;
-                let w = 760.0 * u;
-                render::vtext("RUN SETUP", x, 130.0 * u, 64.0 * u, WHITE, -1);
+                dim(0.45);
                 let mut tip = ui::Tip::default();
                 let busy = app.dialog.is_some();
                 let nd = DIFFS.len();
+                let time = app.rend.time;
+                let dim_w = |a: f32| Color::new(1.0, 1.0, 1.0, a);
                 let mut dirk = 0i32;
                 if !busy {
                     let dv = is_key_pressed(KeyCode::Down) as i32 - is_key_pressed(KeyCode::Up) as i32;
                     if dv != 0 {
-                        app.menu_sel = (app.menu_sel as i32 + dv).rem_euclid(6) as usize;
+                        app.menu_sel = (app.menu_sel as i32 + dv).rem_euclid(S_START as i32 + 1) as usize;
                         app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
                     }
                     dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
                 }
-                let row = app.menu_sel.min(S_OTHER);
+                let row = app.menu_sel.min(S_START);
+                let enter = !busy && (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter));
                 let mut changed = false;
                 let mut pick = false;
 
-                // ---- mode: both choices stay visible ----
-                ui::heading("MODE", x, 212.0 * u, u, &pal);
-                let modes: Vec<(Option<Icon>, &str)> = SETUP_MODES.iter().map(|m| (Some(m.0), m.1)).collect();
-                let cur = app.setup_mode.min(SETUP_MODES.len() - 1);
-                let (click, hov) = ui::segments(x, 224.0 * u, w, 62.0 * u, &modes, cur, row == S_MODE, u, &pal);
-                if let Some(i) = hov {
-                    tip.set(SETUP_MODES[i].1, SETUP_MODES[i].2, true);
-                } else if row == S_MODE {
-                    tip.set(SETUP_MODES[cur].1, SETUP_MODES[cur].2, false);
-                }
-                if let Some(i) = click.filter(|_| !busy) {
-                    app.setup_mode = i;
-                    app.menu_sel = S_MODE;
-                    pick = true;
-                }
-                if row == S_MODE && dirk != 0 {
-                    app.setup_mode = (cur as i32 + dirk).rem_euclid(SETUP_MODES.len() as i32) as usize;
-                    pick = true;
-                }
-
-                // ---- difficulty: one tile per tier, the hovered or chosen one is described ----
-                ui::heading("DIFFICULTY", x, 334.0 * u, u, &pal);
-                let gap = 12.0 * u;
-                let ts = (w - gap * (nd as f32 - 1.0)) / nd as f32;
-                let ty = 346.0 * u;
-                let mut shown = app.diff;
-                for i in 0..nd {
-                    let (hv, click) = ui::diff_tile(x + i as f32 * (ts + gap), ty, ts, i, nd, i == app.diff, row == S_DIFF, u, &pal);
+                // =============== left: what kind of run ===============
+                let (lx, ly, lw) = (110.0 * u, 190.0 * u, 600.0 * u);
+                let pad = 22.0 * u;
+                render::vtext("RUN SETUP", lx, 142.0 * u, 54.0 * u, WHITE, -1);
+                ui::panel(lx, ly, lw, 548.0 * u, u);
+                // the modes, one tile each, like a roster
+                let nm = SETUP_MODES.len();
+                let ms = 96.0 * u;
+                let mgap = (lw - 2.0 * pad - nm as f32 * ms) / (nm as f32 - 1.0);
+                let cur = app.setup_mode.min(nm - 1);
+                let mut shown_mode = cur;
+                for (i, m) in SETUP_MODES.iter().enumerate() {
+                    let tx = lx + pad + i as f32 * (ms + mgap);
+                    let on = i == cur;
+                    let (hv, click) = ui::tile(tx, ly + pad, ms, on, row == S_MODE && on, pal.primary, 1.0, u);
+                    ui::icon(m.0, tx + ms * 0.5, ly + pad + ms * 0.5, ms * 0.27, if on { WHITE } else if hv { pal.primary } else { dim_w(0.7) });
                     if hv {
-                        shown = i;
-                        tip.set(DIFFS[i].1, DIFFS[i].2, true);
+                        shown_mode = i;
                     }
                     if click && !busy {
-                        app.diff = i;
-                        app.menu_sel = S_DIFF;
-                        changed = true;
+                        app.setup_mode = i;
+                        app.menu_sel = S_MODE;
                         pick = true;
                     }
                 }
-                if row == S_DIFF && dirk != 0 {
-                    app.diff = (app.diff as i32 + dirk).rem_euclid(nd as i32) as usize;
-                    shown = app.diff;
-                    changed = true;
+                if row == S_MODE && dirk != 0 {
+                    app.setup_mode = (cur as i32 + dirk).rem_euclid(nm as i32) as usize;
+                    shown_mode = app.setup_mode;
                     pick = true;
                 }
-                let dcol = ui::diff_color(shown, nd, &pal);
-                text_left(DIFFS[shown].1, x, ty + ts + 44.0 * u, 34.0 * u, dcol);
-                text_left(&format!("{} / {}", shown + 1, nd), x + text_w(DIFFS[shown].1, 34.0 * u) + 18.0 * u, ty + ts + 44.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
-                text_left(DIFFS[shown].2, x, ty + ts + 74.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85));
+                let my = ly + pad + ms + 60.0 * u;
+                text_center(SETUP_MODES[shown_mode].1, lx + lw * 0.5, my, 46.0 * u, WHITE);
+                for (i, l) in ui::wrap(SETUP_MODES[shown_mode].2, 21.0 * u, lw - 2.0 * pad - 20.0 * u).iter().take(3).enumerate() {
+                    text_center(l, lx + lw * 0.5, my + 38.0 * u + i as f32 * 27.0 * u, 21.0 * u, dim_w(0.8));
+                }
+                let mut ry = my + 38.0 * u + 3.0 * 27.0 * u;
+                ui::sep(lx + pad, ry - 8.0 * u, lw - 2.0 * pad, u);
+                // rows: a label cell, then what it holds
+                let (lab_w, row_h) = (150.0 * u, 66.0 * u);
+                let cell = |label: &str, y: f32, focus: bool| {
+                    ui::rrect(lx + pad, y, lab_w, row_h, ui::RADIUS * u, Color::new(1.0, 1.0, 1.0, 0.06));
+                    if focus {
+                        ui::rrect_lines(lx + pad, y, lab_w, row_h, ui::RADIUS * u, 1.5 * u, dim_w(0.75));
+                    }
+                    text_center(label, lx + pad + lab_w * 0.5, y + row_h * 0.5 + 8.0 * u, 23.0 * u, pal.primary);
+                };
+                let cx0 = lx + pad + lab_w + 14.0 * u;
+                // ---- remix: the same song, dealt differently ----
+                ry += 8.0 * u;
+                cell("REMIX", ry, row == S_REMIX);
+                let (h0, c0) = ui::tile(cx0, ry, row_h, app.remix == 0, false, pal.accent, 1.0, u);
+                ui::icon(Icon::Note, cx0 + row_h * 0.5, ry + row_h * 0.5, row_h * 0.26, if app.remix == 0 { WHITE } else { dim_w(0.7) });
+                let dx = cx0 + row_h + 12.0 * u;
+                let (h1, c1) = ui::tile(dx, ry, row_h, app.remix > 0, false, pal.accent, 1.0, u);
+                ui::icon(Icon::Dice, dx + row_h * 0.5, ry + row_h * 0.5, row_h * 0.26, if app.remix > 0 { WHITE } else { dim_w(0.7) });
+                let remix_s = if app.remix == 0 { "the song's own deal".to_string() } else { format!("deal no. {}", app.remix) };
+                text_left(&remix_s, dx + row_h + 18.0 * u, ry + row_h * 0.5 + 8.0 * u, 23.0 * u, dim_w(0.85));
+                if h0 || h1 || row == S_REMIX {
+                    tip.set("REMIX", "The same song, dealt differently: other patterns, enemies and upgrade offers on the same beats. R or the dice for the next deal, the note for the song's own. Scores share one best.", h0 || h1);
+                }
+                if !busy {
+                    let mut r = app.remix as i32;
+                    if c1 || is_key_pressed(KeyCode::R) || (enter && row == S_REMIX) {
+                        r = (r + 1) % 100;
+                    }
+                    if row == S_REMIX {
+                        r = (r + dirk).clamp(0, 99);
+                    }
+                    if c0 {
+                        r = 0;
+                    }
+                    if r as u64 != app.remix {
+                        app.remix = r as u64;
+                        pick = true;
+                    }
+                    if c0 || c1 {
+                        app.menu_sel = S_REMIX;
+                    }
+                }
+                // ---- what the run is worth, and the best so far ----
+                ry += row_h + 10.0 * u;
+                cell("SCORE", ry, false);
+                let mult = format!("x{:.2}", app.score_mult());
+                text_left(&mult, cx0 + 4.0 * u, ry + row_h * 0.5 + 12.0 * u, 36.0 * u, pal.accent);
+                let nmut = app.mutators.count_ones();
+                let why = format!("{}{}", DIFFS[app.diff].1, if nmut > 0 { format!("  +  {nmut} mutator{}", if nmut > 1 { "s" } else { "" }) } else { String::new() });
+                text_left(&why, cx0 + 14.0 * u + text_w(&mult, 36.0 * u), ry + row_h * 0.5 + 8.0 * u, 20.0 * u, dim_w(0.6));
+                ry += row_h + 10.0 * u;
+                cell("BEST", ry, false);
+                let key = app.score_key(&app.juke.list.get(app.juke.idx).map(|p| track_title(p)).unwrap_or_default());
+                match app.scores.get(&key).copied() {
+                    Some((s, d)) => {
+                        ui::icon(Icon::Trophy, cx0 + 20.0 * u, ry + row_h * 0.5, 15.0 * u, pal.accent);
+                        text_left(&format!("{s}"), cx0 + 48.0 * u, ry + row_h * 0.5 + 11.0 * u, 32.0 * u, WHITE);
+                        text_left(&format!("depth {d}"), cx0 + 62.0 * u + text_w(&format!("{s}"), 32.0 * u), ry + row_h * 0.5 + 8.0 * u, 20.0 * u, dim_w(0.6));
+                    }
+                    None => text_left("none yet for this track, tier and mode", cx0 + 4.0 * u, ry + row_h * 0.5 + 8.0 * u, 20.0 * u, dim_w(0.55)),
+                }
+
+                // =============== right: the track, then the rules ===============
+                if row == S_TRACK && dirk != 0 {
+                    app.setup_col = (app.setup_col as i32 + dirk).rem_euclid(CORNER.len() as i32) as usize;
+                    pick = true;
+                }
+                let corner_focus = if row == S_TRACK { Some(app.setup_col.min(CORNER.len() - 1)) } else { None };
+                app.track_corner(&mut tip, progress, corner_focus, enter && row == S_TRACK, u, sw);
+                let (rx, rw) = (sw - 700.0 * u, 590.0 * u);
+                let py = (110.0 + CORNER_H) * u;
+                let inset = 14.0 * u;
+                ui::panel(rx, py, rw, 490.0 * u, u);
+                // ---- difficulty: a strip that scrolls; tiers away from the chosen one slide out of view ----
+                let dcol = ui::diff_color(app.diff, nd, &pal);
+                ui::header(rx + inset, py + inset, rw - 2.0 * inset, 44.0 * u, Icon::Heart, "DIFFICULTY", dcol, row == S_DIFF, u);
+                let (vx, vy, vw, vh) = (rx + inset, py + inset + 54.0 * u, rw - 2.0 * inset, 128.0 * u);
+                ui::rrect(vx, vy, vw, vh, ui::RADIUS * u, Color::new(0.0, 0.0, 0.03, 0.5));
+                app.diff_scroll += (app.diff as f32 - app.diff_scroll) * (1.0 - (-14.0 * dt).exp());
+                let (ts, pitch) = (96.0 * u, 132.0 * u);
+                let in_strip = ui::hover(vx, vy, vw, vh);
+                let mut shown = app.diff;
+                let mut diff_to: Option<usize> = None;
+                ui::clip(Some((vx, vy, vw, vh)));
+                for i in 0..nd {
+                    let off = i as f32 - app.diff_scroll;
+                    let tx = vx + vw * 0.5 + off * pitch - ts * 0.5;
+                    if tx > vx + vw || tx + ts < vx {
+                        continue;
+                    }
+                    let fade = (1.0 - (off.abs() - 1.1).max(0.0) / 1.2).clamp(0.0, 1.0);
+                    let on = i == app.diff;
+                    let col = ui::diff_color(i, nd, &pal);
+                    let (hv, click) = ui::tile(tx, vy + 16.0 * u, ts, on, false, col, fade, u);
+                    let hv = hv && in_strip;
+                    ui::diff_icon(i, nd, tx + ts * 0.5, vy + 16.0 * u + ts * 0.5, ts * 0.32, Color::new(col.r, col.g, col.b, fade * if on || hv { 1.0 } else { 0.75 }));
+                    if hv {
+                        shown = i;
+                        tip.set(DIFFS[i].1, DIFFS[i].2, true);
+                        if click && !busy {
+                            diff_to = Some(i);
+                        }
+                    }
+                }
+                ui::clip(None);
+                // arrows at the ends of the strip, and the wheel, scroll it
+                for (side, ic) in [(-1i32, Icon::Prev), (1, Icon::Next)] {
+                    let can = if side < 0 { app.diff > 0 } else { app.diff + 1 < nd };
+                    let ax = if side < 0 { vx + 4.0 * u } else { vx + vw - 34.0 * u };
+                    let hv = ui::hover(ax, vy, 30.0 * u, vh);
+                    if can {
+                        ui::icon(ic, ax + 15.0 * u, vy + vh * 0.5, 9.0 * u, dim_w(if hv { 1.0 } else { 0.45 }));
+                        if hv && is_mouse_button_pressed(MouseButton::Left) && !busy {
+                            diff_to = Some((app.diff as i32 + side) as usize);
+                        }
+                    }
+                }
+                if !busy {
+                    let (_, wheel) = mouse_wheel();
+                    let mut step = if row == S_DIFF { dirk } else { 0 };
+                    if in_strip && wheel != 0.0 {
+                        step -= wheel.signum() as i32;
+                    }
+                    if step != 0 {
+                        diff_to = Some((app.diff as i32 + step).clamp(0, nd as i32 - 1) as usize);
+                    }
+                }
+                if let Some(d) = diff_to.filter(|d| *d != app.diff) {
+                    app.diff = d;
+                    shown = d;
+                    changed = true;
+                    pick = true;
+                    if in_strip {
+                        app.menu_sel = S_DIFF;
+                    }
+                }
+                let scol = ui::diff_color(shown, nd, &pal);
+                let ny = vy + vh + 40.0 * u;
+                text_left(DIFFS[shown].1, vx + 6.0 * u, ny, 34.0 * u, scol);
+                text_left(&format!("{} / {}", shown + 1, nd), vx + 20.0 * u + text_w(DIFFS[shown].1, 34.0 * u), ny, 20.0 * u, dim_w(0.5));
+                render::text_right(&format!("score x{:.2}", TIER_SCORE[shown.min(TIER_SCORE.len() - 1)]), vx + vw - 6.0 * u, ny, 20.0 * u, dim_w(0.6));
+                for (i, l) in ui::wrap(DIFFS[shown].2, 20.0 * u, vw - 12.0 * u).iter().take(2).enumerate() {
+                    text_left(l, vx + 6.0 * u, ny + 30.0 * u + i as f32 * 25.0 * u, 20.0 * u, dim_w(0.82));
+                }
                 if row == S_DIFF {
                     tip.set(DIFFS[app.diff].1, DIFFS[app.diff].2, false);
                 }
-
                 // ---- mutators: optional rules, each worth more score ----
-                ui::heading("MUTATORS", x, 560.0 * u, u, &pal);
-                let nm = game::MODS.len();
-                let mw = (w - gap * (nm as f32 - 1.0)) / nm as f32;
+                let hy2 = ny + 30.0 * u + 2.0 * 25.0 * u + 4.0 * u;
+                ui::header(rx + inset, hy2, rw - 2.0 * inset, 44.0 * u, Icon::Bolt, "MUTATORS", pal.secondary, row == S_MUT, u);
+                let nmods = game::MODS.len();
+                let mts = 76.0 * u;
+                let mg = (vw - nmods as f32 * mts) / nmods as f32;
                 if row == S_MUT && dirk != 0 {
-                    app.mut_col = (app.mut_col as i32 + dirk).rem_euclid(nm as i32) as usize;
+                    app.mut_col = (app.mut_col as i32 + dirk).rem_euclid(nmods as i32) as usize;
                     pick = true;
                 }
                 let mut toggle: Option<usize> = None;
                 for (i, m) in game::MODS.iter().enumerate() {
                     let on = app.mutators >> i & 1 == 1;
                     let focus = row == S_MUT && app.mut_col == i;
-                    let (hv, click) = ui::button(x + i as f32 * (mw + gap), 572.0 * u, mw, 50.0 * u, None, m.0, focus, on, u, &pal);
+                    let tx = vx + mg * 0.5 + i as f32 * (mts + mg);
+                    let tyy = hy2 + 56.0 * u;
+                    let (hv, click) = ui::tile(tx, tyy, mts, on, focus, pal.accent, 1.0, u);
+                    ui::icon(ui::mod_icon(i), tx + mts * 0.5, tyy + mts * 0.5, mts * 0.27, if on { WHITE } else if hv { pal.accent } else { dim_w(0.6) });
+                    text_center(m.0, tx + mts * 0.5, tyy + mts + 24.0 * u, 16.0 * u, if on { pal.accent } else { dim_w(0.55) });
                     if hv || focus {
                         tip.set(m.0, &format!("{}. +{:.0}% score. {}", m.1, game::MUTATOR_SCORE * 100.0, if on { "ON" } else { "off" }), hv);
                     }
@@ -3371,94 +3637,6 @@ async fn run(args: Args) {
                         app.mut_col = i;
                     }
                 }
-
-                // ---- starting track ----
-                let ky = 674.0 * u;
-                ui::heading("STARTING TRACK", x, ky - 12.0 * u, u, &pal);
-                let (title, _) = app.juke_title();
-                let bw = 58.0 * u;
-                let (hl, cl) = ui::button(x, ky, bw, 56.0 * u, None, "<", false, false, u, &pal);
-                let (hr, cr) = ui::button(x + w - bw, ky, bw, 56.0 * u, None, ">", false, false, u, &pal);
-                let hm = ui::hover(x + bw, ky, w - 2.0 * bw, 56.0 * u);
-                // the title opens the whole library as a list
-                if !busy && ((hm && is_mouse_button_pressed(MouseButton::Left)) || is_key_pressed(KeyCode::T)) {
-                    app.track_sel = app.juke.idx;
-                    // drop the key that opened the list so it does not count as a letter jump
-                    while get_char_pressed().is_some() {}
-                    app.screen = Screen::Tracks;
-                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
-                }
-                draw_rectangle(x + bw + 8.0 * u, ky, w - 2.0 * bw - 16.0 * u, 56.0 * u, Color::new(0.0, 0.0, 0.05, 0.5));
-                if row == S_TRACK {
-                    draw_rectangle(x - 10.0 * u, ky, 3.0 * u, 56.0 * u, pal.accent);
-                }
-                text_center(&title, x + w * 0.5, ky + 37.0 * u, 26.0 * u, WHITE);
-                let mut track_dirk = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32;
-                if row == S_TRACK {
-                    track_dirk += dirk;
-                }
-                if !busy {
-                    track_dirk += cr as i32 - cl as i32;
-                }
-                if track_dirk != 0 && !busy {
-                    app.juke_next(track_dirk.signum());
-                    if cl || cr {
-                        app.menu_sel = S_TRACK;
-                    }
-                }
-                // remix: the same song, dealt differently
-                let (hx, cx2) = ui::button(x + w + 14.0 * u, ky, 190.0 * u, 56.0 * u, None, &format!("REMIX {}", app.remix), false, app.remix > 0, u, &pal);
-                let rkey = !busy && is_key_pressed(KeyCode::R);
-                if (cx2 && !busy) || rkey {
-                    let back = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) || is_mouse_button_down(MouseButton::Right);
-                    app.remix = if back { 0 } else { (app.remix + 1) % 100 };
-                    pick = true;
-                }
-                if hx {
-                    tip.set("REMIX", "The same song, dealt differently: other patterns, enemies and upgrade offers on the same beats. R or click for the next one, SHIFT+R back to the song's own. Scores share one best.", true);
-                }
-                if hl || hr || hm || row == S_TRACK {
-                    tip.set("STARTING TRACK", "The song the run starts on: the one the menu is playing. Q / E or the arrows step through your library; click the title or press T for the whole list.", hl || hr || hm);
-                }
-
-                // ---- start ----
-                let (hs, cs) = ui::button(x, 766.0 * u, 320.0 * u, 68.0 * u, Some(Icon::Play), "START", row == S_START, true, u, &pal);
-                // what the run is worth, and the best so far for this track, tier and mode
-                let key = app.score_key(&app.juke.list.get(app.juke.idx).map(|p| track_title(p)).unwrap_or_default());
-                let best = app.scores.get(&key).copied();
-                text_left(&format!("SCORE  x{:.2}", app.score_mult()), x + 350.0 * u, 792.0 * u, 26.0 * u, pal.accent);
-                let best_s = match best {
-                    Some((s, d)) => format!("BEST  {s}   (depth {d})"),
-                    None => "no best yet for this track, tier and mode".to_string(),
-                };
-                text_left(&best_s, x + 350.0 * u, 824.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.75));
-                if hs || row == S_START {
-                    tip.set("START", SETUP_MODES[cur].2, hs);
-                }
-                text_left("ENTER  start        ESC  back", x + 560.0 * u, 792.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
-
-                // ---- other things to play ----
-                ui::heading("OR PLAY SOMETHING ELSE", x, 880.0 * u, u, &pal);
-                let ow = (w - 2.0 * gap) / 3.0;
-                let mut other: Option<usize> = None;
-                if row == S_OTHER && dirk != 0 {
-                    app.setup_col = (app.setup_col as i32 + dirk).rem_euclid(3) as usize;
-                    pick = true;
-                }
-                for (i, o) in SETUP_OTHER.iter().enumerate() {
-                    let focus = row == S_OTHER && app.setup_col == i;
-                    let (hv, click) = ui::button(x + i as f32 * (ow + gap), 892.0 * u, ow, 54.0 * u, Some(o.0), o.1, focus, false, u, &pal);
-                    if hv || focus {
-                        tip.set(o.1, o.2, hv);
-                    }
-                    if click && !busy {
-                        other = Some(i);
-                    }
-                }
-                let enter = !busy && (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter));
-                if enter && row == S_OTHER {
-                    other = Some(app.setup_col);
-                }
                 if enter && row == S_MUT {
                     toggle = Some(app.mut_col);
                 }
@@ -3467,7 +3645,14 @@ async fn run(args: Args) {
                     changed = true;
                     pick = true;
                 }
-                let start = (cs && !busy) || (enter && row != S_OTHER && row != S_MUT);
+
+                // =============== bottom: go, or back ===============
+                let (hs, cs) = ui::go_button(sw * 0.5 - 180.0 * u, 880.0 * u, 360.0 * u, 80.0 * u, Icon::Play, "START", row == S_START, pal.primary, u, time);
+                if hs || row == S_START {
+                    tip.set(&format!("START  {}", SETUP_MODES[cur].1), SETUP_MODES[cur].2, hs);
+                }
+                let (_, cb) = ui::button(sw - 110.0 * u - 190.0 * u, 892.0 * u, 190.0 * u, 58.0 * u, Some(Icon::Back), "BACK", false, false, u, &pal);
+                let start = (cs && !busy) || (enter && matches!(row, S_START | S_MODE | S_DIFF));
                 if pick {
                     app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
                 }
@@ -3484,22 +3669,16 @@ async fn run(args: Args) {
                         app.base_seed.wrapping_add(app.remix.wrapping_mul(0x9E37_79B9))
                     };
                     app.start_from_juke(0, endless);
-                } else if let Some(i) = other {
-                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
-                    match i {
-                        0 => app.open_files_dialog(),
-                        1 => app.open_folder_dialog(false, false),
-                        _ => {
-                            app.audio.refresh_devices();
-                            app.screen = Screen::LiveSetup;
-                            app.menu_sel = 0;
-                        }
-                    }
-                } else if is_key_pressed(KeyCode::Escape) && !busy {
+                } else if (is_key_pressed(KeyCode::Escape) || cb) && !busy && app.screen == Screen::Setup {
                     app.screen = Screen::Menu;
                     app.menu_sel = M_PLAY;
                 }
-                tip.draw(x, sh - 60.0 * u, u, &pal);
+                let hy = sh - 62.0 * u;
+                let mut kx = 110.0 * u;
+                for (k, what) in [("ARROWS", "choose"), ("ENTER", "start"), ("Q  E", "track"), ("R", "remix"), ("ESC", "back")] {
+                    kx = ui::keycap(k, what, kx, hy + 34.0 * u, u);
+                }
+                tip.draw(110.0 * u, hy, u, &pal);
                 if busy {
                     text_shadow("waiting for the file dialog...", sw * 0.5, sh * 0.5, 28.0 * u, pal.accent, 0);
                 }
@@ -3620,7 +3799,7 @@ async fn run(args: Args) {
                 for (i, d) in devs.iter().enumerate().take(9) {
                     let hover = mx >= x && mx <= x + col_w && my >= y && my <= y + row_h;
                     let on = app.cap_sel == i;
-                    draw_rectangle(x, y, col_w, row_h - 4.0 * u, if on { Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, 0.3) } else { Color::new(0.0, 0.0, 0.05, 0.45) });
+                    ui::rrect(x, y, col_w, row_h - 4.0 * u, 8.0 * u, if on { Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, 0.3) } else { Color::new(0.0, 0.0, 0.05, 0.45) });
                     let label = format!("{}{}", d.name, if d.is_default { "   (default)" } else { "" });
                     text_left(&label, x + 14.0 * u, y + row_h * 0.62, 22.0 * u, if on { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.7) });
                     if hover && click {
@@ -3637,7 +3816,7 @@ async fn run(args: Args) {
                     let disabled = i > 0 && i - 1 == app.cap_sel;
                     let hover = mx >= x && mx <= x + col_w && my >= y && my <= y + row_h;
                     let on = app.out_sel == i;
-                    draw_rectangle(x, y, col_w, row_h - 4.0 * u, if on { Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, 0.3) } else { Color::new(0.0, 0.0, 0.05, 0.45) });
+                    ui::rrect(x, y, col_w, row_h - 4.0 * u, 8.0 * u, if on { Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, 0.3) } else { Color::new(0.0, 0.0, 0.05, 0.45) });
                     let col = if disabled { Color::new(1.0, 1.0, 1.0, 0.25) } else if on { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.7) };
                     text_left(name, x + 14.0 * u, y + row_h * 0.62, 22.0 * u, col);
                     if hover && click && !disabled {
@@ -3681,8 +3860,8 @@ async fn run(args: Args) {
                 // buttons
                 let by = sh - 130.0 * u;
                 let start_hover = mx >= x && mx <= x + 300.0 * u && my >= by && my <= by + 54.0 * u;
-                draw_rectangle(x, by, 300.0 * u, 54.0 * u, Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, if start_hover { 0.5 } else { 0.3 }));
-                draw_rectangle_lines(x, by, 300.0 * u, 54.0 * u, 2.0 * u, pal.accent);
+                ui::rrect(x, by, 300.0 * u, 54.0 * u, 8.0 * u, Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, if start_hover { 0.5 } else { 0.3 }));
+                ui::rrect_lines(x, by, 300.0 * u, 54.0 * u, 8.0 * u, 2.0 * u, pal.accent);
                 text_center("START   [ENTER]", x + 150.0 * u, by + 36.0 * u, 28.0 * u, WHITE);
                 text_left("ESC  back", x + 330.0 * u, by + 36.0 * u, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.7));
                 if devs.is_empty() {
@@ -3692,7 +3871,7 @@ async fn run(args: Args) {
                 }
                 if is_key_pressed(KeyCode::Escape) {
                     app.screen = Screen::Setup;
-                    app.menu_sel = S_OTHER;
+                    app.menu_sel = S_TRACK;
                 }
             }
             Screen::Paused => {
@@ -3735,11 +3914,16 @@ async fn run(args: Args) {
             }
             Screen::Results => {
                 app.world.orbs.clear();
-                dim(0.64);
+                dim(0.6);
                 let st = app.world.stats;
-                let head = if app.died { "SIGNAL LOST" } else { "RUN COMPLETE" };
-                render::vtext(head, sw * 0.5, sh * 0.2, 84.0 * u, if app.died { pal.danger } else { pal.accent }, 0);
-                text_center(&format!("{:08}", app.world.score), sw * 0.5, sh * 0.32, 96.0 * u, WHITE);
+                let dim_w = |a: f32| Color::new(1.0, 1.0, 1.0, a);
+                let (pw, ph) = (1000.0 * u, 724.0 * u);
+                let (px, py) = (sw * 0.5 - pw * 0.5, sh * 0.5 - ph * 0.5 - 10.0 * u);
+                let pad = 30.0 * u;
+                ui::panel(px, py, pw, ph, u);
+                let hcol = if app.died { pal.danger } else { pal.accent };
+                render::vtext(if app.died { "SIGNAL LOST" } else { "RUN COMPLETE" }, sw * 0.5, py + 86.0 * u, 62.0 * u, hcol, 0);
+                text_center(&format!("{:08}", app.world.score), sw * 0.5, py + 196.0 * u, 96.0 * u, WHITE);
                 let rank = if app.died {
                     "C"
                 } else if st.hits == 0 && st.hearts_broken >= st.songs.max(1) {
@@ -3749,46 +3933,81 @@ async fn run(args: Args) {
                 } else {
                     "B"
                 };
-                text_center(&format!("RANK  {rank}"), sw * 0.5, sh * 0.39, 44.0 * u, pal.primary);
+                // the rank in its own tile, the multiplier and the best on the other side
+                let rs = 104.0 * u;
+                let (rx, ry) = (px + pw - pad - rs, py + 112.0 * u);
+                ui::rrect(rx, ry, rs, rs, 14.0 * u, Color::new(pal.primary.r * 0.35, pal.primary.g * 0.35, pal.primary.b * 0.4, 0.85));
+                ui::rrect_lines(rx, ry, rs, rs, 14.0 * u, 2.0 * u, pal.primary);
+                text_center(rank, rx + rs * 0.5, ry + rs * 0.5 + 26.0 * u, 84.0 * u, WHITE);
+                text_center("RANK", rx + rs * 0.5, ry - 10.0 * u, 18.0 * u, pal.primary);
                 app.record_score();
+                ui::icon(Icon::Trophy, px + pad + 16.0 * u, py + 148.0 * u, 14.0 * u, pal.accent);
                 if app.run_best {
                     let pulse = 0.7 + 0.3 * (app.rend.time * 6.0).sin();
-                    text_center("NEW BEST", sw * 0.5 + 300.0 * u, sh * 0.32, 34.0 * u, Color::new(pal.accent.r, pal.accent.g, pal.accent.b, pulse));
+                    text_left("NEW BEST", px + pad + 42.0 * u, py + 158.0 * u, 30.0 * u, Color::new(pal.accent.r, pal.accent.g, pal.accent.b, pulse));
                 } else if let Some((s, _)) = app.scores.get(&app.run_key) {
-                    text_center(&format!("best {s}"), sw * 0.5 + 300.0 * u, sh * 0.32, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                    text_left(&format!("best {s}"), px + pad + 42.0 * u, py + 156.0 * u, 24.0 * u, dim_w(0.7));
+                } else {
+                    text_left("no best kept", px + pad + 42.0 * u, py + 156.0 * u, 22.0 * u, dim_w(0.5));
                 }
-                text_center(&format!("score x{:.2}", app.world.score_mult), sw * 0.5 - 300.0 * u, sh * 0.32, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
-                let rows = [
-                    ("tracks cleared", format!("{}", st.songs)),
-                    ("hearts broken", format!("{}", st.hearts_broken)),
-                    ("enemies destroyed", format!("{}", st.kills)),
-                    ("notes shot down", format!("{}", st.notes_shot)),
-                    ("grazes  (threads)", format!("{}  ({})", st.grazes, st.threads)),
-                    ("phases broken early", format!("{}", st.phases_broken)),
-                    ("shards collected", format!("{}", st.shards)),
-                    ("best combo", format!("{:.0}", st.max_combo)),
-                    ("hits taken", format!("{}", st.hits)),
+                text_left(&format!("score x{:.2}", app.world.score_mult), px + pad + 2.0 * u, py + 196.0 * u, 22.0 * u, dim_w(0.6));
+                ui::sep(px + pad, py + 240.0 * u, pw - 2.0 * pad, u);
+                // what happened, three to a row: an icon, the number, what it counts
+                let cells = [
+                    (Icon::Note, "tracks cleared", format!("{}", st.songs)),
+                    (Icon::Heart, "hearts broken", format!("{}", st.hearts_broken)),
+                    (Icon::Target, "enemies destroyed", format!("{}", st.kills)),
+                    (Icon::Sfx, "notes shot down", format!("{}", st.notes_shot)),
+                    (Icon::Visuals, "grazes  (threads)", format!("{}  ({})", st.grazes, st.threads)),
+                    (Icon::Bolt, "phases broken early", format!("{}", st.phases_broken)),
+                    (Icon::Shard, "shards collected", format!("{}", st.shards)),
+                    (Icon::Combo, "best combo", format!("{:.0}", st.max_combo)),
+                    (Icon::Cross, "hits taken", format!("{}", st.hits)),
                 ];
-                let mut y = sh * 0.47;
-                for (k, v) in rows {
-                    text_left(k, sw * 0.5 - 230.0 * u, y, 28.0 * u, Color::new(1.0, 1.0, 1.0, 0.75));
-                    let w = text_w(&v, 28.0 * u);
-                    text_left(&v, sw * 0.5 + 230.0 * u - w, y, 28.0 * u, WHITE);
-                    y += 36.0 * u;
+                let gap = 14.0 * u;
+                let cw = (pw - 2.0 * pad - 2.0 * gap) / 3.0;
+                let chh = 86.0 * u;
+                for (i, (ic, label, val)) in cells.iter().enumerate() {
+                    let cx = px + pad + (i % 3) as f32 * (cw + gap);
+                    let cy = py + 262.0 * u + (i / 3) as f32 * (chh + gap);
+                    ui::rrect(cx, cy, cw, chh, ui::RADIUS * u, Color::new(1.0, 1.0, 1.0, 0.05));
+                    ui::rrect(cx + 10.0 * u, cy + 10.0 * u, chh - 20.0 * u, chh - 20.0 * u, 8.0 * u, Color::new(1.0, 1.0, 1.0, 0.07));
+                    ui::icon(*ic, cx + chh * 0.5, cy + chh * 0.5, 17.0 * u, if *ic == Icon::Cross { pal.danger } else { pal.primary });
+                    text_left(val, cx + chh + 4.0 * u, cy + 42.0 * u, 34.0 * u, WHITE);
+                    text_left(label, cx + chh + 4.0 * u, cy + 68.0 * u, 18.0 * u, dim_w(0.6));
                 }
+                // what next: a run that was not lost can always carry on
                 let can_retry = !app.queue.is_empty();
-                let can_continue = !app.died && !app.juke.list.is_empty();
-                let hint = match (can_continue, can_retry) {
-                    (true, _) => "SPACE  keep going with more songs        ENTER  new run        ESC  menu",
-                    (false, true) => "ENTER  play again        ESC  menu",
-                    _ => "ESC  menu",
-                };
-                text_center(hint, sw * 0.5, sh * 0.82, 28.0 * u, pal.accent);
-                if is_key_pressed(KeyCode::Escape) {
+                let can_continue = !app.died;
+                let by = py + ph - 116.0 * u;
+                let (mut go, mut again, mut menu) = (false, false, false);
+                let bw = 250.0 * u;
+                let total = if can_continue { 340.0 * u + 20.0 * u } else { 0.0 } + if can_retry { bw + 20.0 * u } else { 0.0 } + bw;
+                let mut bx = sw * 0.5 - total * 0.5;
+                if can_continue {
+                    go = ui::go_button(bx, by, 340.0 * u, 76.0 * u, Icon::Next, "KEEP GOING", false, pal.primary, u, app.rend.time).1;
+                    bx += 360.0 * u;
+                }
+                if can_retry {
+                    again = ui::button(bx, by + 8.0 * u, bw, 60.0 * u, Some(Icon::Retry), "NEW RUN", false, false, u, &pal).1;
+                    bx += bw + 20.0 * u;
+                }
+                menu = ui::button(bx, by + 8.0 * u, bw, 60.0 * u, Some(Icon::Home), "MENU", false, false, u, &pal).1 || menu;
+                let mut kx = sw * 0.5 - 270.0 * u;
+                if can_continue {
+                    kx = ui::keycap("SPACE", "keep going with more songs", kx, py + ph - 20.0 * u, u);
+                } else {
+                    kx += 130.0 * u;
+                }
+                if can_retry {
+                    kx = ui::keycap("ENTER", "new run", kx, py + ph - 20.0 * u, u);
+                }
+                ui::keycap("ESC", "menu", kx, py + ph - 20.0 * u, u);
+                if is_key_pressed(KeyCode::Escape) || menu {
                     app.to_menu();
-                } else if can_continue && is_key_pressed(KeyCode::Space) {
+                } else if can_continue && (is_key_pressed(KeyCode::Space) || go) {
                     app.continue_run();
-                } else if can_retry && is_key_pressed(KeyCode::Enter) {
+                } else if can_retry && (is_key_pressed(KeyCode::Enter) || again) {
                     let q = app.queue.clone();
                     app.start_run(q);
                 }
@@ -3805,8 +4024,8 @@ async fn run(args: Args) {
                     text_left(&format!("combo {}", r.combo), m + 70.0 * u, m + 80.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.75));
                     text_shadow(&s.title, sw * 0.5, m + 8.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85), 0);
                     let (bx, bw) = (sw * 0.5 - 260.0 * u, 520.0 * u);
-                    draw_rectangle(bx, m + 22.0 * u, bw, 3.0 * u, Color::new(1.0, 1.0, 1.0, 0.2));
-                    draw_rectangle(bx, m + 22.0 * u, bw * progress.clamp(0.0, 1.0), 3.0 * u, pal.accent);
+                    ui::rrect(bx, m + 22.0 * u, bw, 3.0 * u, 8.0 * u, Color::new(1.0, 1.0, 1.0, 0.2));
+                    ui::rrect(bx, m + 22.0 * u, bw * progress.clamp(0.0, 1.0), 8.0 * u, 3.0 * u, pal.accent);
                     render::vtext("HIGHWAY", sw - m, m + 26.0 * u, 26.0 * u, pal.secondary, 1);
                     if r.hot() && !r.done {
                         let pulse = 0.7 + 0.3 * (app.rend.time * 8.0).sin();
@@ -3934,7 +4153,7 @@ async fn run(args: Args) {
                             let y = y0 + k as f32 * 40.0 * u;
                             let mut it = key.split('|');
                             let (title, tier, mode) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
-                            let title: String = if title.chars().count() > 40 { title.chars().take(38).chain("..".chars()).collect() } else { title.to_string() };
+                            let title = ui::fit(title, 24.0 * u, 620.0 * u);
                             text_left(&title, x, y, 24.0 * u, WHITE);
                             text_left(tier, x + 640.0 * u, y, 22.0 * u, pal.primary);
                             text_left(mode, x + 860.0 * u, y, 22.0 * u, pal.secondary);
@@ -3983,12 +4202,12 @@ async fn run(args: Args) {
                         }
                         let on = k == app.track_sel;
                         if on {
-                            draw_rectangle(x, y, 1300.0 * u, 42.0 * u, Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, 0.3));
-                            draw_rectangle(x, y, 4.0 * u, 42.0 * u, pal.accent);
+                            ui::rrect(x, y, 1300.0 * u, 42.0 * u, 8.0 * u, Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, 0.38));
+                            ui::rrect_lines(x, y, 1300.0 * u, 42.0 * u, 8.0 * u, 1.5 * u, Color::new(pal.accent.r, pal.accent.g, pal.accent.b, 0.7));
                         }
                         let title = track_title(&app.juke.list[k]);
                         let playing = k == app.juke.idx;
-                        text_left(&title, x + 18.0 * u, y + 29.0 * u, 24.0 * u, if playing { pal.accent } else if on { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.72) });
+                        text_left(&ui::fit(&title, 24.0 * u, 930.0 * u), x + 18.0 * u, y + 29.0 * u, 24.0 * u, if playing { pal.accent } else if on { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.72) });
                         if let Some((s, d)) = app.scores.get(&app.score_key(&title)) {
                             text_left(&format!("best {s}   depth {d}"), x + 980.0 * u, y + 29.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
                         }
@@ -4001,7 +4220,7 @@ async fn run(args: Args) {
                         pick = Some(app.track_sel);
                     }
                 } else {
-                    text_left("No music found. Set a MUSIC LIBRARY on the title menu.", x, 220.0 * u, 24.0 * u, WHITE);
+                    text_left("No music found. Set a music library with the note button under the track preview.", x, 220.0 * u, 24.0 * u, WHITE);
                 }
                 text_shadow("UP / DOWN  move     type a letter to jump     ENTER  choose     ESC  back", x, sh - 60.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.7), -1);
                 if let Some(k) = pick {
@@ -4012,11 +4231,11 @@ async fn run(args: Args) {
                         app.juke.played = 0.0;
                     }
                     app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
-                    app.screen = Screen::Setup;
-                    app.menu_sel = S_TRACK;
+                    app.screen = app.tracks_back;
+                    app.menu_sel = if app.tracks_back == Screen::Setup { S_TRACK } else { M_PLAY };
                 } else if is_key_pressed(KeyCode::Escape) {
-                    app.screen = Screen::Setup;
-                    app.menu_sel = S_TRACK;
+                    app.screen = app.tracks_back;
+                    app.menu_sel = if app.tracks_back == Screen::Setup { S_TRACK } else { M_PLAY };
                 }
             }
             Screen::Lan => app.lan_ui(u, sw, sh),

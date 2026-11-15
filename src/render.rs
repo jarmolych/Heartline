@@ -355,12 +355,57 @@ pub fn spaced(s: &str) -> String {
     out
 }
 
+thread_local! {
+    /// The smooth interface font; `None` falls back to macroquad's built-in pixel font.
+    static UI_FONT: std::cell::RefCell<Option<Font>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Sizes all over the game were chosen for the old pixel font, whose letters are smaller for
+/// the same nominal size. This brings the smooth font to about the same width.
+const FONT_SCALE: f32 = 0.86;
+
+/// Load the interface font. Order: `heartline-font.ttf` next to the game (any TTF the player
+/// drops there), then Bahnschrift from the Windows fonts folder. With neither, text stays in
+/// the built-in pixel font.
+pub fn init_font() {
+    let mut cands: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
+        cands.push(dir.join("heartline-font.ttf"));
+    }
+    if let Some(win) = std::env::var_os("WINDIR") {
+        cands.push(std::path::Path::new(&win).join("Fonts").join("bahnschrift.ttf"));
+    }
+    for p in cands {
+        let Ok(bytes) = std::fs::read(&p) else { continue };
+        if let Ok(mut f) = load_ttf_font_from_bytes(&bytes) {
+            f.set_filter(FilterMode::Linear);
+            UI_FONT.with(|c| *c.borrow_mut() = Some(f));
+            return;
+        }
+    }
+}
+
+/// Pixel size to rasterise at, and the scale that brings it to exactly `size`.
+fn font_px(size: f32) -> (u16, f32) {
+    let has = UI_FONT.with(|c| c.borrow().is_some());
+    if !has {
+        return (size.max(1.0) as u16, 1.0);
+    }
+    let want = (size * FONT_SCALE).max(1.0);
+    let px = want.ceil().clamp(1.0, 300.0);
+    (px as u16, want / px)
+}
+
 pub fn text_w(s: &str, size: f32) -> f32 {
-    measure_text(s, None, size.max(1.0) as u16, 1.0).width
+    let (px, sc) = font_px(size);
+    UI_FONT.with(|c| measure_text(s, c.borrow().as_ref(), px, sc).width)
 }
 
 pub fn text_left(s: &str, x: f32, y: f32, size: f32, color: Color) {
-    draw_text_ex(s, x, y, TextParams { font_size: size.max(1.0) as u16, color, ..Default::default() });
+    let (px, sc) = font_px(size);
+    UI_FONT.with(|c| {
+        draw_text_ex(s, x, y, TextParams { font: c.borrow().as_ref(), font_size: px, font_scale: sc, color, ..Default::default() });
+    });
 }
 
 pub fn text_center(s: &str, x: f32, y: f32, size: f32, color: Color) {
@@ -4320,7 +4365,7 @@ impl Renderer {
         // Title + song overview heartline (shown in drift mode too)
         if !info.title.is_empty() {
             let ta = 0.55 + 0.45 * hud_a;
-            text_shadow(&info.title, sw * 0.5, m + 8.0 * u, 22.0 * u, alpha(WHITE, 0.85 * ta), 0);
+            text_shadow(&crate::ui::fit(&info.title, 22.0 * u, 760.0 * u), sw * 0.5, m + 8.0 * u, 22.0 * u, alpha(WHITE, 0.85 * ta), 0);
             if info.progress > 0.0 || info.show_combat {
                 let bw = 520.0 * u;
                 let bx = sw * 0.5 - bw * 0.5;
@@ -4511,19 +4556,15 @@ impl Renderer {
         let pal = &self.pal;
         if selected {
             let pulse = 0.85 + 0.15 * (self.time * 4.0).sin();
-            let c0 = alpha(pal.secondary, 0.32);
-            let c1 = alpha(pal.secondary, 0.03);
-            quad4([vec2(x, y), vec2(x + w, y), vec2(x + w, y + h), vec2(x, y + h)], [c0, c1, c1, c0]);
-            rect_lines(x, y, w, h, 1.0 * u, alpha(pal.secondary, 0.55));
-            brackets(x - 4.0 * u, y - 4.0 * u, w + 8.0 * u, h + 8.0 * u, 12.0 * u, 2.0 * u, alpha(pal.accent, pulse));
+            crate::ui::rrect(x, y, w, h, 10.0 * u, alpha(pal.secondary, 0.42));
+            crate::ui::rrect_lines(x, y, w, h, 10.0 * u, 1.5 * u, alpha(pal.accent, 0.55 + 0.35 * pulse));
             let cx = x + 12.0 * u;
             let cy = y + h * 0.5;
             line(vec2(cx, cy - 7.0 * u), vec2(cx + 7.0 * u, cy), 2.5 * u, pal.accent);
             line(vec2(cx + 7.0 * u, cy), vec2(cx, cy + 7.0 * u), 2.5 * u, pal.accent);
         } else {
-            draw_rectangle(x, y, w, h, Color::new(0.0, 0.0, 0.05, 0.42));
-            line(vec2(x, y + h), vec2(x + w * 0.7, y + h), 1.0 * u, alpha(WHITE, 0.14));
-            line(vec2(x, y + 6.0 * u), vec2(x, y + h - 6.0 * u), 2.0 * u, alpha(WHITE, 0.25));
+            crate::ui::rrect(x, y, w, h, 10.0 * u, Color::new(0.02, 0.0, 0.07, 0.55));
+            crate::ui::rrect_lines(x, y, w, h, 10.0 * u, 1.0 * u, alpha(WHITE, 0.1));
         }
         text_left(label, x + 30.0 * u, y + h * 0.68, 28.0 * u, if selected { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.75) });
     }
@@ -4533,12 +4574,13 @@ impl Renderer {
     pub fn draw_now_playing(&self, x: f32, y: f32, w: f32, u: f32, world: &World, title: &str, hint: &str, progress: f32) {
         let pal = &self.pal;
         let h = 96.0 * u;
-        draw_rectangle(x, y, w, h, Color::new(0.0, 0.0, 0.05, 0.5));
-        rect_lines(x, y, w, h, 1.0 * u, alpha(pal.secondary, 0.4));
-        brackets(x - 5.0 * u, y - 5.0 * u, w + 10.0 * u, h + 10.0 * u, 14.0 * u, 2.0 * u, alpha(pal.accent, 0.8));
+        let rad = 14.0 * u;
+        crate::ui::rrect(x, y, w, h, rad, Color::new(0.02, 0.0, 0.07, 0.74));
+        crate::ui::rrect_lines(x, y, w, h, rad, 1.5 * u, alpha(pal.accent, 0.45 + 0.35 * world.hit[0]));
         vtext("NOW PLAYING", x + 16.0 * u, y + 26.0 * u, 15.0 * u, alpha(pal.primary, 0.9), -1);
-        text_left(title, x + 16.0 * u, y + 58.0 * u, 28.0 * u, WHITE);
-        text_left(hint, x + 16.0 * u, y + 84.0 * u, 18.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+        // a long title slides inside the space left of the trace
+        crate::ui::marquee(title, x + 16.0 * u, y + 58.0 * u, 28.0 * u, w - 16.0 * u - 170.0 * u - 34.0 * u, WHITE, self.time);
+        text_left(hint, x + 16.0 * u, y + 80.0 * u, 17.0 * u, Color::new(1.0, 1.0, 1.0, 0.55));
         // live heartline + mini spectrum on the right
         let tw = 170.0 * u;
         let tx = x + w - tw - 16.0 * u;
@@ -4558,19 +4600,18 @@ impl Renderer {
         disc2(vec2(tx + tw, ty - self.ecg_at(P) * 26.0 * u), (4.0 + 6.0 * k) * u, 12, alpha(WHITE, 0.9), alpha(pal.primary, 0.0));
         // progress
         let pr = progress.clamp(0.0, 1.0);
-        line(vec2(x, y + h), vec2(x + w, y + h), 1.0 * u, alpha(WHITE, 0.15));
-        line(vec2(x, y + h), vec2(x + w * pr, y + h), 3.0 * u, pal.accent);
+        let (px, pw, py) = (x + rad, w - 2.0 * rad, y + h - 7.0 * u);
+        crate::ui::rrect(px, py - 2.0 * u, pw, 4.0 * u, 2.0 * u, alpha(WHITE, 0.15));
         if pr > 0.0 {
-            diamond_fill(vec2(x + w * pr, y + h), 4.0 * u, WHITE);
+            crate::ui::rrect(px, py - 2.0 * u, (pw * pr).max(4.0 * u), 4.0 * u, 2.0 * u, pal.accent);
+            disc(vec2(px + pw * pr, py), 4.5 * u, 12, WHITE);
         }
     }
 
     /// Backing panel for a sub-screen region.
     #[allow(dead_code)]
     pub fn draw_panel(&self, x: f32, y: f32, w: f32, h: f32, u: f32) {
-        draw_rectangle(x, y, w, h, Color::new(0.0, 0.0, 0.05, 0.55));
-        rect_lines(x, y, w, h, 1.0 * u, alpha(self.pal.secondary, 0.45));
-        brackets(x - 5.0 * u, y - 5.0 * u, w + 10.0 * u, h + 10.0 * u, 18.0 * u, 2.0 * u, alpha(self.pal.accent, 0.8));
+        crate::ui::panel(x, y, w, h, u);
     }
 }
 
@@ -4729,14 +4770,19 @@ fn roman(n: u8) -> &'static str {
 
 /// Centered text in world space, rasterised at device resolution.
 fn wtext(s: &str, pos: Vec2, size: f32, color: Color, tscale: f32) {
+    let has = UI_FONT.with(|c| c.borrow().is_some());
+    let size = if has { size * FONT_SCALE } else { size };
     let fs = (size * tscale).clamp(6.0, 200.0);
     let font_size = fs.round().max(1.0) as u16;
     let font_scale = size / font_size as f32;
-    let dim = measure_text(s, None, font_size, font_scale);
-    draw_text_ex(
-        s,
-        pos.x - dim.width * 0.5,
-        pos.y,
-        TextParams { font_size, font_scale, color, ..Default::default() },
-    );
+    UI_FONT.with(|c| {
+        let f = c.borrow();
+        let dim = measure_text(s, f.as_ref(), font_size, font_scale);
+        draw_text_ex(
+            s,
+            pos.x - dim.width * 0.5,
+            pos.y,
+            TextParams { font: f.as_ref(), font_size, font_scale, color, ..Default::default() },
+        );
+    });
 }
