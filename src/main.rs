@@ -57,6 +57,8 @@ pub struct Args {
     mood: Option<(u8, u8, u8, u8)>,
     mood_to: Option<(u8, u8, u8, u8)>,
     purgatory: bool,
+    mode: usize,
+    mutators: u8,
     mortal: bool,
     /// Debug: keep the drift (idle) scene up while the song plays, with no attacks.
     drift: bool,
@@ -94,6 +96,10 @@ fn parse_args() -> Args {
             "--secs" => a.secs = val().parse().unwrap_or(30.0),
             "--start" => a.start = val().parse().unwrap_or(0.0),
             "--seed" => a.seed = val().parse().unwrap_or(0),
+            // Debug: start in a run mode (index into `SETUP_MODES`: 3 = DROP RUSH, 4 = DODGE).
+            "--mode" => a.mode = val().parse().unwrap_or(0),
+            // Debug: mutator bits (`game::MOD_*`).
+            "--mutators" => a.mutators = val().parse().unwrap_or(0),
             // Debug: force the look, as "scene,weather,floor,prop" (see `level::Mood`).
             "--mood" => {
                 let v: Vec<u8> = val().split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -338,6 +344,8 @@ struct Song {
     timeline: Arc<Timeline>,
     cursor: usize,
     last_t: f32,
+    /// The song is cut off here (DROP RUSH); `f32::MAX` plays it to the end.
+    end_t: f32,
 }
 
 struct LiveRun {
@@ -377,14 +385,22 @@ const MENU_ROWS: [(Icon, &str, &str); 5] = [
 // Rows of the run setup screen.
 const S_MODE: usize = 0;
 const S_DIFF: usize = 1;
-const S_TRACK: usize = 2;
-const S_START: usize = 3;
-const S_OTHER: usize = 4;
-const SETUP_MODES: [(Icon, &str, &str); 3] = [
-    (Icon::Endless, "ENDLESS RUN", "This track, then the library keeps coming. HP, upgrades and score carry over until you fall."),
-    (Icon::Single, "SINGLE TRACK", "Just this song. You can still carry on into more songs from the results screen."),
-    (Icon::Sync, "DAILY SEED", "An endless run on today's seed: the same songs give everyone the same levels and upgrade offers today."),
+const S_MUT: usize = 2;
+const S_TRACK: usize = 3;
+const S_START: usize = 4;
+const S_OTHER: usize = 5;
+const SETUP_MODES: [(Icon, &str, &str); 5] = [
+    (Icon::Endless, "ENDLESS", "ENDLESS RUN: this track, then the library keeps coming. HP, upgrades and score carry over until you fall."),
+    (Icon::Single, "SINGLE", "SINGLE TRACK: just this song. You can still carry on into more songs from the results screen."),
+    (Icon::Sync, "DAILY", "DAILY SEED: an endless run on today's seed. The same songs give everyone the same levels and upgrade offers today."),
+    (Icon::Sfx, "DROP RUSH", "DROP RUSH: every track is cut down to its biggest section. Short, dense, endless."),
+    (Icon::Visuals, "DODGE", "DODGE: no gun. The Heart cannot be hurt. Score by slipping close past bullets and by staying alive."),
 ];
+const MODE_DAILY: usize = 2;
+const MODE_RUSH: usize = 3;
+const MODE_DODGE: usize = 4;
+/// Score multiplier of each difficulty tier.
+const TIER_SCORE: [f32; 7] = [0.5, 0.8, 1.0, 1.25, 1.5, 1.8, 2.2];
 const SETUP_OTHER: [(Icon, &str, &str); 3] = [
     (Icon::Files, "PLAY FILES...", "Pick audio files or an .m3u playlist and play them in order. Dropping files on the window does the same."),
     (Icon::Folder, "PLAY FOLDER...", "Pick a folder and play everything in it."),
@@ -459,6 +475,15 @@ struct App {
     /// Run setup: ENDLESS RUN (true) or SINGLE TRACK, and the focused button of the last row.
     /// Index into `SETUP_MODES`.
     setup_mode: usize,
+    /// Mutators chosen in run setup (`game::MOD_*` bits), and the focused one.
+    mutators: u8,
+    mut_col: usize,
+    /// Best scores, keyed by `score_key`: (score, depth reached).
+    scores: std::collections::HashMap<String, (u64, u32)>,
+    /// The key this run will be recorded under, and whether it has been.
+    run_key: String,
+    run_saved: bool,
+    run_best: bool,
     /// The seed from the command line (DAILY SEED replaces `args.seed` for one run).
     base_seed: u64,
     setup_col: usize,
@@ -522,6 +547,26 @@ struct Jukebox {
 // ---------------------------------------------------------------------------------------------
 // Settings (heartline.cfg next to the exe)
 // ---------------------------------------------------------------------------------------------
+
+fn scores_path() -> Option<PathBuf> {
+    std::env::current_exe().ok().map(|e| e.with_file_name("heartline-scores.txt"))
+}
+
+/// Best scores: one `key<TAB>score<TAB>depth` line each.
+fn load_scores() -> std::collections::HashMap<String, (u64, u32)> {
+    let mut m = std::collections::HashMap::new();
+    if let Some(text) = scores_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        for line in text.lines() {
+            let mut it = line.split('\t');
+            if let (Some(k), Some(s), Some(d)) = (it.next(), it.next(), it.next()) {
+                if let (Ok(s), Ok(d)) = (s.parse(), d.parse()) {
+                    m.insert(k.to_string(), (s, d));
+                }
+            }
+        }
+    }
+    m
+}
 
 fn settings_path() -> Option<PathBuf> {
     std::env::current_exe().ok().map(|e| e.with_file_name("heartline.cfg"))
@@ -673,6 +718,7 @@ impl App {
             self.diff, self.volume, self.sfx_volume, self.offset_ms, self.autofire as u8, self.fullscreen as u8
         );
         text.push_str(&format!("visuals={}\n", self.visuals));
+        text.push_str(&format!("mutators={}\n", self.mutators));
         if let Some(d) = &self.music_dir {
             text.push_str(&format!("music_dir={}\n", d.display()));
         }
@@ -873,11 +919,47 @@ impl App {
         self.rend.set_palette(0);
     }
 
+    /// Tier and mutator score multiplier of the run being set up.
+    fn score_mult(&self) -> f32 {
+        TIER_SCORE[self.diff.min(TIER_SCORE.len() - 1)] * (1.0 + game::MUTATOR_SCORE * self.mutators.count_ones() as f32)
+    }
+
+    /// Best scores are kept per starting track, tier and mode.
+    fn score_key(&self, title: &str) -> String {
+        format!("{}|{}|{}", title.replace(['\t', '\n', '|'], " "), DIFFS[self.diff].1, SETUP_MODES[self.setup_mode.min(SETUP_MODES.len() - 1)].1)
+    }
+
+    /// At the end of a run: record the score if it is the best for its key.
+    fn record_score(&mut self) {
+        if self.run_saved {
+            return;
+        }
+        self.run_saved = true;
+        if self.args.selftest.is_some() || self.run_key.is_empty() || self.live.is_some() {
+            return;
+        }
+        let (score, depth) = (self.world.score, self.world.song_idx + 1);
+        if self.scores.get(&self.run_key).map_or(true, |b| score > b.0) && score > 0 {
+            self.run_best = true;
+            self.scores.insert(self.run_key.clone(), (score, depth));
+            if let Some(path) = scores_path() {
+                let mut text = String::new();
+                for (k, v) in &self.scores {
+                    text.push_str(&format!("{k}\t{}\t{}\n", v.0, v.1));
+                }
+                let _ = std::fs::write(path, text);
+            }
+        }
+    }
+
     fn start_run(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             self.say("no playable audio files found");
             return;
         }
+        self.run_key = self.score_key(&track_title(&paths[0]));
+        self.run_saved = false;
+        self.run_best = false;
         // Menu music keeps playing through the loading screen and cross-fades into the level.
         if !self.juke.playing {
             self.audio.stop();
@@ -891,7 +973,14 @@ impl App {
         self.qi = 0;
         let god = self.args.selftest.is_some() && !self.args.mortal;
         self.world = World::new(self.diff(), self.diff == 0 || god);
+        self.world.base_mods = self.mutators;
+        self.world.score_mult = self.score_mult();
+        self.world.pacifist = self.setup_mode == MODE_DODGE;
         self.apply_diff_rules();
+        if self.mutators & game::MOD_GLASS != 0 && self.world.player.max_hp > 2 {
+            self.world.player.max_hp = 2;
+            self.world.player.hp = 2;
+        }
         for _ in 0..self.args.give {
             let up = UpgradeId::ALL[self.world.rng.below(UpgradeId::ALL.len())];
             self.world.player.ups[up as usize] = (self.world.player.ups[up as usize] + 1).min(up.max());
@@ -1014,10 +1103,27 @@ impl App {
                 self.queue.push(p);
             }
         }
-        let start = if self.qi == 0 { self.args.start.max(0.0) } else { 0.0 };
-        self.world.begin_song(loaded.level.active_secs, self.qi as u32, loaded.level.seed);
+        let mut start = if self.qi == 0 { self.args.start.max(0.0) } else { 0.0 };
+        let mut end_t = f32::MAX;
+        let mut active = loaded.level.active_secs;
+        if self.setup_mode == MODE_RUSH {
+            // DROP RUSH: the first drop, or failing that the most intense section, with a
+            // short run-up.
+            let secs = &loaded.an.sections;
+            let pick = secs.iter().skip(1).find(|s| s.kind == SectionKind::Drop).or_else(|| {
+                secs.iter().skip(1).max_by(|a, b| a.intensity.partial_cmp(&b.intensity).unwrap_or(std::cmp::Ordering::Equal))
+            });
+            if let Some(s) = pick {
+                start = (s.t0 - 4.0).max(0.0);
+                end_t = s.t1;
+                active = (end_t - start).max(8.0);
+            }
+        }
+        self.world.begin_song(active, self.qi as u32, loaded.level.seed);
         self.world.gun = loaded.level.gun.clone();
-        self.world.set_phases(&loaded.level.phases);
+        if !self.world.pacifist {
+            self.world.set_phases(&loaded.level.phases);
+        }
         self.world.mood = loaded.level.mood;
         if self.qi > 0 {
             let title = loaded.track.name.clone();
@@ -1025,7 +1131,7 @@ impl App {
         }
         self.world.beat_len = if loaded.level.bpm > 1.0 { 60.0 / loaded.level.bpm } else { 0.5 };
         let timeline = Arc::new(Timeline::from_analysis(&loaded.an));
-        let mut song = Song { track: loaded.track, an: loaded.an, level: loaded.level, timeline, cursor: 0, last_t: start };
+        let mut song = Song { track: loaded.track, an: loaded.an, level: loaded.level, timeline, cursor: 0, last_t: start, end_t };
         if start > 0.0 {
             // Skip what is already in the past, but keep the latest section so the look is right.
             let mut last_section = None;
@@ -1140,7 +1246,7 @@ impl App {
                 hud.bpm = song.level.bpm;
                 hud.show_combat = !drift;
                 hud.timeline = Some(song.timeline.clone());
-                let finished = self.world.ended || (self.audio.finished() && t >= dur - 0.3);
+                let finished = self.world.ended || (self.audio.finished() && t >= dur - 0.3) || t >= song.end_t;
                 if self.world.dead {
                     self.phase = Phase::Dying(0.0);
                     self.audio.set_volume(if self.args.mute { 0.0 } else { self.volume * 0.35 });
@@ -2572,6 +2678,12 @@ async fn run(args: Args) {
         menu_sel: 0,
         quit_armed: false,
         setup_mode: 0,
+        mutators: 0,
+        mut_col: 0,
+        scores: load_scores(),
+        run_key: String::new(),
+        run_saved: false,
+        run_best: false,
         base_seed: args.seed,
         setup_col: 0,
         dialog: None,
@@ -2603,6 +2715,11 @@ async fn run(args: Args) {
     app.offset_ms = getf("offset_ms", 0.0).clamp(-100.0, 300.0);
     app.autofire = getf("autofire", 1.0) > 0.5;
     app.visuals = (getf("visuals", 0.0).max(0.0) as usize).min(VISUALS.len() - 1);
+    app.mutators = (getf("mutators", 0.0).max(0.0) as u32 & 31) as u8;
+    if args.selftest.is_some() {
+        app.setup_mode = args.mode.min(SETUP_MODES.len() - 1);
+        app.mutators = args.mutators & 31;
+    }
     // Borderless fullscreen is remembered between launches (never for bot or sized test runs).
     if args.selftest.is_none() && args.size.is_none() && getf("fullscreen", 0.0) > 0.5 {
         app.fullscreen = true;
@@ -2890,7 +3007,7 @@ async fn run(args: Args) {
                 if !busy {
                     let dv = is_key_pressed(KeyCode::Down) as i32 - is_key_pressed(KeyCode::Up) as i32;
                     if dv != 0 {
-                        app.menu_sel = (app.menu_sel as i32 + dv).rem_euclid(5) as usize;
+                        app.menu_sel = (app.menu_sel as i32 + dv).rem_euclid(6) as usize;
                         app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
                     }
                     dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
@@ -2900,7 +3017,7 @@ async fn run(args: Args) {
                 let mut pick = false;
 
                 // ---- mode: both choices stay visible ----
-                ui::heading("RUN", x, 212.0 * u, u, &pal);
+                ui::heading("MODE", x, 212.0 * u, u, &pal);
                 let modes: Vec<(Option<Icon>, &str)> = SETUP_MODES.iter().map(|m| (Some(m.0), m.1)).collect();
                 let cur = app.setup_mode.min(SETUP_MODES.len() - 1);
                 let (click, hov) = ui::segments(x, 224.0 * u, w, 62.0 * u, &modes, cur, row == S_MODE, u, &pal);
@@ -2952,8 +3069,31 @@ async fn run(args: Args) {
                     tip.set(DIFFS[app.diff].1, DIFFS[app.diff].2, false);
                 }
 
+                // ---- mutators: optional rules, each worth more score ----
+                ui::heading("MUTATORS", x, 560.0 * u, u, &pal);
+                let nm = game::MODS.len();
+                let mw = (w - gap * (nm as f32 - 1.0)) / nm as f32;
+                if row == S_MUT && dirk != 0 {
+                    app.mut_col = (app.mut_col as i32 + dirk).rem_euclid(nm as i32) as usize;
+                    pick = true;
+                }
+                let mut toggle: Option<usize> = None;
+                for (i, m) in game::MODS.iter().enumerate() {
+                    let on = app.mutators >> i & 1 == 1;
+                    let focus = row == S_MUT && app.mut_col == i;
+                    let (hv, click) = ui::button(x + i as f32 * (mw + gap), 572.0 * u, mw, 50.0 * u, None, m.0, focus, on, u, &pal);
+                    if hv || focus {
+                        tip.set(m.0, &format!("{}. +{:.0}% score. {}", m.1, game::MUTATOR_SCORE * 100.0, if on { "ON" } else { "off" }), hv);
+                    }
+                    if click && !busy {
+                        toggle = Some(i);
+                        app.menu_sel = S_MUT;
+                        app.mut_col = i;
+                    }
+                }
+
                 // ---- starting track ----
-                let ky = 590.0 * u;
+                let ky = 674.0 * u;
                 ui::heading("STARTING TRACK", x, ky - 12.0 * u, u, &pal);
                 let (title, _) = app.juke_title();
                 let bw = 58.0 * u;
@@ -2983,14 +3123,23 @@ async fn run(args: Args) {
                 }
 
                 // ---- start ----
-                let (hs, cs) = ui::button(x, 690.0 * u, 320.0 * u, 68.0 * u, Some(Icon::Play), "START", row == S_START, true, u, &pal);
+                let (hs, cs) = ui::button(x, 766.0 * u, 320.0 * u, 68.0 * u, Some(Icon::Play), "START", row == S_START, true, u, &pal);
+                // what the run is worth, and the best so far for this track, tier and mode
+                let key = app.score_key(&app.juke.list.get(app.juke.idx).map(|p| track_title(p)).unwrap_or_default());
+                let best = app.scores.get(&key).copied();
+                text_left(&format!("SCORE  x{:.2}", app.score_mult()), x + 350.0 * u, 792.0 * u, 26.0 * u, pal.accent);
+                let best_s = match best {
+                    Some((s, d)) => format!("BEST  {s}   (depth {d})"),
+                    None => "no best yet for this track, tier and mode".to_string(),
+                };
+                text_left(&best_s, x + 350.0 * u, 824.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.75));
                 if hs || row == S_START {
                     tip.set("START", SETUP_MODES[cur].2, hs);
                 }
-                text_left("ENTER  start        ESC  back", x + 350.0 * u, 732.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                text_left("ENTER  start        ESC  back", x + 560.0 * u, 792.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
 
                 // ---- other things to play ----
-                ui::heading("OR PLAY SOMETHING ELSE", x, 814.0 * u, u, &pal);
+                ui::heading("OR PLAY SOMETHING ELSE", x, 880.0 * u, u, &pal);
                 let ow = (w - 2.0 * gap) / 3.0;
                 let mut other: Option<usize> = None;
                 if row == S_OTHER && dirk != 0 {
@@ -2999,7 +3148,7 @@ async fn run(args: Args) {
                 }
                 for (i, o) in SETUP_OTHER.iter().enumerate() {
                     let focus = row == S_OTHER && app.setup_col == i;
-                    let (hv, click) = ui::button(x + i as f32 * (ow + gap), 826.0 * u, ow, 54.0 * u, Some(o.0), o.1, focus, false, u, &pal);
+                    let (hv, click) = ui::button(x + i as f32 * (ow + gap), 892.0 * u, ow, 54.0 * u, Some(o.0), o.1, focus, false, u, &pal);
                     if hv || focus {
                         tip.set(o.1, o.2, hv);
                     }
@@ -3011,7 +3160,15 @@ async fn run(args: Args) {
                 if enter && row == S_OTHER {
                     other = Some(app.setup_col);
                 }
-                let start = (cs && !busy) || (enter && row != S_OTHER);
+                if enter && row == S_MUT {
+                    toggle = Some(app.mut_col);
+                }
+                if let Some(i) = toggle {
+                    app.mutators ^= 1 << i;
+                    changed = true;
+                    pick = true;
+                }
+                let start = (cs && !busy) || (enter && row != S_OTHER && row != S_MUT);
                 if pick {
                     app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
                 }
@@ -3022,7 +3179,7 @@ async fn run(args: Args) {
                     app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
                     let endless = app.setup_mode != 1;
                     // DAILY SEED: days since 1970-01-01 (UTC) seeds the levels and the offers.
-                    app.args.seed = if app.setup_mode == 2 {
+                    app.args.seed = if app.setup_mode == MODE_DAILY {
                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 86_400).unwrap_or(0)
                     } else {
                         app.base_seed
@@ -3294,6 +3451,14 @@ async fn run(args: Args) {
                     "B"
                 };
                 text_center(&format!("RANK  {rank}"), sw * 0.5, sh * 0.39, 44.0 * u, pal.primary);
+                app.record_score();
+                if app.run_best {
+                    let pulse = 0.7 + 0.3 * (app.rend.time * 6.0).sin();
+                    text_center("NEW BEST", sw * 0.5 + 300.0 * u, sh * 0.32, 34.0 * u, Color::new(pal.accent.r, pal.accent.g, pal.accent.b, pulse));
+                } else if let Some((s, _)) = app.scores.get(&app.run_key) {
+                    text_center(&format!("best {s}"), sw * 0.5 + 300.0 * u, sh * 0.32, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                }
+                text_center(&format!("score x{:.2}", app.world.score_mult), sw * 0.5 - 300.0 * u, sh * 0.32, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
                 let rows = [
                     ("tracks cleared", format!("{}", st.songs)),
                     ("hearts broken", format!("{}", st.hearts_broken)),
