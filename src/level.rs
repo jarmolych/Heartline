@@ -68,12 +68,20 @@ pub enum Pattern {
     Burst,
     /// Two cones at `aim +- PINCER_OFFSET`, leaving the lane through the player open.
     Pincer,
+    /// Five short lines of bullets fanned `COMB_STEP` apart around the player: step into a gap.
+    Comb,
+    /// A cone whose bullets are slower from one side to the other, so it arrives as a scythe
+    /// swinging across (the sign of `rot` picks the side that arrives first).
+    Sweep,
 }
+
+pub const COMB_STEP: f32 = 0.62;
+pub const SWEEP_HALF: f32 = 0.62;
 
 impl Pattern {
     /// Whether the pattern is laid out relative to the player's direction.
     pub fn aimed(self) -> bool {
-        matches!(self, Pattern::Fan | Pattern::Cross | Pattern::Wall | Pattern::Burst | Pattern::Pincer)
+        matches!(self, Pattern::Fan | Pattern::Cross | Pattern::Wall | Pattern::Burst | Pattern::Pincer | Pattern::Comb | Pattern::Sweep)
     }
     /// (min, max) bullets for one pulse at Normal.
     fn range(self) -> (f32, f32) {
@@ -87,6 +95,8 @@ impl Pattern {
             Pattern::Wall => (9.0, 16.0),
             Pattern::Burst => (3.0, 5.0),
             Pattern::Pincer => (6.0, 12.0),
+            Pattern::Comb => (10.0, 15.0),
+            Pattern::Sweep => (6.0, 11.0),
         }
     }
     fn speed_mul(self) -> f32 {
@@ -413,12 +423,12 @@ fn make_deck(rng: &mut Rng, kind: SectionKind, diff: f32) -> Deck {
     // Accent lands on the downbeat, `main` on the other beats, `off` between beats.
     let (accents, mains): (&[Pattern], &[Pattern]) = match kind {
         SectionKind::Calm => (&[Pattern::Fan, Pattern::Wall], &[Pattern::Fan, Pattern::Burst]),
-        SectionKind::Normal => (&[Pattern::Wall, Pattern::Pincer, Pattern::Cross], &[Pattern::Fan, Pattern::Burst, Pattern::Spiral]),
+        SectionKind::Normal => (&[Pattern::Wall, Pattern::Pincer, Pattern::Cross, Pattern::Comb], &[Pattern::Fan, Pattern::Burst, Pattern::Spiral, Pattern::Sweep]),
         _ => {
             if hard {
                 (&[Pattern::Wall, Pattern::Pincer, Pattern::Cross, Pattern::Flower, Pattern::Arc], &[Pattern::Fan, Pattern::Spiral, Pattern::Burst, Pattern::Ring])
             } else {
-                (&[Pattern::Wall, Pattern::Pincer, Pattern::Cross], &[Pattern::Fan, Pattern::Spiral, Pattern::Burst])
+                (&[Pattern::Wall, Pattern::Pincer, Pattern::Cross, Pattern::Comb], &[Pattern::Fan, Pattern::Spiral, Pattern::Burst, Pattern::Sweep])
             }
         }
     };
@@ -700,7 +710,9 @@ fn pulse_rot(pattern: Pattern, deck: &Deck, phase: &mut f32, uses: u32) -> f32 {
             let side = if uses % 2 == 0 { deck.gap_side } else { -deck.gap_side };
             side * (0.5 + 0.22 * ((uses / 2) % 2) as f32)
         }
-        Pattern::Fan | Pattern::Burst | Pattern::Pincer | Pattern::Cross => 0.0,
+        Pattern::Fan | Pattern::Burst | Pattern::Pincer | Pattern::Cross | Pattern::Comb => 0.0,
+        // The scythe swings from alternating sides.
+        Pattern::Sweep => if uses % 2 == 0 { 1.0 } else { -1.0 },
         _ => {
             *phase += deck.rot_step;
             *phase
