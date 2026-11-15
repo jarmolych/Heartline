@@ -590,6 +590,8 @@ const CROWN_A: f32 = 0.38;
 const HEART_Z: f32 = 44.0;
 const HEART_SHELL_R: f32 = 60.0;
 const MORPH_RATE: f32 = 1.3;
+/// Seconds a sky takes to sink and the next one to rise.
+const SKY_TRANSITION: f32 = 1.8;
 /// Tile strike hammer slab start height and slam light column height.
 const SLAB_H: f32 = 150.0;
 const TILE_COL_H: f32 = 260.0;
@@ -964,6 +966,10 @@ uniform vec3 u_sunA;
 uniform vec3 u_sunB;
 // x = backdrop (0 sunset, 1 night, 2 ocean, 3 vortex, 4 starfield), y = weather (0 none, 1 rain, 2 dust, 3 aurora)
 uniform vec3 u_mood;
+// x = horizon prop (0 none, 1 palms, 2 pyramids, 3 skyline, 4 meteors), y = hat envelope, z = kick envelope
+uniform vec3 u_mood2;
+// sky transition: x = progress 0..1 (1 = settled), y = the backdrop being left, z = the prop being left
+uniform vec3 u_tr;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
@@ -990,7 +996,37 @@ vec3 topdown(vec2 q) {
     float band = yy < -0.15 ? 1.0 : step(0.08 + 0.42 * (yy + 0.15), fract(yy * 7.0 - u_time * 0.04));
     vec3 scol = mix(u_sunA, u_sunB, clamp(yy * 0.5 + 0.5, 0.0, 1.0));
     float sc = u_mood.x;
-    if (sc < 0.5) {
+    if (sc > 4.5) {
+        if (sc < 5.5) {
+            // ringed planet, seen from above
+            float pd = length(sp - vec2(-420.0, -200.0)) / (sr * 0.55);
+            vec2 rq = (sp - vec2(-420.0, -200.0)) * vec2(1.0, 2.6) / (sr * 0.55);
+            float rl = length(rq);
+            col += mix(u_sunA, u_sunB, 0.5) * 0.10 * smoothstep(1.0, 0.98, pd);
+            col += u_sunA * 0.07 * smoothstep(1.3, 1.36, rl) * smoothstep(2.1, 2.0, rl) * (0.6 + 0.4 * sin(rl * 30.0));
+        } else if (sc < 6.5) {
+            // eclipse: a corona ring that breathes with the kick
+            float er = abs(d - 0.7);
+            col += mix(u_sunA, vec3(1.0), 0.4) * 0.16 * exp(-er * (26.0 - 10.0 * u_mood2.z));
+        } else if (sc < 7.5) {
+            // twin suns
+            col += scol * band * 0.11 * smoothstep(0.8, 0.79, d);
+            float d2 = length(sp - vec2(1500.0, -700.0)) / (sr * 0.45);
+            col += mix(u_grid, vec3(1.0), 0.4) * 0.10 * smoothstep(1.0, 0.98, d2);
+        } else if (sc < 8.5) {
+            // aurora ribbons under the floor
+            float ax = sp.x / 500.0 + sin(sp.y / 700.0 - u_time * 0.2) * 1.2;
+            float cur = pow(sin(ax + sin(ax * 0.4 + u_time * 0.1) * 2.0) * 0.5 + 0.5, 3.0);
+            col += mix(u_grid, u_sunA, sin(sp.y / 900.0) * 0.5 + 0.5) * cur * 0.09 * (1.0 + 0.6 * u_swell);
+        } else {
+            // storm: dark cloud cells that flash on the kick
+            vec2 cp = (q - u_cam * 0.7) / 600.0;
+            float c1 = sin(cp.x * 2.1 + u_time * 0.05 + sin(cp.y * 2.7) * 1.4) * 0.5 + 0.5;
+            float cell = hash(floor(cp * 1.5) + floor(u_time * 1.3));
+            col *= 1.0 - 0.35 * c1;
+            col += mix(u_sunB, vec3(1.0), 0.6) * c1 * u_mood2.z * step(0.7, cell) * 0.16;
+        }
+    } else if (sc < 0.5) {
         // sunset: far striped sun
         col += scol * band * 0.12 * smoothstep(1.0, 0.985, d);
         col += u_sunB * 0.05 * exp(-d * d * 1.2) * (1.0 + 0.6 * u_swell);
@@ -1042,7 +1078,7 @@ vec3 topdown(vec2 q) {
         float rh = hash(vec2(cid, 3.3));
         float s = fract(rp.y * 1.3 + u_time * (0.9 + rh) + rh * 9.0);
         float streak = step(0.7, rh) * smoothstep(0.5, 0.1, abs(fract(rp.x * 70.0) - 0.5)) * smoothstep(0.0, 0.02, s) * smoothstep(0.15, 0.0, s);
-        col += mix(u_grid, vec3(1.0), 0.3) * streak * 0.16;
+        col += mix(u_grid, vec3(1.0), 0.3) * streak * (0.08 + 0.3 * u_mood2.y);
     } else if (we > 1.5 && we < 2.5) {
         vec2 dp = (q - u_cam * 0.4) / 0.6 + vec2(u_time * 22.0, u_time * 9.0);
         col += mix(u_sunA, vec3(1.0), 0.4) * stars(dp, 130.0, 0.35) * 0.3;
@@ -1059,52 +1095,350 @@ vec3 topdown(vec2 q) {
     return col;
 }
 
-// Drift: synthwave vista (sky, stars, sun). The grid, mountains and heartline are geometry.
+// Distance from p to the segment a-b.
+float sdSeg(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));
+}
+
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+float fbm(vec2 p) {
+    float a = 0.5;
+    float sum = 0.0;
+    for (int i = 0; i < 4; i++) {
+        sum += a * vnoise(p);
+        p = p * 2.03 + 17.1;
+        a *= 0.5;
+    }
+    return sum;
+}
+
+// The sky itself for backdrop `sc`: its own zenith and horizon colours, haze and star density.
+// Backdrop 0 (the sunset) is the palette's sky, untouched.
+vec3 skyBase(float sc, vec2 p) {
+    float hz = u_vista.x;
+    float t = clamp(p.y / hz, 0.0, 1.0);
+    vec3 pz = u_c0 * 0.5;
+    vec3 ph = mix(u_c1, u_sunB, 0.35);
+    vec3 z = pz;
+    vec3 h = ph;
+    float starD = 0.05;
+    float haze = 0.0;
+    if (sc > 0.5) {
+        haze = 0.35;
+        if (sc < 1.5) { z = vec3(0.012, 0.022, 0.075); h = vec3(0.07, 0.22, 0.42); starD = 0.10; }
+        else if (sc < 2.5) { z = vec3(0.10, 0.03, 0.22); h = vec3(0.95, 0.42, 0.26); starD = 0.02; }
+        else if (sc < 3.5) { z = u_c0 * 0.35; h = mix(u_c1, u_grid, 0.45); starD = 0.07; }
+        else if (sc < 4.5) { z = vec3(0.01, 0.01, 0.045); h = vec3(0.12, 0.06, 0.26); starD = 0.10; haze = 0.2; }
+        else if (sc < 5.5) { z = vec3(0.02, 0.012, 0.07); h = vec3(0.34, 0.12, 0.40); starD = 0.09; }
+        else if (sc < 6.5) { z = vec3(0.0, 0.0, 0.02); h = vec3(0.22, 0.07, 0.12); starD = 0.0; }
+        else if (sc < 7.5) { z = vec3(0.13, 0.03, 0.20); h = vec3(0.92, 0.36, 0.46); starD = 0.02; }
+        else { z = vec3(0.0, 0.02, 0.06); h = vec3(0.04, 0.17, 0.22); starD = 0.0; }
+        // keep some of the palette so the sky still belongs to the land in front of it
+        z = mix(z, pz, 0.25);
+        h = mix(h, ph, 0.3);
+    }
+    vec3 col = mix(z, h, pow(t, 2.0));
+    col += h * haze * exp(-(1.0 - t) * 10.0);
+    col += vec3(0.8, 0.85, 1.0) * stars(p * u_res, 9.0 * u_res.y / 1080.0, starD) * (1.0 - t) * 0.8;
+    return col;
+}
+
+// The celestial body of backdrop `sc`, drawn over the sky colour `col`. `off` moves it down the
+// screen (used to sink the old one and raise the new one during a transition).
+vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
+    float hz = u_vista.x;
+    float t = p.y / hz;
+    vec2 asp = vec2(u_res.x / u_res.y, 1.0);
+    vec2 q = (p - vec2(0.5, u_vista.y + off)) * asp;
+    float r = u_vista.z * (1.0 + 0.035 * u_bass);
+    float dd = length(q);
+    float yy = q.y / r;
+    vec3 suncol = mix(u_sunA, u_sunB, clamp(yy * 0.6 + 0.5, 0.0, 1.0));
+    if (sc < 0.5) {
+        // sunset: the striped sun
+        float mask = yy < 0.0 ? 1.0 : step(0.1 + 0.5 * yy, fract(yy * 5.0 - u_time * 0.22));
+        col = mix(col, suncol * 0.68, smoothstep(r, r - 0.003, dd) * mask);
+        col += u_sunB * 0.16 * exp(-dd * dd * 12.0) * (1.0 + 0.6 * u_bass);
+    } else if (sc < 1.5) {
+        // moonrise: a great full moon with seas and craters, its lower half cut by cloud bars
+        float R = r * 1.08;
+        vec2 n = q / R;
+        float limb = sqrt(max(1.0 - dot(n, n), 0.0));
+        float seas = fbm(n * 2.4 + 5.0);
+        float crat = fbm(n * 8.0 + 1.0);
+        vec3 mc = mix(vec3(0.50, 0.58, 0.80), vec3(0.96, 0.98, 1.0), smoothstep(0.36, 0.60, seas));
+        mc *= (0.82 + 0.18 * crat) * (0.45 + 0.55 * limb);
+        float ym = q.y / R;
+        float bars = ym < 0.2 ? 1.0 : step(0.14 + 0.55 * (ym - 0.2), fract(ym * 6.0 - u_time * 0.12));
+        float disc = smoothstep(R, R - 0.003, dd);
+        col = mix(col, mc * 0.95, disc * bars);
+        float outm = max(dd - R, 0.0);
+        col += vec3(0.40, 0.58, 1.0) * (0.34 * exp(-outm * 9.0) + 0.12 * exp(-outm * 2.5)) * (1.0 - disc) * (1.0 + 0.3 * u_bass);
+        col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 40.0, 6.0 * u_res.y / 1080.0, 0.08) * (1.0 - t) * 0.7 * (1.0 - disc);
+    } else if (sc < 2.5) {
+        // ocean dusk: a huge sun going into the sea, long clouds lit from below
+        vec2 oq = (p - vec2(0.5, hz + off)) * asp;
+        float od = length(oq);
+        float R = r * 1.3 * (1.0 + 0.03 * u_bass);
+        float yo = -oq.y / R; // 0 at the horizon, 1 at the top of the sun
+        vec3 sc2 = mix(vec3(1.0, 0.30, 0.42), vec3(1.0, 0.86, 0.42), clamp(yo, 0.0, 1.0));
+        float bars = yo > 0.55 ? 1.0 : step(0.16 + 0.5 * (0.55 - yo), fract(yo * 9.0 + u_time * 0.15));
+        col += vec3(1.0, 0.5, 0.3) * (0.30 * exp(-od * od * 5.0) + 0.25 * exp(-max(od - R, 0.0) * 8.0)) * (1.0 + 0.5 * u_bass);
+        col = mix(col, sc2 * 0.92, smoothstep(R, R - 0.003, od) * bars);
+        float cl = fbm(vec2(p.x * 3.0 + u_time * 0.01, (p.y - off) * 26.0));
+        float cm = smoothstep(0.52, 0.7, cl) * smoothstep(0.15, 0.5, t) * smoothstep(1.0, 0.8, t);
+        col = mix(col, mix(vec3(0.20, 0.05, 0.22), vec3(1.0, 0.55, 0.35), smoothstep(0.6, 0.78, cl)), cm * 0.7);
+    } else if (sc < 3.5) {
+        // wire globe: a slowly turning sphere of latitude and longitude lines
+        float R = r * 1.1 * (1.0 + 0.02 * u_bass);
+        vec2 n = q / R;
+        float d2 = dot(n, n);
+        float disc = smoothstep(R, R - 0.003, dd);
+        if (d2 < 1.0) {
+            float z = sqrt(1.0 - d2);
+            vec3 sp = vec3(n.x, n.y * 0.94 - z * 0.34, n.y * 0.34 + z * 0.94);
+            float lat = asin(clamp(sp.y, -1.0, 1.0));
+            float lon = atan(sp.x, sp.z) + u_time * 0.18;
+            float gl = abs(fract(lat * 12.0 / 3.14159 + 0.5) - 0.5);
+            float go = abs(fract(lon * 16.0 / 6.28318) - 0.5) * cos(lat);
+            float wline = max(smoothstep(0.07, 0.01, gl), smoothstep(0.05, 0.005, go));
+            vec3 gc = mix(u_grid, u_sunB, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
+            col = mix(col, u_c0 * 0.3, 0.8 * disc);
+            col += gc * wline * (0.5 + 0.5 * z) * (0.9 + 0.8 * u_mood2.z) * disc;
+            col += gc * 0.14 * pow(1.0 - z, 2.0) * disc;
+        }
+        float outg = max(dd - R, 0.0);
+        col += mix(u_grid, u_sunB, 0.5) * (0.5 * exp(-outg * 22.0) + 0.14 * exp(-outg * 4.0)) * (1.0 - disc);
+    } else if (sc < 4.5) {
+        // nebula: lit gas and dust lanes along a band of stars
+        vec2 np = q * 2.2 + vec2(u_time * 0.006, 0.0);
+        float f1 = fbm(np + fbm(np * 1.7 + 3.0) * 1.2);
+        float f2 = fbm(np * 2.3 - 7.0);
+        float across = q.y + q.x * 0.32 + 0.02;
+        float along = q.x - q.y * 0.32;
+        float bandm = exp(-pow(across / 0.3, 2.0));
+        float neb = smoothstep(0.24, 0.66, f1) * (0.3 + 0.7 * bandm);
+        vec3 nc = mix(vec3(0.10, 0.22, 0.85), vec3(0.95, 0.22, 0.75), f2);
+        nc = mix(nc, vec3(0.45, 0.95, 1.0), smoothstep(0.62, 0.85, f1) * 0.6);
+        col *= 1.0 - 0.5 * smoothstep(0.5, 0.75, f2) * bandm * (1.0 - neb);
+        col += nc * neb * (1.35 + 0.4 * u_bass);
+        // the galaxy's core: a warm bar of light along the band
+        float corev = exp(-(along * along / 0.035 + across * across / 0.008));
+        float coreh = exp(-(along * along / 0.5 + across * across / 0.035));
+        col += vec3(1.0, 0.86, 0.72) * (corev * 0.5 + coreh * 0.3) * (0.6 + 0.8 * f1);
+        col += vec3(0.9, 0.93, 1.0) * stars(p * u_res + 90.0, 6.0 * u_res.y / 1080.0, 0.28) * (1.0 - t * 0.5) * (0.5 + 0.8 * bandm);
+        for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            vec2 s2 = q - vec2(-0.42 + fi * 0.37, -0.20 + 0.11 * sin(fi * 2.4));
+            float tw = 0.7 + 0.3 * sin(u_time * (1.3 + fi) + fi * 2.0);
+            float fl = exp(-abs(s2.x) * 260.0) * exp(-abs(s2.y) * 22.0) + exp(-abs(s2.y) * 260.0) * exp(-abs(s2.x) * 22.0);
+            col += vec3(0.85, 0.92, 1.0) * (fl * 0.8 + exp(-dot(s2, s2) * 4000.0) * 1.5) * tw;
+        }
+    } else if (sc < 5.5) {
+        // ringed planet: banded, lit from the upper left, an atmosphere on its limb
+        float R = r * 0.98;
+        vec2 n = q / R;
+        float z = sqrt(max(1.0 - dot(n, n), 0.0));
+        float lit = clamp(dot(vec3(n, z), normalize(vec3(-0.55, -0.45, 0.7))), 0.0, 1.0);
+        float warp = fbm(vec2(n.x * 1.5 + u_time * 0.01, n.y * 6.0));
+        float bandv = sin((n.y + 0.16 * warp) * 17.0) * 0.5 + 0.5;
+        vec3 pc = mix(vec3(0.95, 0.72, 0.48), vec3(0.62, 0.30, 0.62), bandv);
+        pc = mix(pc, vec3(1.0, 0.92, 0.75), smoothstep(0.75, 1.0, sin((n.y + 0.1 * warp) * 7.0 + 1.0)));
+        pc *= 0.10 + 0.95 * pow(lit, 0.8);
+        pc += vec3(0.55, 0.45, 1.0) * pow(1.0 - z, 3.0) * 0.55 * (0.3 + 0.7 * lit);
+        vec2 rq = vec2(q.x * 0.95 - q.y * 0.31, (q.y * 0.95 + q.x * 0.31) * 3.6) / R;
+        float rl = length(rq);
+        float ring = smoothstep(1.30, 1.34, rl) * smoothstep(2.25, 2.2, rl);
+        ring *= 0.35 + 0.65 * (0.5 + 0.5 * sin(rl * 46.0));
+        ring *= 1.0 - 0.85 * smoothstep(1.74, 1.77, rl) * smoothstep(1.84, 1.81, rl);
+        vec3 rc = mix(vec3(1.0, 0.86, 0.66), vec3(0.75, 0.6, 0.95), smoothstep(1.3, 2.2, rl));
+        float disc = smoothstep(R, R - 0.003, dd);
+        float front = step(0.0, rq.y);
+        float outp = max(dd - R, 0.0);
+        col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 61.0, 6.0 * u_res.y / 1080.0, 0.08) * (1.0 - t) * 0.7 * (1.0 - disc);
+        col += vec3(0.6, 0.4, 1.0) * 0.24 * exp(-outp * 10.0) * (1.0 - disc);
+        col = mix(col, rc * 0.8, ring * (1.0 - front) * (1.0 - disc) * 0.85);
+        col = mix(col, pc, disc);
+        col = mix(col, rc * 0.95, ring * front * 0.92);
+    } else if (sc < 6.5) {
+        // total eclipse: streamers of corona, red prominences, and the diamond ring
+        float R = r * 0.88;
+        vec2 dn = q / max(dd, 0.0001);
+        float outc = max(dd - R, 0.0);
+        float st = fbm(dn * 2.4 + vec2(dd * 1.5 - u_time * 0.05, 7.0));
+        float st2 = fbm(dn * 6.0 + vec2(3.0, u_time * 0.03));
+        float grow = 1.0 - 0.35 * u_mood2.z;
+        float corona = exp(-outc * 6.0 * grow) * (0.2 + 1.0 * st) + exp(-outc * 30.0) * (0.9 + 0.6 * st2);
+        vec3 cc = mix(vec3(1.0, 0.96, 0.9), vec3(1.0, 0.45, 0.65), smoothstep(0.0, 0.35, outc));
+        col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 23.0, 6.0 * u_res.y / 1080.0, 0.10) * (1.0 - t) * 0.6;
+        col += cc * corona * 0.85;
+        col += vec3(1.0, 0.18, 0.32) * exp(-outc * 90.0) * (0.4 + 0.9 * smoothstep(0.55, 0.8, st2));
+        col = mix(col, vec3(0.0, 0.0, 0.01), smoothstep(R, R - 0.004, dd));
+        vec2 bead = q - R * vec2(0.7317, -0.6816) * 0.995;
+        float bd = dot(bead, bead);
+        col += vec3(1.0, 0.97, 0.92) * (exp(-bd * 2500.0) * 2.2 + exp(-bd * 160.0) * 0.5);
+        col += vec3(1.0, 0.95, 0.9) * (exp(-abs(bead.x) * 300.0) * exp(-abs(bead.y) * 26.0) + exp(-abs(bead.y) * 300.0) * exp(-abs(bead.x) * 26.0)) * 0.7;
+    } else if (sc < 7.5) {
+        // binary sunset: the striped sun, and a small white-hot companion over its shoulder
+        vec2 q1 = q - vec2(-0.07, 0.02);
+        float d1 = length(q1);
+        float y1 = q1.y / r;
+        float m1 = y1 < 0.0 ? 1.0 : step(0.1 + 0.5 * y1, fract(y1 * 5.0 - u_time * 0.22));
+        vec2 q2 = q - vec2(0.25, -0.15);
+        float r2 = r * 0.4;
+        float d2b = length(q2);
+        float y2 = q2.y / r2;
+        vec3 c2 = mix(vec3(1.0, 0.98, 0.92), vec3(1.0, 0.55, 0.7), clamp(y2 * 0.5 + 0.5, 0.0, 1.0));
+        float m2 = y2 < 0.25 ? 1.0 : step(0.2 + 0.5 * (y2 - 0.25), fract(y2 * 3.0 - u_time * 0.3));
+        col += vec3(1.0, 0.7, 0.75) * (0.30 * exp(-max(d2b - r2, 0.0) * 12.0) + 0.14 * exp(-d2b * d2b * 18.0));
+        col = mix(col, c2, smoothstep(r2, r2 - 0.003, d2b) * m2);
+        vec3 c1 = mix(u_sunA, u_sunB, clamp(y1 * 0.6 + 0.5, 0.0, 1.0));
+        col = mix(col, c1 * 0.72, smoothstep(r, r - 0.003, d1) * m1);
+        col += u_sunB * 0.18 * exp(-d1 * d1 * 12.0) * (1.0 + 0.6 * u_bass);
+    } else {
+        // aurora: three ribbons, each a wavy hem with rays streaming up from it
+        float x = (p.x - 0.5) * asp.x;
+        float yv = (hz - p.y) / hz + off; // 0 at the horizon, 1 at the top
+        col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 13.0, 6.0 * u_res.y / 1080.0, 0.12) * (1.0 - t) * 0.6;
+        for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            float hem = 0.30 + 0.17 * fi + 0.07 * sin(x * (2.1 + fi * 0.7) + u_time * (0.16 + 0.05 * fi) + fi * 2.0) + 0.035 * sin(x * (5.3 + fi) - u_time * 0.23);
+            float up = yv - hem;
+            float body = smoothstep(-0.012, 0.0, up) * exp(-max(up, 0.0) * (5.5 - fi));
+            float rays = 0.55 + 0.45 * vnoise(vec2(x * 46.0 + fi * 13.0 + sin(u_time * 0.2 + fi) * 2.0, fi));
+            float fold = 0.6 + 0.4 * sin(x * (3.0 + fi) + u_time * 0.3 + fi);
+            vec3 ac = mix(vec3(0.15, 1.0, 0.55), vec3(0.55, 0.3, 1.0), clamp(up * 3.2, 0.0, 1.0));
+            col += ac * body * rays * fold * (0.42 - 0.08 * fi) * (1.0 + 0.5 * u_bass);
+            col += vec3(0.6, 1.0, 0.8) * smoothstep(0.012, 0.0, abs(up)) * 0.25 * fold;
+        }
+    }
+    return col;
+}
+
+// Horizon props: silhouettes standing on the horizon, in front of the sky.
+vec3 skyProp(float pr, vec2 p, vec3 col, float off) {
+    float hz = u_vista.x;
+    vec2 asp = vec2(u_res.x / u_res.y, 1.0);
+    vec2 q = vec2((p.x - 0.5) * asp.x, hz + off - p.y); // x from the centre, y up from the horizon
+    vec3 dark = u_c0 * 0.22;
+    if (pr > 0.5 && pr < 1.5) {
+        // palm trees: curved trunks, and broad feathered fronds that arch over and sway
+        float sil = 0.0;
+        for (int i = 0; i < 4; i++) {
+            float fi = float(i);
+            float side = mod(fi, 2.0) < 0.5 ? -1.0 : 1.0;
+            float far = floor(fi * 0.5);
+            vec2 base = vec2(side * (0.50 + 0.21 * far), -0.01);
+            float h = 0.30 - 0.08 * far;
+            float lean = -side * (0.07 + 0.03 * far);
+            float sway = sin(u_time * 0.7 + fi * 1.9) * 0.006;
+            vec2 m1 = base + vec2(lean * 0.15, h * 0.35);
+            vec2 m2 = base + vec2(lean * 0.55, h * 0.72);
+            vec2 top = base + vec2(lean + sway, h);
+            float td = min(min(sdSeg(q, base, m1), sdSeg(q, m1, m2)), sdSeg(q, m2, top));
+            float tw = mix(0.0085, 0.0045, clamp(q.y / h, 0.0, 1.0));
+            sil = max(sil, smoothstep(tw, tw - 0.002, td));
+            for (int f = 0; f < 7; f++) {
+                float a = -0.35 + float(f) * 0.64 + sway * 4.0;
+                vec2 dirv = vec2(cos(a), sin(a));
+                float L = h * (0.62 + 0.10 * sin(float(f) * 2.3 + fi));
+                vec2 p1 = top + dirv * L * 0.45;
+                vec2 p2 = p1 + normalize(dirv + vec2(0.0, -0.7)) * L * 0.35;
+                vec2 p3 = p2 + normalize(dirv + vec2(0.0, -1.8)) * L * 0.28;
+                float fd = min(min(sdSeg(q, top, p1), sdSeg(q, p1, p2)), sdSeg(q, p2, p3));
+                float u = clamp(length(q - top) / L, 0.0, 1.0);
+                // a leaf: widest in the middle, notched into leaflets
+                float leaf = (0.003 + 0.014 * sin(3.14159 * pow(u, 0.8))) * (0.55 + 0.45 * step(0.3, fract(u * 12.0)));
+                sil = max(sil, smoothstep(leaf, leaf - 0.002, fd));
+            }
+            sil = max(sil, smoothstep(0.013, 0.010, length(q - top + vec2(0.0, 0.004))));
+        }
+        col = mix(col, dark, sil * step(0.0, q.y));
+    } else if (pr > 1.5 && pr < 2.5) {
+        // pyramids with a lit edge
+        for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            float cx = -0.62 + fi * 0.55 + (fi == 1.0 ? 0.22 : 0.0);
+            float h = 0.16 - 0.035 * fi + (fi == 1.0 ? 0.07 : 0.0);
+            float hw = h * 1.25;
+            float inside = step(abs(q.x - cx) / hw + q.y / h, 1.0) * step(0.0, q.y);
+            vec3 face = q.x > cx ? dark * 1.4 : u_c1 * 0.8 + u_sunB * 0.14;
+            float courses = 0.9 + 0.1 * step(0.5, fract(q.y / h * 9.0));
+            col = mix(col, face * courses, inside);
+            float edge = smoothstep(0.004, 0.0, abs(abs(q.x - cx) / hw + q.y / h - 1.0) * h) * step(0.0, q.y);
+            col += u_sunA * edge * 0.35;
+        }
+    } else if (pr > 2.5 && pr < 3.5) {
+        // city skyline: towers with windows that flicker with the hats
+        float cw = 0.045;
+        float id = floor(q.x / cw);
+        float hh = hash(vec2(id, 9.1));
+        float tall = 0.05 + 0.2 * hh * hh + 0.05 * step(0.8, hash(vec2(id, 2.3)));
+        float fx = fract(q.x / cw);
+        float inside = step(q.y, tall) * step(0.0, q.y) * step(0.06, fx) * step(fx, 0.94);
+        col = mix(col, dark, inside);
+        vec2 wv = vec2(fx * 4.0, q.y / 0.016);
+        float won = step(0.45, hash(vec2(id * 7.0 + floor(wv.x), floor(wv.y)) + floor(u_time * 0.5) * 0.01));
+        float wmask = step(0.25, fract(wv.x)) * step(fract(wv.x), 0.75) * step(0.3, fract(wv.y)) * step(fract(wv.y), 0.75);
+        col += mix(u_sunA, u_grid, hh) * inside * won * wmask * (0.2 + 0.45 * u_mood2.y);
+        // a beacon on the tallest ones, blinking with the kick
+        float tip = smoothstep(0.006, 0.0, length(vec2((fx - 0.5) * cw, q.y - tall - 0.006))) * step(0.22, tall);
+        col += u_sunB * tip * (0.4 + 1.2 * u_mood2.z);
+    } else if (pr > 3.5) {
+        // meteors: a few streaks falling across the sky
+        for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            float slot = floor(u_time * 0.35 + fi * 0.37);
+            float hs = hash(vec2(slot, fi * 3.7));
+            float ph = fract(u_time * 0.35 + fi * 0.37);
+            vec2 a = vec2(-0.7 + 1.4 * hs, 0.5 + 0.12 * fi) + vec2(0.55, -0.3) * ph * 1.6;
+            vec2 bq = a - vec2(0.55, -0.3) * 0.16;
+            float d = sdSeg(q, a, bq);
+            float fade = smoothstep(0.0, 0.1, ph) * smoothstep(0.7, 0.4, ph) * step(0.35, hs);
+            col += mix(u_sunA, vec3(1.0), 0.6) * smoothstep(0.004, 0.0, d) * fade * smoothstep(0.0, 0.16, length(q - bq)) * 0.9;
+        }
+    }
+    return col;
+}
+
+// Drift: synthwave vista (sky, body, props). The grid, mountains and heartline are geometry.
 vec3 vista(vec2 p) {
     float hz = u_vista.x;
     vec3 col;
     if (p.y < hz) {
         float t = p.y / hz;
-        col = mix(u_c0 * 0.5, mix(u_c1, u_sunB, 0.35), pow(t, 2.0));
-        col += vec3(0.8, 0.85, 1.0) * stars(p * u_res, 9.0 * u_res.y / 1080.0, 0.05) * (1.0 - t) * 0.8;
-        vec2 q = (p - vec2(0.5, u_vista.y)) * vec2(u_res.x / u_res.y, 1.0);
-        float r = u_vista.z * (1.0 + 0.035 * u_bass);
-        float dd = length(q);
-        float yy = q.y / r;
-        float mask = yy < 0.0 ? 1.0 : step(0.1 + 0.5 * yy, fract(yy * 5.0 - u_time * 0.22));
-        vec3 suncol = mix(u_sunA, u_sunB, clamp(yy * 0.6 + 0.5, 0.0, 1.0));
-        float sc = u_mood.x;
-        if (sc < 0.5) {
-            col = mix(col, suncol * 0.68, smoothstep(r, r - 0.003, dd) * mask);
-            col += u_sunB * 0.16 * exp(-dd * dd * 12.0) * (1.0 + 0.6 * u_bass);
-        } else if (sc < 1.5) {
-            // night: crescent moon high on the right, a denser sky
-            vec3 sky = col;
-            vec2 mq = q - vec2(0.36, -0.14);
-            float mr = r * 0.42;
-            col = mix(col, mix(u_sunB, vec3(1.0), 0.6) * 0.8, smoothstep(mr, mr - 0.003, length(mq)));
-            col = mix(col, sky, smoothstep(mr, mr - 0.003, length(mq - vec2(mr * 0.5, -mr * 0.22))) * 0.92);
-            col += u_sunB * 0.10 * exp(-dot(mq, mq) * 30.0);
-            col += vec3(0.8, 0.85, 1.0) * stars(p * u_res + 40.0, 6.0 * u_res.y / 1080.0, 0.07) * (1.0 - t) * 0.7;
-        } else if (sc < 2.5) {
-            // ocean: the sun half under the horizon
-            vec2 oq = (p - vec2(0.5, hz)) * vec2(u_res.x / u_res.y, 1.0);
-            float od = length(oq);
-            float orr = r * 1.15 * (1.0 + 0.03 * u_bass);
-            col = mix(col, mix(u_sunA, u_sunB, clamp(-oq.y / orr, 0.0, 1.0)) * 0.72, smoothstep(orr, orr - 0.003, od));
-            col += u_sunB * 0.22 * exp(-od * od * 7.0) * (1.0 + 0.5 * u_bass);
-        } else if (sc < 3.5) {
-            // vortex: rings opening in the sky
-            float rr = dd / r;
-            float ring = smoothstep(0.34, 0.5, abs(fract(rr * 1.6 - u_time * 0.18) - 0.5));
-            col += suncol * ring * 0.42 * exp(-rr * 0.75) * (1.0 + 0.6 * u_bass);
-            col += u_sunB * 0.2 * exp(-dd * dd * 40.0);
+        float k = u_tr.x;
+        if (k >= 0.999) {
+            col = skyProp(u_mood2.x, p, skyBody(u_mood.x, p, skyBase(u_mood.x, p), 0.0), 0.0);
         } else {
-            // starfield: a nebula band and many more stars
-            float n1 = sin(p.x * 9.0 + sin(p.y * 7.0 + u_time * 0.05) * 2.0) * 0.5 + 0.5;
-            float bandy = (p.y - hz * 0.5) / 0.2;
-            col += mix(u_sunA, u_sunB, n1) * 0.36 * (0.4 + 0.6 * n1) * exp(-bandy * bandy);
-            col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 90.0, 7.0 * u_res.y / 1080.0, 0.3) * (1.0 - t * 0.5) * 1.2;
+            // Transition: the old sky sinks behind the horizon while the new one rises out of it.
+            float ko = smoothstep(0.0, 0.55, k);
+            float kn = smoothstep(0.3, 1.0, k);
+            vec3 oldc = skyProp(u_tr.z, p, skyBody(u_tr.y, p, skyBase(u_tr.y, p), ko * ko * 0.75), ko * 0.45);
+            vec3 newc = skyProp(u_mood2.x, p, skyBody(u_mood.x, p, skyBase(u_mood.x, p), (1.0 - kn) * (1.0 - kn) * 0.75), (1.0 - kn) * 0.45);
+            col = mix(oldc, newc, smoothstep(0.35, 0.65, k));
+            // a band of light sweeps up the sky, and scan lines race along it
+            float bell = sin(k * 3.14159);
+            float sweep = exp(-pow((t - (1.0 - k) * 1.2) * 7.0, 2.0));
+            float lines = step(0.55, hash(vec2(floor(p.y * u_res.y / 3.0), floor(u_time * 30.0))));
+            col += mix(u_sunB, vec3(1.0), 0.5) * sweep * bell * (0.35 + 0.45 * lines * smoothstep(0.0, 1.0, abs(fract(p.x * 3.0 - u_time * 2.0) - 0.5) * 2.0));
+            col += u_sunB * bell * 0.5 * exp(-(hz - p.y) * 14.0);
+        }
+        // rain over the menu sky, pulsing with the hats
+        if (u_mood.y > 0.5 && u_mood.y < 1.5) {
+            vec2 rp = vec2(p.x * u_res.x / u_res.y + p.y * 0.2, p.y);
+            float cid = floor(rp.x * 90.0);
+            float rh = hash(vec2(cid, 5.5));
+            float sdrop = fract(-rp.y * 1.6 + u_time * (1.1 + rh) + rh * 9.0);
+            float streak = step(0.62, rh) * smoothstep(0.5, 0.15, abs(fract(rp.x * 90.0) - 0.5)) * smoothstep(0.0, 0.02, sdrop) * smoothstep(0.2, 0.0, sdrop);
+            col += mix(u_grid, vec3(1.0), 0.4) * streak * (0.10 + 0.35 * u_mood2.y);
         }
         col += u_sunB * 0.35 * exp(-(hz - p.y) * 30.0);
     } else {
@@ -1112,11 +1446,23 @@ vec3 vista(vec2 p) {
         col = mix(u_c0 * 0.4, u_c1 * 0.45, y);
         col += u_sunB * 0.22 * exp(-y * 6.0) * exp(-abs(p.x - 0.5) * 3.0);
         col += u_sunB * 0.25 * exp(-y * 40.0);
-        if (u_mood.x > 1.5 && u_mood.x < 2.5) {
-            // ocean: glints running toward the viewer
-            float wv = sin(8.0 / (y + 0.06) + u_time * 1.6 + sin(p.x * 24.0) * 0.7);
-            col += mix(u_sunA, u_sunB, 0.5) * 0.16 * smoothstep(0.9, 1.0, wv) * exp(-abs(p.x - 0.5) * 2.2);
+        // the ground takes the sky's colour near the horizon, and the body throws a path of light
+        float sett = step(0.999, u_tr.x);
+        vec3 hcol = vec3(0.0);
+        float pathw = 0.0;
+        if (u_mood.x > 0.5 && u_mood.x < 1.5) { hcol = vec3(0.45, 0.65, 1.0); pathw = 0.6; }
+        else if (u_mood.x > 1.5 && u_mood.x < 2.5) { hcol = vec3(1.0, 0.55, 0.32); pathw = 1.0; }
+        else if (u_mood.x > 4.5 && u_mood.x < 5.5) { hcol = vec3(0.9, 0.6, 0.8); pathw = 0.5; }
+        else if (u_mood.x > 6.5 && u_mood.x < 7.5) { hcol = vec3(1.0, 0.5, 0.55); pathw = 0.7; }
+        else if (u_mood.x > 7.5) { hcol = vec3(0.2, 0.9, 0.6); pathw = 0.0; }
+        col += hcol * 0.16 * exp(-y * 7.0) * sett;
+        if (pathw > 0.0) {
+            float wpath = (0.03 + 0.28 * y) * pathw;
+            float path = exp(-pow((p.x - 0.5) / wpath, 2.0));
+            float dash = smoothstep(0.5, 0.9, sin(26.0 / (y + 0.09) + u_time * 1.8 + sin(p.x * 40.0 + u_time) * 1.2));
+            col += hcol * path * (0.08 + 0.5 * dash) * (1.0 - y * 0.7) * sett;
         }
+        col += u_sunB * sin(u_tr.x * 3.14159) * 0.3 * exp(-y * 9.0) * step(u_tr.x, 0.999);
     }
     return col;
 }
@@ -1318,6 +1664,10 @@ pub struct Renderer {
     heart_key: (usize, usize),
     heart_from: (Edges, Edges),
     heart_mt: f32,
+    /// The look being shown, the one it replaced, and the 0..1 transition between them.
+    mood_cur: Mood,
+    mood_old: Mood,
+    mood_k: f32,
     broken_t: f32,
     // pulse layer (see the consts at the top)
     /// Reactive amplitude scale from the VISUALS setting (1 / 0.45 / 0).
@@ -1394,6 +1744,8 @@ impl Renderer {
                 ("u_sunA", UniformType::Float3),
                 ("u_sunB", UniformType::Float3),
                 ("u_mood", UniformType::Float3),
+                ("u_mood2", UniformType::Float3),
+                ("u_tr", UniformType::Float3),
             ],
             &[],
             PipelineParams::default(),
@@ -1475,6 +1827,9 @@ impl Renderer {
             heart_key: start,
             heart_from,
             heart_mt: 1.0,
+            mood_cur: Mood::default(),
+            mood_old: Mood::default(),
+            mood_k: 1.0,
             broken_t: 0.0,
             fx: 1.0,
             kick: 0.0,
@@ -1821,6 +2176,13 @@ impl Renderer {
             self.pal = lerp_pal(&self.pal_from, &palette(self.pal_to), ease(self.pal_t));
         }
         self.update_music(world, dt, idle);
+        // A new look arrives as a transition: the old sky sinks, the new one rises.
+        if world.mood != self.mood_cur {
+            self.mood_old = self.mood_cur;
+            self.mood_cur = world.mood;
+            self.mood_k = if self.time < 0.5 { 1.0 } else { 0.0 };
+        }
+        self.mood_k = (self.mood_k + dt / SKY_TRANSITION).min(1.0);
         let pal = self.pal;
         let view = self.view;
         self.cam = view.center;
@@ -1862,7 +2224,20 @@ impl Renderer {
         m.set_uniform("u_grid", v3(pal.grid));
         m.set_uniform("u_sunA", v3(pal.accent));
         m.set_uniform("u_sunB", v3(pal.secondary));
-        m.set_uniform("u_mood", vec3(world.mood.scene as f32, world.mood.weather as f32, world.mood.floor as f32));
+        // In play the weather and floor also follow the section: calm parts drift with dust,
+        // drops bring the rain if the song has no weather of its own.
+        let weather = if lv > 0.5 {
+            match world.section_kind {
+                SectionKind::Calm => 2,
+                SectionKind::Drop if self.mood_cur.weather == 0 => 1,
+                _ => self.mood_cur.weather,
+            }
+        } else {
+            self.mood_cur.weather
+        };
+        m.set_uniform("u_mood", vec3(self.mood_cur.scene as f32, weather as f32, self.mood_cur.floor as f32));
+        m.set_uniform("u_mood2", vec3(self.mood_cur.prop as f32, world.hit[2] * self.fx.min(1.0), world.hit[0] * self.fx.min(1.0)));
+        m.set_uniform("u_tr", vec3(ease(self.mood_k), self.mood_old.scene as f32, self.mood_old.prop as f32));
         gl_use_material(m);
         draw_rectangle(0.0, 0.0, 1.0, 1.0, WHITE);
         gl_use_default_material();
@@ -1970,13 +2345,14 @@ impl Renderer {
     fn draw_floor(&self, w: &World, e: f32, armed_k: f32) {
         let pal = &self.pal;
         let lv = 1.0 - e;
-        let ga = (FLOOR_A + FLOOR_ARMED_A * armed_k + FLOOR_SWELL_A * self.swell + KICK_GRID * self.kick * self.fx) * lv;
+        // In purgatory the floor all but falls away.
+        let ga = (FLOOR_A + FLOOR_ARMED_A * armed_k + FLOOR_SWELL_A * self.swell + KICK_GRID * self.kick * self.fx) * lv * (1.0 - 0.75 * w.purg);
         let va = VISTA_GRID_A * (1.0 + 0.5 * w.hit[0]) * e;
         let gw = 1.6 + 1.2 * e;
         let vp = self.vs(0.5, HZ);
         // Floor style (in play only; the vista always shows the full grid):
         // 1 = open grid, inner lines alternate strong and faint; 2 = faint lines, marks on the crossings.
-        let style = if e < 0.5 { w.mood.floor } else { 0 };
+        let style = if e < 0.5 { (w.mood.floor + w.palette) % 3 } else { 0 };
         let line_k = |i: usize, n: usize| -> f32 {
             match style {
                 1 if i % 2 == 1 && i != n => 0.3,
@@ -2599,8 +2975,17 @@ impl Renderer {
         let flash = h.flash * lv;
         let c_out = mixc(mixc(pal.primary, WHITE, flash * 0.8 + 0.25 * punch), mixc(pal.accent, WHITE, 0.3), e);
         let c_in = mixc(mixc(pal.secondary, WHITE, flash * 0.6), pal.secondary, e);
-        let base_a = if broken { 0.5 } else { 0.95 } * lv + 0.15 * e;
+        // Purgatory: the Heart is a pale ghost of itself, its shell drifting apart.
+        let ghost = w.purg * lv * if broken { 0.0 } else { 1.0 };
+        let c_out = mixc(c_out, alpha(WHITE, 0.75), ghost);
+        let c_in = mixc(c_in, alpha(pal.accent, 0.8), ghost);
+        // Overdrive burns hot; a hurt Heart flickers.
+        let hot = if h.form == HeartForm::Overdrive { lv * (1.0 - ghost) } else { 0.0 };
+        let c_out = mixc(c_out, mixc(pal.danger, pal.accent, 0.5 + 0.5 * (t * 9.0).sin()), 0.55 * hot);
+        let hurt = (1.0 - w.phase_frac()) * lv * (1.0 - ghost) * if w.phases.is_empty() { 0.0 } else { 1.0 };
+        let base_a = (if broken { 0.5 } else { 0.95 } * lv + 0.15 * e) * (1.0 - 0.45 * ghost);
         let shatter = (self.broken_t * 55.0).min(190.0);
+        let drift = 26.0 * ghost;
         for (shell, (from, to), m, rad, col, wdt) in [
             (0, (&self.heart_from.0, &self.solids[self.heart_key.0]), mo, r_out, c_out, 2.6),
             (1, (&self.heart_from.1, &self.solids[self.heart_key.1]), mi, r_in, c_in, 2.0),
@@ -2614,6 +2999,22 @@ impl Renderer {
                     let sr = Mat3::from_rotation_z(self.broken_t * (0.5 + (kk % 5) as f32 * 0.3));
                     a = mid + off + sr * ((a - mid) * 0.8);
                     b = mid + off + sr * ((b - mid) * 0.8);
+                } else if drift > 0.1 {
+                    // ghost: every edge floats a little way out and bobs on its own
+                    let mid = (a + b) * 0.5;
+                    let off = mid.normalize_or_zero() * drift * (1.0 + 0.4 * (t * 1.3 + kk as f32 * 1.7).sin());
+                    a = mid + off + (a - mid) * 0.82;
+                    b = mid + off + (b - mid) * 0.82;
+                } else if hurt > 0.25 && shell == 0 {
+                    // cracks: as the phase runs down, more of the shell's edges jitter loose
+                    let loose = ((kk * 7 + 3) % ME) as f32 / ME as f32;
+                    if loose < hurt - 0.25 {
+                        let j = (t * 23.0 + kk as f32 * 5.1).sin() * 5.0 * hurt;
+                        let mid = (a + b) * 0.5;
+                        let off = mid.normalize_or_zero() * j;
+                        a += off;
+                        b += off;
+                    }
                 }
                 self.edge3(pos, z, a, b, wdt * (1.0 + 0.6 * e), col, base_a, rad);
             }
@@ -2632,11 +3033,46 @@ impl Renderer {
                     prev = cur;
                 }
             }
-            // core
+            // core: a beating light. It is dark while the shell is shut, a hollow ring in purgatory.
             let core = self.pj(pos, z);
             let cr = (5.0 + 8.0 * punch + 3.0 * self.low_s) * (1.0 + 0.6 * e);
-            disc2(core, cr * 3.0, 20, alpha(mixc(pal.primary, WHITE, 0.5), 0.35 * lv + 0.1 * e), alpha(pal.primary, 0.0));
-            disc(core, cr, 16, alpha(WHITE, (0.6 + 0.4 * punch) * (lv + 0.25 * e)));
+            let lit = (0.25 + 0.75 * h.open) * (1.0 - ghost);
+            let core_col = mixc(mixc(pal.primary, WHITE, 0.5), mixc(pal.danger, pal.accent, 0.5), hot);
+            disc2(core, cr * (3.0 + 2.5 * hot), 20, alpha(core_col, (0.35 * lv + 0.1 * e) * (0.4 + 0.6 * lit)), alpha(pal.primary, 0.0));
+            disc(core, cr, 16, alpha(WHITE, (0.6 + 0.4 * punch) * (lv + 0.25 * e) * lit));
+            if hot > 0.01 {
+                // overdrive: spikes of light thrown out on every kick
+                for k in 0..10 {
+                    let a = k as f32 * TAU / 10.0 + t * 0.6;
+                    let len = r_out * (0.9 + 0.9 * punch + 0.25 * (t * 7.0 + k as f32 * 2.1).sin());
+                    seg(core + dir(a) * cr * 1.2, core + dir(a) * len, 3.0, alpha(pal.accent, 0.7 * hot), alpha(pal.danger, 0.0));
+                }
+            }
+            if h.form == HeartForm::Valve && lv > 0.5 {
+                // valve: six iris blades that swing shut and open with the bar
+                let shut = 1.0 - h.open;
+                for k in 0..6 {
+                    let a = k as f32 * TAU / 6.0 + t * 0.25;
+                    let tip = core + dir(a + 1.1 * shut) * r_out * (0.25 + 0.6 * h.open);
+                    seg(core + dir(a) * r_out * 0.98, tip, 2.5, alpha(pal.secondary, 0.85 * lv), alpha(pal.accent, 0.5 * lv));
+                }
+            }
+            if ghost > 0.01 {
+                // purgatory: a hollow halo, a clock that drains, and embers circling the void
+                let left = (w.purg_until - w.t).min(w.phase_left()).max(0.0);
+                let frac = (left / 9.0).clamp(0.0, 1.0);
+                disc2(core, r_out * 0.75, 22, alpha(pal.bg0, 0.85 * ghost), alpha(pal.bg0, 0.0));
+                arc(core, r_out * 0.55, 0.0, TAU, 2.0, alpha(WHITE, 0.55 * ghost));
+                arc(core, r_out * 1.75, -PI * 0.5, -PI * 0.5 + TAU * frac, 4.0, alpha(pal.accent, 0.9 * ghost));
+                arc(core, r_out * 1.75, 0.0, TAU, 1.0, alpha(WHITE, 0.2 * ghost));
+                for k in 0..9 {
+                    let a = k as f32 * TAU / 9.0 - t * (0.5 + 0.07 * k as f32);
+                    let rr = r_out * (1.25 + 0.2 * (t * 1.1 + k as f32).sin());
+                    let q = core + dir(a) * rr;
+                    poly_lines(q, 4, 5.0, a, 1.5, alpha(pal.accent, 0.8 * ghost));
+                    seg(q, core + dir(a + 0.25) * rr, 1.5, alpha(pal.accent, 0.4 * ghost), alpha(pal.accent, 0.0));
+                }
+            }
         }
     }
 
@@ -2716,13 +3152,34 @@ impl Renderer {
             let spin = self.time * 3.0 + s.pos.x * 0.01;
             if s.heal {
                 let c = alpha(pal.primary, fade);
+                let beat = 1.0 + 0.18 * w.beat_pulse;
+                disc2(s.pos, 30.0 * beat, 18, alpha(pal.primary, 0.28 * fade), alpha(pal.primary, 0.0));
                 rquad(s.pos, vec2(11.0, 3.5), 0.0, c);
                 rquad(s.pos, vec2(3.5, 11.0), 0.0, c);
-                poly_lines(s.pos, 4, 18.0 + 2.0 * (self.time * 5.0).sin(), PI * 0.25, 2.0, alpha(WHITE, fade * 0.8));
+                rquad(s.pos, vec2(7.0, 1.4), 0.0, alpha(WHITE, fade));
+                rquad(s.pos, vec2(1.4, 7.0), 0.0, alpha(WHITE, fade));
+                arc(s.pos, 19.0 * beat, 0.0, TAU, 2.0, alpha(WHITE, fade * 0.85));
+                arc(s.pos, 25.0 * beat, self.time * 2.0, self.time * 2.0 + PI * 0.6, 2.0, alpha(pal.primary, fade));
+                arc(s.pos, 25.0 * beat, self.time * 2.0 + PI, self.time * 2.0 + PI * 1.6, 2.0, alpha(pal.primary, fade));
+                seg(s.pos, self.pj(s.pos, 46.0), 2.0, alpha(pal.primary, 0.5 * fade), alpha(pal.primary, 0.0));
             } else {
-                let d = rot2(vec2(7.0, 0.0), spin);
-                quad4([s.pos + d, s.pos + vec2(-d.y, d.x), s.pos - d, s.pos - vec2(-d.y, d.x)], [alpha(pal.accent, fade); 4]);
-                disc(s.pos, 2.5, 6, alpha(WHITE, fade));
+                // A crystal: a tall diamond turning on its axis (its width breathes as it turns),
+                // a bright facet line, a floor glint.
+                let turn = spin.cos();
+                let (hw, hh) = (2.0 + 5.0 * turn.abs(), 9.5);
+                let top = s.pos + vec2(0.0, -hh);
+                let bot = s.pos + vec2(0.0, hh);
+                let (l, r) = (s.pos + vec2(-hw, 0.0), s.pos + vec2(hw, 0.0));
+                let c0 = alpha(pal.accent, fade);
+                let c1 = alpha(mixc(pal.accent, WHITE, 0.65), fade);
+                disc2(s.pos, 15.0, 10, alpha(pal.accent, 0.22 * fade), alpha(pal.accent, 0.0));
+                quad4([top, r, bot, l], [c1, c0, c0, c1]);
+                line(top, bot, 1.2, alpha(WHITE, 0.9 * fade));
+                if turn > 0.92 {
+                    let g = (turn - 0.92) / 0.08;
+                    line(s.pos - vec2(13.0 * g, 0.0), s.pos + vec2(13.0 * g, 0.0), 1.5, alpha(WHITE, g * fade));
+                    line(s.pos - vec2(0.0, 15.0 * g), s.pos + vec2(0.0, 15.0 * g), 1.5, alpha(WHITE, g * fade));
+                }
             }
         }
         // Ear-candy comets: a bright head with a ring, on the floor plane.
@@ -2735,27 +3192,37 @@ impl Renderer {
         }
         for o in &w.orbs {
             let fade = (o.life / 2.0).min(1.0) * (o.age * 3.0).min(1.0);
-            let pulse = 1.0 + 0.08 * (self.time * 5.0 + o.pos.x).sin();
-            disc(o.pos, 30.0, 20, alpha(pal.bg0, 0.6 * fade));
-            poly_lines(o.pos, 6, 38.0 * pulse, -self.time * 0.5, 1.5, alpha(pal.primary, fade * 0.7));
+            let pulse = 1.0 + 0.08 * (self.time * 5.0 + o.pos.x).sin() + 0.06 * w.beat_pulse;
+            let col = if o.rare { mixc(pal.danger, WHITE, 0.25) } else { pal.accent };
+            // floor: glow, a slowly turning hexagon and the time left
+            disc2(o.pos, 62.0, 24, alpha(col, 0.20 * fade), alpha(col, 0.0));
+            disc(o.pos, 30.0, 20, alpha(pal.bg0, 0.7 * fade));
+            poly_lines(o.pos, 6, 40.0 * pulse, -self.time * 0.5, 2.0, alpha(pal.primary, fade * 0.8));
+            poly_lines(o.pos, 6, 46.0 * pulse, self.time * 0.3, 1.0, alpha(col, fade * 0.5));
+            arc(o.pos, 54.0, -PI * 0.5, -PI * 0.5 + TAU * (o.life / 14.0).clamp(0.0, 1.0), 2.5, alpha(WHITE, 0.6 * fade));
+            // a column of light, and the upgrade's emblem floating in it
+            let top = self.pj(o.pos, 120.0);
+            seg(o.pos, top, 26.0, alpha(col, 0.16 * fade), alpha(col, 0.0));
+            seg(o.pos, top, 3.0, alpha(WHITE, 0.35 * fade), alpha(col, 0.0));
+            let c = self.pj(o.pos, 30.0 + 5.0 * (self.time * 2.4 + o.pos.x).sin());
             let m = Mat3::from_rotation_z(self.time * 0.7 + o.pos.x) * Mat3::from_rotation_x(0.6) * Mat3::from_rotation_y(self.time * 0.9);
-            let sc = 24.0 * pulse;
-            for ed in self.solids[SH_ICOSA].iter() {
-                self.edge3(o.pos, 18.0, m * (ed[0] * sc), m * (ed[1] * sc), 2.0, pal.accent, fade, sc);
+            let sc = 31.0 * pulse;
+            for ed in self.solids[if o.rare { SH_STELLA } else { SH_ICOSA }].iter() {
+                self.edge3(o.pos, 30.0, m * (ed[0] * sc), m * (ed[1] * sc), 1.2, col, fade * 0.45, sc);
             }
-            arc(o.pos, 48.0, -PI * 0.5, -PI * 0.5 + TAU * (o.life / 14.0).clamp(0.0, 1.0), 2.0, alpha(WHITE, 0.5 * fade));
+            upgrade_emblem(o.up, c, 15.0 * pulse, 2.6, alpha(WHITE, fade), alpha(col, fade), self.time);
             if o.rare {
-                poly_lines(o.pos, 3, 52.0 * pulse, self.time * 0.9, 2.5, alpha(pal.danger, fade));
-                poly_lines(o.pos, 3, 52.0 * pulse, self.time * 0.9 + PI, 2.5, alpha(pal.danger, fade * 0.7));
-                wtext("RARE", o.pos + vec2(0.0, -92.0), 16.0, alpha(pal.danger, fade), tscale);
+                poly_lines(o.pos, 3, 60.0 * pulse, self.time * 0.9, 2.5, alpha(pal.danger, fade));
+                poly_lines(o.pos, 3, 60.0 * pulse, self.time * 0.9 + PI, 2.5, alpha(pal.danger, fade * 0.7));
+                wtext("RARE", o.pos + vec2(0.0, -96.0), 16.0, alpha(pal.danger, fade), tscale);
             }
-            wtext(o.up.name(), o.pos + vec2(0.0, -66.0), 28.0, alpha(if o.rare { WHITE } else { pal.accent }, fade), tscale);
-            wtext(o.up.desc(), o.pos + vec2(0.0, 72.0), 18.0, alpha(WHITE, fade * 0.9), tscale);
+            wtext(o.up.name(), o.pos + vec2(0.0, -70.0), 28.0, alpha(if o.rare { WHITE } else { pal.accent }, fade), tscale);
+            wtext(o.up.desc(), o.pos + vec2(0.0, 76.0), 18.0, alpha(WHITE, fade * 0.9), tscale);
             let lvl = w.player.up(o.up);
             if lvl > 0 {
-                wtext(&format!("lv {} > {}", lvl, lvl + 1), o.pos + vec2(0.0, 94.0), 16.0, alpha(WHITE, fade * 0.8), tscale);
+                wtext(&format!("lv {} > {}", lvl, lvl + 1), o.pos + vec2(0.0, 98.0), 16.0, alpha(WHITE, fade * 0.8), tscale);
             } else {
-                wtext("new", o.pos + vec2(0.0, 94.0), 16.0, alpha(WHITE, fade * 0.8), tscale);
+                wtext("new", o.pos + vec2(0.0, 98.0), 16.0, alpha(WHITE, fade * 0.8), tscale);
             }
         }
     }
@@ -3597,6 +4064,106 @@ impl Renderer {
         draw_rectangle(x, y, w, h, Color::new(0.0, 0.0, 0.05, 0.55));
         rect_lines(x, y, w, h, 1.0 * u, alpha(self.pal.secondary, 0.45));
         brackets(x - 5.0 * u, y - 5.0 * u, w + 10.0 * u, h + 10.0 * u, 18.0 * u, 2.0 * u, alpha(self.pal.accent, 0.8));
+    }
+}
+
+/// Each upgrade's emblem, drawn with lines around `c` at half-size `r`.
+fn upgrade_emblem(up: UpgradeId, c: Vec2, r: f32, th: f32, col: Color, col2: Color, time: f32) {
+    let p = |x: f32, y: f32| c + vec2(x, y) * r;
+    let l = |a: Vec2, b: Vec2| line(a, b, th, col);
+    match up {
+        // TEMPO: two chevrons racing right
+        UpgradeId::Tempo => {
+            for x in [-0.6, 0.15] {
+                l(p(x, -0.8), p(x + 0.6, 0.0));
+                l(p(x + 0.6, 0.0), p(x, 0.8));
+            }
+        }
+        // CHORD: three shots in a fan
+        UpgradeId::Chord => {
+            for a in [-0.45f32, 0.0, 0.45] {
+                let d = vec2(a.sin(), -a.cos());
+                l(c + d * r * 0.2, c + d * r);
+                disc(c + d * r, th * 1.1, 8, col2);
+            }
+        }
+        // GAIN: an arrow pointing up out of a bar
+        UpgradeId::Gain => {
+            l(p(0.0, 0.9), p(0.0, -0.9));
+            l(p(-0.6, -0.3), p(0.0, -0.9));
+            l(p(0.6, -0.3), p(0.0, -0.9));
+            line(p(-0.7, 0.9), p(0.7, 0.9), th, col2);
+        }
+        // PIERCE: an arrow through a ring
+        UpgradeId::Pierce => {
+            arc(c, r * 0.55, 0.0, TAU, th, col2);
+            l(p(-1.0, 0.0), p(1.0, 0.0));
+            l(p(0.55, -0.4), p(1.0, 0.0));
+            l(p(0.55, 0.4), p(1.0, 0.0));
+        }
+        // SUSTAIN: a cross
+        UpgradeId::Sustain => {
+            rquad(c, vec2(r * 0.9, r * 0.28), 0.0, col);
+            rquad(c, vec2(r * 0.28, r * 0.9), 0.0, col);
+        }
+        // GLIDE: three speed lines behind a dot
+        UpgradeId::Glide => {
+            disc(p(0.6, 0.0), r * 0.3, 10, col);
+            for (y, x0) in [(-0.55, -0.9), (0.0, -1.1), (0.55, -0.9)] {
+                line(p(x0, y), p(0.1, y), th, col2);
+            }
+        }
+        // PHASE: a broken circle (the dash)
+        UpgradeId::Phase => {
+            for k in 0..4 {
+                let a0 = time * 1.5 + k as f32 * TAU / 4.0;
+                arc(c, r * 0.85, a0, a0 + TAU / 4.0 - 0.5, th, col);
+            }
+            disc(c, r * 0.22, 10, col2);
+        }
+        // MAGNET: a horseshoe
+        UpgradeId::Magnet => {
+            arc(c + vec2(0.0, -r * 0.1), r * 0.7, PI, TAU, th * 1.4, col);
+            line(p(-0.7, -0.1), p(-0.7, 0.9), th * 1.4, col);
+            line(p(0.7, -0.1), p(0.7, 0.9), th * 1.4, col);
+            line(p(-0.95, 0.9), p(-0.45, 0.9), th * 1.4, col2);
+            line(p(0.45, 0.9), p(0.95, 0.9), th * 1.4, col2);
+        }
+        // ECHO: a dot with a moon circling it
+        UpgradeId::Echo => {
+            disc(c, r * 0.3, 10, col);
+            arc(c, r * 0.85, 0.0, TAU, th * 0.6, col2);
+            disc(c + dir(time * 3.0) * r * 0.85, r * 0.2, 8, col);
+        }
+        // ENCORE: a shield
+        UpgradeId::Encore => {
+            let pts = [p(-0.8, -0.8), p(0.8, -0.8), p(0.8, 0.1), p(0.0, 1.0), p(-0.8, 0.1)];
+            for k in 0..5 {
+                l(pts[k], pts[(k + 1) % 5]);
+            }
+            line(p(0.0, -0.45), p(0.0, 0.45), th, col2);
+        }
+        // RICOCHET: a shot bouncing off a wall
+        UpgradeId::Ricochet => {
+            line(p(-1.0, 0.95), p(1.0, 0.95), th, col2);
+            l(p(-0.9, -0.8), p(-0.1, 0.9));
+            l(p(-0.1, 0.9), p(0.8, -0.6));
+            l(p(0.8, -0.6), p(0.35, -0.5));
+            l(p(0.8, -0.6), p(0.75, -0.1));
+        }
+        // DOWNBEAT: a bar line with the heavy first beat
+        UpgradeId::Downbeat => {
+            line(p(-0.7, -0.9), p(-0.7, 0.9), th * 2.4, col);
+            for x in [-0.1, 0.4, 0.9] {
+                line(p(x, -0.5), p(x, 0.5), th * 0.8, col2);
+            }
+        }
+        // TRANSPOSE: a round bullet turning into a square note
+        UpgradeId::Transpose => {
+            arc(p(-0.55, 0.0), r * 0.38, 0.0, TAU, th, col2);
+            l(p(-0.05, 0.0), p(0.25, 0.0));
+            poly_lines(p(0.68, 0.0), 4, r * 0.48, PI * 0.25, th, col);
+        }
     }
 }
 

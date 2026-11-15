@@ -54,7 +54,9 @@ pub struct Args {
     live: bool,
     give: u32,
     wall: bool,
-    mood: Option<(u8, u8, u8)>,
+    mood: Option<(u8, u8, u8, u8)>,
+    mood_to: Option<(u8, u8, u8, u8)>,
+    purgatory: bool,
     mortal: bool,
     /// Debug: keep the drift (idle) scene up while the song plays, with no attacks.
     drift: bool,
@@ -92,11 +94,20 @@ fn parse_args() -> Args {
             "--secs" => a.secs = val().parse().unwrap_or(30.0),
             "--start" => a.start = val().parse().unwrap_or(0.0),
             "--seed" => a.seed = val().parse().unwrap_or(0),
-            // Debug: force the look, as "scene,weather,floor" (see `level::Mood`).
+            // Debug: force the look, as "scene,weather,floor,prop" (see `level::Mood`).
             "--mood" => {
                 let v: Vec<u8> = val().split(',').filter_map(|x| x.trim().parse().ok()).collect();
-                if v.len() == 3 {
-                    a.mood = Some((v[0], v[1], v[2]));
+                if v.len() == 4 {
+                    a.mood = Some((v[0], v[1], v[2], v[3]));
+                }
+            }
+            // Debug: hold the Heart in purgatory, to look at it.
+            "--purgatory" => a.purgatory = true,
+            // Debug: switch to this look after 3 s, to watch the sky transition.
+            "--mood-to" => {
+                let v: Vec<u8> = val().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if v.len() == 4 {
+                    a.mood_to = Some((v[0], v[1], v[2], v[3]));
                 }
             }
             "--ss" => a.ss = val().parse().ok(),
@@ -2778,8 +2789,15 @@ async fn run(args: Args) {
         }
 
         // ---- draw ----
-        if let Some((scene, weather, floor)) = app.args.mood {
-            app.world.mood = level::Mood { scene, weather, floor };
+        if let Some((scene, weather, floor, prop)) = app.args.mood {
+            app.world.mood = level::Mood { scene, weather, floor, prop };
+        }
+        if app.args.purgatory && app.screen == Screen::Play {
+            app.world.purgatory = true;
+            app.world.purg_until = app.world.t + 4.5;
+        }
+        if let Some((scene, weather, floor, prop)) = app.args.mood_to.filter(|_| app.wall > 3.0) {
+            app.world.mood = level::Mood { scene, weather, floor, prop };
         }
         app.rend.set_palette(app.world.palette);
         if lan_match && app.lan.as_ref().is_some_and(|l| l.in_match()) {

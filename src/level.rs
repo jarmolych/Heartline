@@ -1032,25 +1032,32 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
 // Mood: what a song looks like
 // ---------------------------------------------------------------------------------------------
 
-/// Backdrops: 0 sunset (striped sun), 1 night (moon), 2 ocean (sun on the horizon, waves),
-/// 3 vortex (concentric rings), 4 starfield (nebula).
-pub const N_SCENES: u8 = 5;
-/// Weather: 0 none, 1 rain of lines, 2 drifting dust, 3 aurora.
+/// Backdrops: 0 sunset (striped sun), 1 moonrise (full moon), 2 ocean dusk (sun in the sea),
+/// 3 wire globe, 4 nebula, 5 ringed planet, 6 total eclipse, 7 binary sunset, 8 aurora.
+pub const N_SCENES: u8 = 9;
+/// Weather: 0 none, 1 rain of lines (pulses with the hats), 2 drifting dust, 3 aurora.
 pub const N_WEATHER: u8 = 4;
 /// Floor: 0 full grid, 1 open grid (every other line), 2 marks at the intersections.
 pub const N_FLOORS: u8 = 3;
+/// Horizon props: 0 none, 1 palm trees, 2 pyramids, 3 city skyline, 4 meteors.
+pub const N_PROPS: u8 = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mood {
     pub scene: u8,
     pub weather: u8,
     pub floor: u8,
+    pub prop: u8,
 }
 
-/// Pick a song's look from things that can be measured about it: how busy it is (drum hits per
-/// second) and how bright (high band against low band) choose a family of backdrops, and the
-/// song's own hash picks within the family, so two similar songs still look different and the
-/// same song always looks the same.
+/// Pick a song's look from things that can be measured about it. How busy it is (drum hits per
+/// second), how bright (high band against low band) and its tempo choose a family of backdrops
+/// and props; the song's own hash picks within the family, so two similar songs still look
+/// different and the same song always looks the same.
+///
+/// Families: warm mid-tempo songs get the tropical set (palms, ocean dusk, binary sunset); dark
+/// dense ones get eclipses, the wire globe and skylines; sparse ones get wide night skies;
+/// everything else draws from the whole list.
 pub fn mood(an: &Analysis) -> Mood {
     let (mut lo, mut hi) = (0.0f32, 0.0f32);
     for f in an.feats.iter().step_by(4) {
@@ -1059,22 +1066,21 @@ pub fn mood(an: &Analysis) -> Mood {
     }
     let bright = hi / (lo + hi + 1e-6) > 0.5;
     let density = an.onsets.len() as f32 / an.duration.max(1.0);
-    let family: &[u8] = if density > 7.0 {
-        if bright { &[3, 0] } else { &[0, 1, 3] }
-    } else if density < 3.5 {
-        if bright { &[4, 2] } else { &[2, 1, 4] }
-    } else {
-        &[0, 1, 4, 2]
-    };
     let h = an.seed;
-    let weather = match (h >> 8) % 6 {
-        2 => 1,
-        3 => 2,
-        4 => 3,
-        5 if density < 3.5 => 2,
-        _ => 0,
+    let pick = |xs: &[u8], shift: u32| xs[((h >> shift) % xs.len() as u64) as usize];
+    let tropical = bright && (85.0..=128.0).contains(&an.bpm) && (3.0..=8.0).contains(&density);
+    let (scenes, props, weathers): (&[u8], &[u8], &[u8]) = if tropical {
+        (&[2, 7, 0, 2], &[1, 1, 1, 0], &[0, 0, 1, 2])
+    } else if density > 7.0 && !bright {
+        (&[6, 3, 5, 0, 4], &[3, 3, 0, 2, 4], &[1, 1, 0, 3])
+    } else if density > 7.0 {
+        (&[3, 0, 7, 6, 8], &[3, 0, 4, 1, 0], &[0, 1, 3, 0])
+    } else if density < 3.5 {
+        (&[1, 4, 8, 5, 2], &[4, 0, 2, 0, 1], &[2, 3, 0, 2])
+    } else {
+        (&[0, 1, 2, 4, 5, 6, 7, 8], &[0, 1, 2, 3, 4, 0], &[0, 0, 1, 2, 3])
     };
-    Mood { scene: family[(h % family.len() as u64) as usize], weather, floor: ((h >> 16) % N_FLOORS as u64) as u8 }
+    Mood { scene: pick(scenes, 0), weather: pick(weathers, 8), floor: ((h >> 16) % N_FLOORS as u64) as u8, prop: pick(props, 24) }
 }
 
 // ---------------------------------------------------------------------------------------------
