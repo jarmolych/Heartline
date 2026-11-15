@@ -623,9 +623,13 @@ pub fn bot_input(w: &World) -> Input {
             }
         }
         // The Heart itself.
-        let dq = q.length();
+        let dq = (q - w.heart.pos).length();
         if dq < HEART_R + 60.0 {
             c += 3.0 * near;
+        }
+        // ... and the place it has announced it is moving to.
+        if w.heart.relocating(w.t) && q.distance(w.heart.move_to) < HEART_R + 70.0 {
+            c += 4.0;
         }
         // Tiles: being on a tile at the moment it slams.
         if let Some((tc, tr)) = tile_of(q) {
@@ -653,14 +657,16 @@ pub fn bot_input(w: &World) -> Input {
         }
         for wv in &w.waves {
             let lt = w.t + tau;
-            if lt >= wv.t0 && (dq - wv.radius(lt)).abs() < 30.0 && !wv.in_gap(q.y.atan2(q.x)) {
+            let wq = q - wv.origin;
+            if lt >= wv.t0 && (wq.length() - wv.radius(lt)).abs() < 30.0 && !wv.in_gap(wq.y.atan2(wq.x)) {
                 c += 8.0;
             }
         }
         // Announced pulses: do not be inside the zone when the bullets get here.
-        let qang = q.y.atan2(q.x);
+        let hq = q - w.heart.pos;
+        let qang = hq.y.atan2(hq.x);
         for pp in &w.pulses {
-            let arrive = (pp.t - w.t).max(0.0) + (dq - HEART_R).max(0.0) / pp.speed.max(120.0);
+            let arrive = (pp.t - w.t).max(0.0) + (hq.length() - HEART_R).max(0.0) / pp.speed.max(120.0);
             if tau + 0.25 < arrive * 0.6 || pp.count == 0 {
                 continue;
             }

@@ -166,8 +166,19 @@ fn v3(c: Color) -> Vec3 {
 // ---------------------------------------------------------------------------------------------
 
 #[inline]
+thread_local! {
+    /// Added to every vertex: lets the Heart's layers be drawn around the origin and placed
+    /// wherever the Heart is (`set_origin`).
+    static ORIGIN: std::cell::Cell<Vec2> = const { std::cell::Cell::new(Vec2::ZERO) };
+}
+
+fn set_origin(o: Vec2) {
+    ORIGIN.with(|c| c.set(o));
+}
+
 fn vtx(p: Vec2, c: Color) -> Vertex {
-    Vertex::new(p.x, p.y, 0.0, 0.0, 0.0, c)
+    let o = ORIGIN.with(|c| c.get());
+    Vertex::new(p.x + o.x, p.y + o.y, 0.0, 0.0, 0.0, c)
 }
 
 #[inline]
@@ -2386,9 +2397,13 @@ impl Renderer {
         gl_use_material(&self.add_mat);
         self.draw_floor(world, e, armed_k);
         self.draw_rim(world, e);
+        // The Heart's layers are drawn around the origin and shifted to where it stands.
+        let hp = world.heart.pos * lv;
         if lv > 0.003 {
+            set_origin(hp);
             self.draw_crown(world, lv);
             self.draw_scope(world, lv);
+            set_origin(Vec2::ZERO);
         }
         gl_use_default_material();
         if lv > 0.003 && rally.is_none() {
@@ -2397,16 +2412,21 @@ impl Renderer {
         }
         gl_use_material(&self.add_mat);
         if !(self.menu && e > 0.5) {
+            set_origin(hp);
             self.draw_heart(world, e, progress);
+            set_origin(Vec2::ZERO);
         }
         gl_use_default_material();
         if let Some((r, me)) = rally {
             self.draw_rally_world(r, world, me, tscale);
         } else if lv > 0.003 {
+            self.draw_heart_move(world, lv);
+            set_origin(hp);
             self.draw_heart_rings(world, lv, progress);
             for p in &world.pulses {
                 self.draw_pulse(world, p, lv);
             }
+            set_origin(Vec2::ZERO);
         }
         if rally.is_none() {
             self.draw_pickups(world, tscale);
@@ -2881,6 +2901,7 @@ impl Renderer {
         }
         // Shockwaves: hot ring with a wall; the safe gaps are framed by cool posts
         for wv in &w.waves {
+            set_origin(wv.origin);
             let n = wv.gaps.max(1);
             let half = 0.36;
             if t < wv.t0 {
@@ -2950,6 +2971,7 @@ impl Renderer {
                 seg(p.pos, e, 2.0, alpha(pal.accent, 0.45 * k * lv), alpha(pal.accent, 0.0));
             }
         }
+        set_origin(Vec2::ZERO);
     }
 
     /// Announced Heart attack: an approach ring descending and closing onto the Heart (lands on
@@ -3197,6 +3219,30 @@ impl Renderer {
         }
     }
 
+    /// A relocation: the destination is ringed and a dashed path runs to it, from the moment it
+    /// is announced until the Heart arrives.
+    fn draw_heart_move(&self, w: &World, lv: f32) {
+        let h = &w.heart;
+        if !h.relocating(w.t) || h.move_to.distance(h.pos) < 2.0 {
+            return;
+        }
+        let pal = &self.pal;
+        let wait = ((h.move_t0 - w.t) / (h.move_t1 - h.move_t0).max(0.1)).clamp(0.0, 1.0);
+        let a = lv * (0.9 - 0.3 * wait);
+        let pulse = 0.8 + 0.2 * (self.time * 10.0).sin();
+        disc2(h.move_to, HEART_R + 18.0, 24, alpha(pal.danger, 0.14 * a), alpha(pal.danger, 0.0));
+        arc(h.move_to, HEART_R + PLAYER_R, 0.0, TAU, 3.0, alpha(pal.danger, a * pulse));
+        arc(h.move_to, HEART_R * 0.45, self.time * 2.0, self.time * 2.0 + PI * 1.3, 2.0, alpha(WHITE, 0.7 * a));
+        let d = h.move_to - h.pos;
+        let len = d.length();
+        let n = d / len.max(1.0);
+        let mut s = HEART_R + 10.0 + (self.time * 180.0) % 36.0;
+        while s < len - HEART_R - 6.0 {
+            line(h.pos + n * s, h.pos + n * (s + 16.0).min(len - HEART_R), 2.5, alpha(pal.danger, 0.75 * a));
+            s += 36.0;
+        }
+    }
+
     /// The Heart's floor markings (z = 0): hitbox ring, shadow, tether, song clock, integrity, charge.
     fn draw_heart_rings(&self, w: &World, lv: f32, progress: f32) {
         let pal = &self.pal;
@@ -3237,14 +3283,14 @@ impl Renderer {
                 if nd.hp <= 0.0 {
                     continue;
                 }
-                let p = h.node_pos(k);
+                let p = h.node_pos(k) - h.pos;
                 let live = h.form == HeartForm::Shell || lit == Some(k);
                 let col = mixc(if live { pal.accent } else { alpha(WHITE, 0.45) }, WHITE, nd.flash);
                 // tether to the Heart
                 let d = p.normalize_or_zero();
                 seg(d * (HEART_R + 14.0), p - d * NODE_R, if live { 2.0 } else { 1.0 }, alpha(col, 0.1 * lv), alpha(col, if live { 0.55 } else { 0.25 } * lv));
                 if h.form == HeartForm::Split {
-                    let q = h.node_pos((k + 1) % n);
+                    let q = h.node_pos((k + 1) % n) - h.pos;
                     if h.nodes[(k + 1) % n].hp > 0.0 {
                         line(p, q, 1.0, alpha(WHITE, 0.18 * lv));
                     }
