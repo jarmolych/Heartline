@@ -121,6 +121,7 @@ const RUN_ESCALATION: f32 = 0.07;
 const MERCY_DROP: f32 = 0.55;
 const MERCY_RECOVER: f32 = 0.05;
 /// Mechanics switch on as pressure passes these thresholds (so a run introduces them in order).
+/// Harder tiers unlock them sooner: see `World::gate`.
 const P_SPAWN: f32 = 0.44;
 const P_TILES: f32 = 0.55;
 const P_WAVE: f32 = 0.60;
@@ -564,8 +565,16 @@ impl World {
     /// Current difficulty multiplier applied to the planned level (about 0.2 .. 1.3).
     pub fn pressure(&self) -> f32 {
         let (r0, secs) = RAMP[(self.song_idx as usize).min(RAMP.len() - 1)];
-        let k = smooth01(self.active_t / secs);
+        // Harder tiers start nearer full pressure and get there sooner.
+        let h = hardness(self.diff);
+        let r0 = (r0 + 0.45 * h).min(0.95);
+        let k = smooth01(self.active_t / (secs * (1.0 - 0.6 * h)));
         (r0 + (1.0 - r0) * k) * (1.0 + RUN_ESCALATION * self.song_idx as f32) * self.mercy
+    }
+
+    /// The pressure at which a mechanic with base threshold `p` unlocks on this difficulty.
+    fn gate(&self, p: f32) -> f32 {
+        p * (1.0 - 0.5 * hardness(self.diff))
     }
 
     /// Reset per-song state; player upgrades, HP and score carry over.
@@ -686,16 +695,16 @@ impl World {
                 }
             }
             Ev::Tick { speed } => {
-                if p >= P_TICK {
+                if p >= self.gate(P_TICK) {
                     self.emit_tick(speed, late);
                 }
             }
             Ev::Spawn { kind, x, y } => {
                 let cap = (2.0 + 5.0 * p * self.diff).round() as usize;
-                if p >= P_SPAWN && self.enemies.len() + self.portals.len() < cap.min(MAX_ENEMIES) {
+                if p >= self.gate(P_SPAWN) && self.enemies.len() + self.portals.len() < cap.min(MAX_ENEMIES) {
                     // Tougher kinds only appear once the run has warmed up.
                     let kind = match kind {
-                        EnemyKind::Elite if p < P_ELITE => EnemyKind::Orbiter,
+                        EnemyKind::Elite if p < self.gate(P_ELITE) => EnemyKind::Orbiter,
                         EnemyKind::Splitter if p < 0.8 => EnemyKind::Chaser,
                         EnemyKind::Darter if p < 0.7 => EnemyKind::Chaser,
                         EnemyKind::Orbiter if p < 0.6 => EnemyKind::Chaser,
@@ -716,11 +725,11 @@ impl World {
                 }
             }
             Ev::Laser { horizontal, from, to, dur } => {
-                if p >= P_LASER && self.lasers.len() < 2 {
+                if p >= self.gate(P_LASER) && self.lasers.len() < 2 {
                     self.lasers.push(Laser { horizontal, from, to, t0: e.t, dur, lead: e.lead.max(0.3) });
                 }
             }
-            Ev::Tiles { pattern } if p < P_TILES => {
+            Ev::Tiles { pattern } if p < self.gate(P_TILES) => {
                 let _ = pattern;
             }
             Ev::Tiles { pattern } => {
@@ -739,7 +748,7 @@ impl World {
                 }
             }
             Ev::Shockwave { gap, gaps } => {
-                if p >= P_WAVE {
+                if p >= self.gate(P_WAVE) {
                     self.waves.push(Wave { t0: e.t, lead: e.lead.max(0.3), gap, gaps, speed: 430.0 });
                 }
             }
@@ -1008,12 +1017,14 @@ impl World {
             return;
         }
         p.hp -= 1;
-        p.invuln = HIT_INVULN;
+        // The breather after a hit shrinks with the tier; the hardest has no mercy window.
+        let h = hardness(self.diff);
+        p.invuln = HIT_INVULN * (1.0 - 0.4 * h);
         let pos = p.pos;
         self.stats.hits += 1;
         self.stats.by_src[src.min(5)] += 1;
         self.snd(Sfx::Hurt, 1.0, pos.x);
-        self.mercy = MERCY_DROP;
+        self.mercy = MERCY_DROP + (1.0 - MERCY_DROP) * h;
         self.combo *= 0.5;
         self.shake = self.shake.max(0.7);
         self.flash = self.flash.max(0.45);
