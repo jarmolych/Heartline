@@ -12,7 +12,7 @@
 //!    2, 3, 4 (and the off-beats) is the same every bar, and the same again when that kind of
 //!    section returns, so patterns can be learned.
 
-use crate::analysis::{Analysis, Band, Onset, SectionKind};
+use crate::analysis::{Analysis, Band, LayerKind, Onset, SectionKind, N_LAYERS};
 use crate::rng::Rng;
 
 pub const COLS: usize = 15;
@@ -106,6 +106,8 @@ pub enum EnemyKind {
     Splitter,
     Mini,
     Elite,
+    /// A light drifting enemy that appears on the song's chimes.
+    Wisp,
 }
 
 impl EnemyKind {
@@ -117,6 +119,7 @@ impl EnemyKind {
             EnemyKind::Splitter => 2.2,
             EnemyKind::Mini => 0.4,
             EnemyKind::Elite => 0.0,
+            EnemyKind::Wisp => 0.3,
         }
     }
 }
@@ -187,6 +190,10 @@ pub enum Ev {
     Section { idx: u16, kind: SectionKind, intensity: f32, palette: u8 },
     Orbs,
     Heal { x: f32, y: f32 },
+    /// Which musical layers drive attacks from now on (bit = `LayerKind as u8`).
+    Layers { armed: u8 },
+    /// A chime was heard (cosmetic; wisps arrive as `Spawn`). `pitch` is 0..1.
+    Chime { pitch: f32, strength: f32 },
     End,
 }
 
@@ -507,6 +514,79 @@ impl Bucket {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The director: musical layers fill a credit budget
+// ---------------------------------------------------------------------------------------------
+// Every musical layer is bound to one attack family for as long as it plays:
+//   Beat -> Heart pulses, Bass -> tile strikes, Snare -> enemies, Hats -> dart streams,
+//   Lead -> lasers, Chimes -> wisps.
+// Each section has a credit budget (from its energy, the difficulty and how far into the song it
+// is). The budget is spent by arming layers, never by one-off attacks, and each PHASE of the
+// song arms them in its own order, so a returning chorus brings the same combination back.
+
+/// What arming each layer's attack family costs (index = `LayerKind`).
+const FAMILY_COST: [f32; N_LAYERS] = [3.0, 2.0, 2.0, 1.5, 2.0, 1.0];
+/// Credits of a section: base + energy * (0..1 song-relative intensity).
+const CREDITS_BASE: f32 = 4.5;
+const CREDITS_ENERGY: f32 = 6.5;
+/// A layer must play through at least this much of a section to be armed in it.
+const LAYER_MIN_COVER: f32 = 0.35;
+/// Credits left over (or overdrawn) scale how dense the armed families are, within these limits.
+const DENSITY_RANGE: (f32, f32) = (0.75, 1.6);
+
+struct SectionPlan {
+    armed: [bool; N_LAYERS],
+    /// Density multiplier for the armed families.
+    dens: f32,
+}
+
+impl SectionPlan {
+    fn mask(&self) -> u8 {
+        self.armed.iter().enumerate().map(|(k, &a)| (a as u8) << k).sum()
+    }
+}
+
+/// Decide which layers are armed in every section. `has[k]` says whether the song has layer k at
+/// all; a family whose layer never plays is bound to the bar grid instead and is always on offer.
+fn direct(an: &Analysis, norm: &Norm, seed: u64, diff: f32, has: &[bool; N_LAYERS]) -> Vec<SectionPlan> {
+    an.sections
+        .iter()
+        .map(|s| {
+            let calm = s.kind == SectionKind::Calm;
+            let ease = 0.8 + 0.2 * (s.t0 / (0.25 * an.duration.max(1.0))).min(1.0);
+            let credits = (CREDITS_BASE + CREDITS_ENERGY * norm.at(s.intensity)) * if calm { 0.6 } else { 1.0 } * (0.8 + 0.2 * diff).min(1.5) * ease;
+            // The order layers are offered in belongs to the phase.
+            let mut rng = Rng::new(seed ^ 0xD1EC_7012 ^ (s.phase as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut order: [usize; N_LAYERS] = [0, 1, 2, 3, 4, 5];
+            for i in (1..N_LAYERS).rev() {
+                order.swap(i, rng.below(i + 1));
+            }
+            if rng.chance(0.7) {
+                let at = order.iter().position(|&k| k == LayerKind::Beat as usize).unwrap_or(0);
+                order[..=at].rotate_right(1);
+            }
+            let mut armed = [false; N_LAYERS];
+            let mut spent = 0.0f32;
+            for &k in &order {
+                let beat = k == LayerKind::Beat as usize;
+                // Tile strikes and lasers never run in calm sections.
+                if calm && (k == LayerKind::Bass as usize || k == LayerKind::Lead as usize) {
+                    continue;
+                }
+                let playing = beat || !has[k] || an.layers.get(k).is_some_and(|l| l.coverage(s.t0, s.t1) >= LAYER_MIN_COVER);
+                if !playing {
+                    continue;
+                }
+                if spent + FAMILY_COST[k] <= credits || spent == 0.0 {
+                    armed[k] = true;
+                    spent += FAMILY_COST[k];
+                }
+            }
+            SectionPlan { armed, dens: (credits / spent.max(1.0)).clamp(DENSITY_RANGE.0, DENSITY_RANGE.1) }
+        })
+        .collect()
+}
+
 fn edge_point(rng: &mut Rng) -> (f32, f32) {
     let inset = 34.0;
     match rng.below(4) {
@@ -563,6 +643,16 @@ fn laser_event(rng: &mut Rng, t: f32, dur: f32, lead: f32) -> LevelEvent {
     LevelEvent { t, lead, ev: Ev::Laser { horizontal, from, to, dur } }
 }
 
+/// Fewest seconds between two wisps (at difficulty 1 and density 1).
+const WISP_INTERVAL: f32 = 1.4;
+
+/// Where a chime of a given pitch (0..1) appears: low notes on the left of an arc over the
+/// Heart, high notes on the right.
+pub fn chime_point(pitch: f32) -> (f32, f32) {
+    let a = std::f32::consts::PI * (1.1 - 1.2 * pitch.clamp(0.0, 1.0));
+    (a.cos() * HALF_W * 0.8, -a.sin().abs() * HALF_H * 0.78 + HALF_H * 0.1)
+}
+
 fn shard_point(ang: f32, wobble: f32) -> (f32, f32) {
     let r = 250.0 + 110.0 * wobble.sin();
     (ang.cos() * r * 1.55, ang.sin() * r * 0.9)
@@ -617,18 +707,33 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         make_deck(&mut rng, SectionKind::Drop, diff),
     ];
     let mut palette = rng.below(N_PALETTES as usize) as u8;
+    // A phase keeps its palette: when a part of the song returns, so does its look.
+    let mut phase_palette: [Option<u8>; 16] = [None; 16];
+    let mut has = [false; N_LAYERS];
+    for (k, h) in has.iter_mut().enumerate() {
+        *h = an.layers.get(k).is_some_and(|l| !l.spans.is_empty());
+    }
+    let plan = direct(an, &norm, seed, diff, &has);
     let mut last_orbs = t_start;
     let mut last_heal = t_start;
     let wave_lead = (2.0 * beat_len).clamp(1.1, 1.6);
     for (idx, s) in an.sections.iter().enumerate() {
-        if idx > 0 {
-            palette = (palette + 1 + rng.below(N_PALETTES as usize - 1) as u8) % N_PALETTES;
+        let slot = (s.phase as usize).min(phase_palette.len() - 1);
+        match phase_palette[slot] {
+            Some(p) => palette = p,
+            None => {
+                if idx > 0 {
+                    palette = (palette + 1 + rng.below(N_PALETTES as usize - 1) as u8) % N_PALETTES;
+                }
+                phase_palette[slot] = Some(palette);
+            }
         }
         ev.push(LevelEvent {
             t: s.t0,
             lead: 0.0,
             ev: Ev::Section { idx: idx as u16, kind: s.kind, intensity: s.intensity, palette },
         });
+        ev.push(LevelEvent { t: s.t0, lead: 0.0, ev: Ev::Layers { armed: plan[idx].mask() } });
         if idx == 0 || s.t0 < grace {
             continue;
         }
@@ -656,6 +761,12 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
     let kind_at = |t: f32| -> SectionKind { an.sections.get(section_index(t)).map(|s| s.kind).unwrap_or(SectionKind::Normal) };
     let level_i = |t: f32| -> f32 { norm.at(an.intensity_at(t)) };
     let calm_mul = |k: SectionKind| -> f32 { if k == SectionKind::Calm { 0.6 } else { 1.0 } };
+    // A family attacks only where the director armed its layer and the layer is playing.
+    let armed = |t: f32, k: LayerKind| -> bool {
+        let ki = k as usize;
+        plan.get(section_index(t)).is_some_and(|p| p.armed[ki]) && (k == LayerKind::Beat || !has[ki] || an.layers[ki].active(t))
+    };
+    let dens = |t: f32| -> f32 { plan.get(section_index(t)).map_or(1.0, |p| p.dens) };
 
     // ---- Heart pulses: kicks first, the beat grid fills any hole the drums leave ----
     // Candidates in time order: (time, strength, is_kick).
@@ -679,7 +790,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
     let mut uses = [[0u32; 8]; 4];
     let mut soft_n = [0u32; 4];
     for &(t, strength, is_kick) in &cand {
-        if t < grace || an.in_silence(t) {
+        if t < grace || an.in_silence(t) || !armed(t, LayerKind::Beat) {
             continue;
         }
         let kind = kind_at(t);
@@ -695,7 +806,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
             continue;
         }
         let i = level_i(t);
-        bullets.fill(t, BULLETS_PER_SEC * diff * energy(i) * calm_mul(kind));
+        bullets.fill(t, BULLETS_PER_SEC * diff * energy(i) * calm_mul(kind) * dens(t));
         let deck = &kind_decks[ki];
         // Which half-beat of the bar is this? That picks the move.
         let bp = beat_pos(&an.beats, t) - an.downbeat as f32;
@@ -729,11 +840,11 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
     let mut last_spawn = -10.0f32;
     let spawn_lead = beat_len.clamp(0.5, 0.9);
     for &(t, strength, is_snare) in &ecand {
-        if t < grace + 2.0 || an.in_silence(t) || t > an.duration - 4.0 {
+        if t < grace + 2.0 || an.in_silence(t) || t > an.duration - 4.0 || !armed(t, LayerKind::Snare) {
             continue;
         }
         let kind = kind_at(t);
-        foes.fill(t, ENEMY_POINTS_PER_SEC * diff * energy(level_i(t)) * calm_mul(kind));
+        foes.fill(t, ENEMY_POINTS_PER_SEC * diff * energy(level_i(t)) * calm_mul(kind) * dens(t));
         let since = t - last_spawn;
         if is_snare {
             if since < 0.9 || strength < 0.25 {
@@ -767,7 +878,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         }
         let kind = kind_at(o.t);
         let hot = matches!(kind, SectionKind::Intense | SectionKind::Drop);
-        if hot && diff >= 0.9 && stream_bar(o.t, if kind == SectionKind::Drop || diff > 1.2 { 4 } else { 8 }) {
+        if hot && diff >= 0.9 && armed(o.t, LayerKind::Hats) && stream_bar(o.t, if kind == SectionKind::Drop || diff > 1.2 { 4 } else { 8 }) {
             if o.t - last_tick >= 0.24 / diff.sqrt() {
                 last_tick = o.t;
                 ev.push(LevelEvent { t: o.t, lead: 0.0, ev: Ev::Tick { speed: TICK_SPEED } });
@@ -787,7 +898,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
     let mut tile_n = [0u32; 4];
     let mut steps: Vec<(u32, TilePattern)> = Vec::with_capacity(8);
     for (j, &bt) in bars.iter().enumerate() {
-        if bt < next_tiles || an.in_silence(bt) || bt > an.duration - 3.0 {
+        if bt < next_tiles || an.in_silence(bt) || bt > an.duration - 3.0 || !armed(bt, LayerKind::Bass) {
             continue;
         }
         let kind = kind_at(bt);
@@ -814,7 +925,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
             ev.push(LevelEvent { t, lead: tile_lead, ev: Ev::Tiles { pattern: pat } });
         }
         busy.push((bt - tile_lead - 0.3, last_t + 0.4));
-        next_tiles = last_t + TILE_INTERVAL[ki] / diff;
+        next_tiles = last_t + TILE_INTERVAL[ki] / (diff * dens(bt));
     }
 
     // ---- lasers: sustained phrases, snapped to the beat, never while tiles are winding up ----
@@ -842,7 +953,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
     let phrase_soon = |t: f32, within: f32| -> bool { an.phrases.iter().any(|p| p.0 > t && p.0 - t < within) };
     for &(a, b) in &lcand {
         let t = nearest_beat(a);
-        if t < next_laser || an.in_silence(t) || t > an.duration - 4.0 {
+        if t < next_laser || an.in_silence(t) || t > an.duration - 4.0 || !armed(t, LayerKind::Lead) {
             continue;
         }
         let kind = kind_at(t);
@@ -860,10 +971,28 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         if diff <= 1.2 && busy.iter().any(|&(x, y)| t - laser_lead < y && t + dur > x) {
             continue;
         }
-        next_laser = t + dur + LASER_INTERVAL[ki] / diff;
+        next_laser = t + dur + LASER_INTERVAL[ki] / (diff * dens(t));
         ev.push(laser_event(&mut rng, t, dur, laser_lead));
     }
     let _ = nsec;
+
+    // ---- chimes: a sparkle for every one, and a wisp where the director armed them ----
+    let mut last_wisp = -10.0f32;
+    for c in &an.chimes {
+        if an.in_silence(c.t) {
+            continue;
+        }
+        ev.push(LevelEvent { t: c.t, lead: 0.0, ev: Ev::Chime { pitch: c.pitch, strength: c.strength } });
+        if c.t < grace + 2.0 || c.t > an.duration - 4.0 || !armed(c.t, LayerKind::Chimes) {
+            continue;
+        }
+        if c.t - last_wisp < WISP_INTERVAL / (diff.sqrt() * dens(c.t)) {
+            continue;
+        }
+        last_wisp = c.t;
+        let (x, y) = chime_point(c.pitch);
+        ev.push(LevelEvent { t: c.t, lead: 0.45, ev: Ev::Spawn { kind: EnemyKind::Wisp, x, y } });
+    }
 
     ev.push(LevelEvent { t: an.duration, lead: 0.0, ev: Ev::End });
     ev.sort_by(|a, b| a.at().partial_cmp(&b.at()).unwrap_or(std::cmp::Ordering::Equal));

@@ -4,7 +4,7 @@
 use macroquad::math::{vec2, Vec2};
 use std::f32::consts::TAU;
 
-use crate::analysis::{Feat, SectionKind};
+use crate::analysis::{Feat, SectionKind, N_LAYERS};
 use crate::engine::Sfx;
 use crate::level::*;
 use crate::rng::Rng;
@@ -480,6 +480,13 @@ pub struct World {
     /// Shot times of the current song per TEMPO level (`level::gun_track`). Empty when the song
     /// is not known ahead of time (live audio, drift): the gun then locks to a beat subdivision.
     pub gun: Vec<Vec<f32>>,
+    /// Musical layers currently driving attacks (bit = `LayerKind as u8`), for the HUD.
+    pub armed: u8,
+    /// 0..1 glow per layer: rises while the layer is armed.
+    pub layer_glow: [f32; N_LAYERS],
+    /// Decaying 0..1 envelope of the last chime, and its pitch (0..1).
+    pub chime: f32,
+    pub chime_pitch: f32,
     /// TEMPO level `Player::fire_phase` was counted at (a level change must not fire a shot).
     gun_lv: usize,
 }
@@ -558,6 +565,10 @@ impl World {
             last_hit_age: 0.0,
             mercy: 1.0,
             gun: Vec::new(),
+            armed: 0,
+            layer_glow: [0.0; N_LAYERS],
+            chime: 0.0,
+            chime_pitch: 0.5,
             gun_lv: 0,
         }
     }
@@ -605,6 +616,7 @@ impl World {
         self.section_banner = 0.0;
         self.player.fire_phase = 0;
         self.gun.clear();
+        self.armed = 0;
         if self.player.up(UpgradeId::Encore) > 0 {
             self.player.shield = true;
         }
@@ -704,6 +716,7 @@ impl World {
                 if p >= self.gate(P_SPAWN) && self.enemies.len() + self.portals.len() < cap.min(MAX_ENEMIES) {
                     // Tougher kinds only appear once the run has warmed up.
                     let kind = match kind {
+                        EnemyKind::Wisp => EnemyKind::Wisp,
                         EnemyKind::Elite if p < self.gate(P_ELITE) => EnemyKind::Orbiter,
                         EnemyKind::Splitter if p < 0.8 => EnemyKind::Chaser,
                         EnemyKind::Darter if p < 0.7 => EnemyKind::Chaser,
@@ -770,6 +783,13 @@ impl World {
                 if kind == SectionKind::Drop {
                     self.flash = self.flash.max(0.35);
                 }
+            }
+            Ev::Layers { armed } => self.armed = armed,
+            Ev::Chime { pitch, strength } => {
+                self.chime = self.chime.max(0.5 + 0.5 * strength.clamp(0.0, 1.0));
+                self.chime_pitch = pitch;
+                let (x, y) = chime_point(pitch);
+                self.burst(vec2(x, y), 3, 120.0, C_ACCENT, 3.0);
             }
             Ev::Orbs => self.spawn_orbs(14.0),
             Ev::Heal { x, y } => {
@@ -1064,6 +1084,7 @@ impl World {
             EnemyKind::Orbiter => (5.0, 17.0),
             EnemyKind::Splitter => (5.0, 22.0),
             EnemyKind::Mini => (1.0, 9.0),
+            EnemyKind::Wisp => (1.0, 11.0),
             EnemyKind::Elite => (22.0 + 8.0 * self.diff + 6.0 * self.song_idx as f32, 34.0),
         };
         let mut vel = Vec2::ZERO;
@@ -1074,6 +1095,7 @@ impl World {
                 vel = d * 640.0;
             }
             EnemyKind::Orbiter => state = pos.y.atan2(pos.x / 1.1),
+            EnemyKind::Wisp => state = self.rng.angle(),
             _ => {}
         }
         self.enemies.push(Enemy { kind, pos, vel, hp, max_hp: hp, r, rot: 0.0, age: 0.0, flash: 0.0, state });
@@ -1086,6 +1108,7 @@ impl World {
             EnemyKind::Orbiter => (120.0, 3, C_PRIMARY),
             EnemyKind::Splitter => (150.0, 3, C_SECONDARY),
             EnemyKind::Mini => (20.0, 1, C_SECONDARY),
+            EnemyKind::Wisp => (30.0, 2, C_ACCENT),
             EnemyKind::Elite => (600.0, 9, C_DANGER),
         };
         self.add_score(score);
@@ -1123,6 +1146,11 @@ impl World {
             self.active_t += dt;
         }
         self.mercy = (self.mercy + dt * MERCY_RECOVER).min(1.0);
+        self.chime = (self.chime - dt * 3.0).max(0.0);
+        for (k, g) in self.layer_glow.iter_mut().enumerate() {
+            let want = if self.armed >> k & 1 == 1 { 1.0 } else { 0.0 };
+            *g += (want - *g) * (dt * 4.0).min(1.0);
+        }
         self.threat = self.pressure().min(1.0);
 
         // ---- decays ----
@@ -1500,6 +1528,16 @@ impl World {
                         en.hp = -1.0; // left the arena
                     }
                 }
+                EnemyKind::Wisp => {
+                    // Drifts at the player on a weaving path and fades out if it is ignored.
+                    let side = vec2(-to_p.y, to_p.x) / dist;
+                    let v = to_p / dist * 85.0 + side * (en.age * 3.0 + en.state).sin() * 120.0;
+                    en.pos += v * dt * slow;
+                    en.rot += dt * 2.0;
+                    if en.age > 10.0 {
+                        en.hp = -1.0;
+                    }
+                }
                 EnemyKind::Orbiter => {
                     en.state += dt * 0.55 * slow;
                     let target = vec2(en.state.cos() * 363.0, en.state.sin() * 300.0);
@@ -1509,7 +1547,7 @@ impl World {
             }
             if active && dist < en.r + PLAYER_HIT_R + 4.0 {
                 touched = true;
-                if matches!(en.kind, EnemyKind::Mini | EnemyKind::Darter) {
+                if matches!(en.kind, EnemyKind::Mini | EnemyKind::Darter | EnemyKind::Wisp) {
                     en.hp = -1.0;
                 }
             }

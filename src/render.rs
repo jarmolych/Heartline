@@ -834,7 +834,7 @@ fn build_kinds() -> Vec<Vec<[Vec3; 2]>> {
 fn kind_index(k: EnemyKind) -> usize {
     match k {
         EnemyKind::Chaser | EnemyKind::Mini => 0,
-        EnemyKind::Darter => 1,
+        EnemyKind::Darter | EnemyKind::Wisp => 1,
         EnemyKind::Orbiter => 2,
         EnemyKind::Splitter => 3,
         EnemyKind::Elite => 4,
@@ -2604,6 +2604,7 @@ impl Renderer {
             let col = match e.kind {
                 EnemyKind::Chaser | EnemyKind::Mini | EnemyKind::Splitter => pal.secondary,
                 EnemyKind::Darter => pal.accent,
+                EnemyKind::Wisp => mixc(pal.accent, WHITE, 0.5),
                 EnemyKind::Orbiter => pal.primary,
                 EnemyKind::Elite => pal.danger,
             };
@@ -2616,6 +2617,7 @@ impl Renderer {
             let m = match e.kind {
                 EnemyKind::Chaser | EnemyKind::Mini => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 3.0),
                 EnemyKind::Darter => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 5.0),
+                EnemyKind::Wisp => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_y(e.age * 4.0),
                 EnemyKind::Orbiter => Mat3::from_rotation_z(e.age * 1.2) * Mat3::from_rotation_x(0.6) * Mat3::from_rotation_y(e.age * 0.9),
                 EnemyKind::Splitter => Mat3::from_rotation_z(e.age * 0.6) * Mat3::from_rotation_x(0.35),
                 EnemyKind::Elite => Mat3::from_rotation_z(e.age * 0.5) * Mat3::from_rotation_x(e.age * 0.7),
@@ -3103,6 +3105,21 @@ impl Renderer {
             vtext(label, sw - m, m + 26.0 * u, 26.0 * u, pal.secondary, 1);
             if info.bpm > 1.0 {
                 text_shadow(&format!("{:.0} BPM", info.bpm), sw - m, m + 52.0 * u, 20.0 * u, alpha(WHITE, 0.6), 1);
+            }
+            // Musical layers driving attacks right now: lit = armed.
+            if w.armed != 0 {
+                const NAMES: [&str; 6] = ["BEAT", "BASS", "SNARE", "HATS", "LEAD", "CHIME"];
+                let mut x = sw - m;
+                for k in (0..NAMES.len()).rev() {
+                    let g = w.layer_glow[k];
+                    let col = mixc(alpha(WHITE, 0.22), pal.accent, g);
+                    text_shadow(NAMES[k], x, m + 78.0 * u, 16.0 * u, col, 1);
+                    let tw = text_w(NAMES[k], 16.0 * u);
+                    if g > 0.05 {
+                        line(vec2(x - tw, m + 84.0 * u), vec2(x, m + 84.0 * u), 2.0 * u, alpha(pal.accent, g));
+                    }
+                    x -= tw + 14.0 * u;
+                }
             }
             if w.section_banner > 0.0 && idle < 0.5 {
                 let k = (w.section_banner / 2.4).clamp(0.0, 1.0);
