@@ -314,6 +314,8 @@ fn analyze_report(path: &Path, args: &Args) {
         println!("layer     {:<7} {}", format!("{:?}", l.kind), spans.join(" "));
     }
     println!("chimes    {}  ({:.2}/s)", an.chimes.len(), an.chimes.len() as f32 / an.duration.max(1.0));
+    let candy: Vec<String> = an.candy.iter().map(|c| format!("{:.0}s {:?}", c.t, c.kind)).collect();
+    println!("candy     {}  {}", an.candy.len(), candy.join(", "));
     let first_beats: Vec<String> = an.beats.iter().take(10).map(|b| format!("{b:.3}")).collect();
     println!("beats[..10] {}", first_beats.join(" "));
     let lows: Vec<String> = an.onsets.iter().filter(|o| o.band == Band::Low).take(12).map(|o| format!("{:.3}", o.t)).collect();
