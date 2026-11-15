@@ -3,7 +3,7 @@
 //! the road (jump it), hats string gems along a lane, chimes drop stars. Everything arrives at
 //! the player's line exactly on its sound.
 
-use crate::analysis::{Analysis, Band};
+use crate::analysis::{Analysis, Band, SectionKind};
 use crate::rng::Rng;
 
 /// Seconds a note is visible before it reaches the player.
@@ -13,6 +13,8 @@ pub const AIR: f32 = 0.46;
 /// A jump started within this many seconds of the ideal moment is "perfect".
 const PERFECT: f32 = 0.085;
 const START_HP: i32 = 5;
+/// Leaving a wall's lane this late before it arrives is a close call (bonus).
+const CLOSE_CALL: f32 = 0.2;
 const INVULN: f32 = 0.9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +78,13 @@ pub struct Runner {
     pub dead: bool,
     pub done: bool,
     pub fx: Vec<RunFx>,
+    /// Starts of the song's sections and whether each is hot (a surge or a drop): there the
+    /// road runs in overdrive and everything scores double.
+    pub sections: Vec<(f32, bool)>,
+    pub bars_total: u32,
+    pub close_calls: u32,
+    /// Song time of the last lane change, and the lane that was left.
+    last_change: (f32, i8),
     /// Last judgement shown over the craft, and how long it has left.
     pub label: &'static str,
     pub label_t: f32,
@@ -190,6 +199,10 @@ impl Runner {
             dead: false,
             done: false,
             fx: Vec::new(),
+            sections: an.sections.iter().map(|s| (s.t0, matches!(s.kind, SectionKind::Intense | SectionKind::Drop))).collect(),
+            bars_total: 0,
+            close_calls: 0,
+            last_change: (-10.0, 0),
             label: "",
             label_t: 0.0,
             cursor: 0,
@@ -208,8 +221,29 @@ impl Runner {
         self.jump_t0.is_some_and(|t0| t >= t0 + 0.04 && t <= t0 + AIR - 0.04)
     }
 
+    /// True while the song is in a surge or a drop.
+    pub fn hot(&self) -> bool {
+        let i = self.sections.partition_point(|s| s.0 <= self.t);
+        i > 0 && self.sections[i - 1].1
+    }
+
     fn mult(&self) -> u64 {
-        1 + (self.combo / 20).min(7) as u64
+        (1 + (self.combo / 20).min(7) as u64) * if self.hot() { 2 } else { 1 }
+    }
+
+    /// S to D, from how clean the run was.
+    pub fn rank(&self) -> &'static str {
+        if self.dead {
+            "D"
+        } else if self.hits == 0 && self.perfects * 10 >= self.bars_total.max(1) * 6 {
+            "S"
+        } else if self.hits <= 1 {
+            "A"
+        } else if self.hits <= 3 {
+            "B"
+        } else {
+            "C"
+        }
     }
 
     fn say(&mut self, s: &'static str) {
@@ -249,6 +283,7 @@ impl Runner {
         if steer != 0 {
             let to = (self.lane as i32 + steer).clamp(-1, 1) as i8;
             if to != self.lane {
+                self.last_change = (t, self.lane);
                 self.lane = to;
                 self.fx.push(RunFx::Lane);
             }
@@ -278,9 +313,17 @@ impl Runner {
                         self.cleared += 1;
                         self.combo += 1;
                         self.score += 20 * self.mult();
+                        // Close call: the craft was in this wall's lane a moment ago.
+                        if self.last_change.1 == n.lane && n.t - self.last_change.0 < CLOSE_CALL {
+                            self.close_calls += 1;
+                            self.score += 80 * self.mult();
+                            self.glow = self.glow.max(0.6);
+                            self.say("CLOSE");
+                        }
                     }
                 }
                 NoteKind::Bar => {
+                    self.bars_total += 1;
                     if self.airborne_at(n.t) {
                         self.notes[i].state = 1;
                         self.cleared += 1;

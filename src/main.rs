@@ -3694,6 +3694,10 @@ async fn run(args: Args) {
                     draw_rectangle(bx, m + 22.0 * u, bw, 3.0 * u, Color::new(1.0, 1.0, 1.0, 0.2));
                     draw_rectangle(bx, m + 22.0 * u, bw * progress.clamp(0.0, 1.0), 3.0 * u, pal.accent);
                     render::vtext("HIGHWAY", sw - m, m + 26.0 * u, 26.0 * u, pal.secondary, 1);
+                    if r.hot() && !r.done {
+                        let pulse = 0.7 + 0.3 * (app.rend.time * 8.0).sin();
+                        render::vtext("OVERDRIVE  X2", sw - m, m + 54.0 * u, 18.0 * u, Color::new(pal.accent.r, pal.accent.g, pal.accent.b, pulse), 1);
+                    }
                     for i in 0..r.max_hp {
                         let (cx, cy) = (m + 16.0 * u + i as f32 * 34.0 * u, sh - m - 14.0 * u);
                         if i < r.hp {
@@ -3704,7 +3708,7 @@ async fn run(args: Args) {
                     }
                     if r.label_t > 0.0 && !r.done {
                         let a = (r.label_t / 0.25).min(1.0);
-                        let col = if r.label == "HIT" { pal.danger } else { pal.accent };
+                        let col = if r.label == "HIT" { pal.danger } else if r.label == "CLOSE" { pal.secondary } else { pal.accent };
                         render::vtext(r.label, sw * 0.5, sh * 0.70, 40.0 * u, Color::new(col.r, col.g, col.b, a), 0);
                     }
                     if r.t < 6.0 && !r.done {
@@ -3714,6 +3718,7 @@ async fn run(args: Args) {
                         dim(0.6);
                         render::vtext(if r.dead { "CRASHED" } else { "ROAD COMPLETE" }, sw * 0.5, sh * 0.24, 80.0 * u, if r.dead { pal.danger } else { pal.accent }, 0);
                         text_center(&format!("{:08}", r.score), sw * 0.5, sh * 0.36, 96.0 * u, WHITE);
+                        text_center(&format!("RANK  {}", r.rank()), sw * 0.5 - 330.0 * u, sh * 0.34, 40.0 * u, pal.primary);
                         if s.best {
                             text_center("NEW BEST", sw * 0.5, sh * 0.42, 34.0 * u, pal.accent);
                         } else if let Some((b, _)) = app.scores.get(&s.key) {
@@ -3721,7 +3726,8 @@ async fn run(args: Args) {
                         }
                         let rows = [
                             ("obstacles cleared", format!("{}", r.cleared)),
-                            ("perfect jumps", format!("{}", r.perfects)),
+                            ("perfect jumps", format!("{} of {}", r.perfects, r.bars_total)),
+                            ("close calls", format!("{}", r.close_calls)),
                             ("gems", format!("{}", r.gems)),
                             ("best combo", format!("{}", r.best_combo)),
                             ("hits taken", format!("{}", r.hits)),
