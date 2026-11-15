@@ -69,14 +69,15 @@ merging the last one brings everything:
 40. `docs/fourth-pass-t8` — plan progress, README and this file
 41. `feat/comb-sweep` — Comb and Sweep attack patterns
 42. `feat/track-picker` — track list in run setup, depth frames around the arena
-43. `docs/fifth-pass-t9` — plan progress, README and this file
+43. `docs/fifth-pass-t9` — plan progress, README, `CLAUDE.md` brief and this file
+44. `feat/thread` — dash through a bullet for a "thread"; builds `Heartline-0.3.0-T10`
 
 The third playtest (2026-11-15) and what was done about it are in
 `docs/plans/0.4-playtest-3.md`. The depth pass that followed (every area of the game, planned
 and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "Known weak
 spots" first.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T9-win-x64` (built from branch 43).
+**Test build:** `#UserTesting\Heartline-0.3.0-T10-win-x64` (built from branch 44).
 
 **Verified by machine only:** 39 unit tests, `--sim` balance runs, screenshots of the menu
 screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any

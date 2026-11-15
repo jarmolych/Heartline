@@ -710,6 +710,8 @@ pub struct Stats {
     pub grazes: u32,
     /// Times resonance was set ringing.
     pub resonances: u32,
+    /// Bullets dashed straight through.
+    pub threads: u32,
     /// Sum of the damage multipliers of every shot the gun fired (1.0 = one nominal shot).
     pub gun_dmg: f32,
     /// Hits taken per source (`SRC_*`).
@@ -2821,6 +2823,8 @@ impl World {
         let mut hit = false;
         let mut hit_pat = 0u8;
         let mut grazes = 0u32;
+        let mut threads = 0u32;
+        let dashing = self.player.dash_t > 0.0 && !self.dead;
         let vulnerable = self.player.invuln <= 0.0 && self.player.dash_t <= 0.0 && !self.dead;
         let groove = self.groove;
         for b in self.bullets.iter_mut() {
@@ -2845,10 +2849,24 @@ impl World {
                 hit_pat = b.pat;
                 self.last_hit_age = b.age;
                 b.fade = -1.0;
+            } else if dashing && !b.grazed && !b.soft && d2 < (b.r + PLAYER_HIT_R + 6.0) * (b.r + PLAYER_HIT_R + 6.0) {
+                // Thread: dashing straight through a bullet that would have hit.
+                b.grazed = true;
+                threads += 1;
             } else if !b.grazed && !b.soft && !self.dead && d2 < (b.r + GRAZE_R) * (b.r + GRAZE_R) {
                 b.grazed = true;
                 grazes += 1;
             }
+        }
+        if threads > 0 {
+            // worth three grazes each, and it feeds resonance well
+            self.stats.grazes += threads;
+            self.stats.threads += threads;
+            self.add_score(GRAZE_SCORE * 3.0 * threads as f32);
+            self.add_combo(0.75 * threads as f32);
+            self.resonate(0.06 * threads as f32);
+            self.text(ppos + vec2(0.0, -34.0), "THREAD", C_ACCENT, 18.0, 0.6);
+            self.burst(ppos, 8, 320.0, C_ACCENT, 3.0);
         }
         if grazes > 0 && !hit {
             self.stats.grazes += grazes;
