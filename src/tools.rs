@@ -627,6 +627,15 @@ pub fn bot_input(w: &World) -> Input {
         if dq < HEART_R + 60.0 {
             c += 3.0 * near;
         }
+        // ... the lane it is about to charge down ...
+        if w.heart.charging {
+            let (a, b) = (w.heart.pos, w.heart.move_to);
+            let ab = b - a;
+            let k = ((q - a).dot(ab) / ab.length_squared().max(1.0)).clamp(0.0, 1.0);
+            if q.distance(a + ab * k) < HEART_R + 60.0 {
+                c += 5.0;
+            }
+        }
         // ... and the place it has announced it is moving to.
         if w.heart.relocating(w.t) && q.distance(w.heart.move_to) < HEART_R + 70.0 {
             c += 4.0;

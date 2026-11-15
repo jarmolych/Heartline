@@ -625,6 +625,12 @@ pub struct HeartPhase {
 pub const HEART_ANCHORS: [(f32, f32); 7] = [(0.0, 0.0), (-230.0, -110.0), (230.0, -110.0), (-230.0, 110.0), (230.0, 110.0), (-300.0, 0.0), (300.0, 0.0)];
 /// The Heart stays at least this long in one place.
 const HEART_STAY_SECS: f32 = 7.0;
+/// In Overdrive the Heart charges at most once per this many beats.
+const CHARGE_EVERY_BEATS: f32 = 8.0;
+/// Resonance: seconds it lasts, and what it multiplies damage and score by.
+pub const RESONANCE_SECS: f32 = 8.0;
+const RESONANCE_DMG: f32 = 1.5;
+const RESONANCE_SCORE: f32 = 2.0;
 /// The Heart relocates from this hardness up (PULSE and harder).
 const HEART_MOVES_FROM: f32 = 0.15;
 
@@ -637,6 +643,8 @@ pub struct Heart {
     pub move_to: Vec2,
     pub move_t0: f32,
     pub move_t1: f32,
+    /// The relocation under way is a charge: a fast straight run through where the player stood.
+    pub charging: bool,
     pub hp: f32,
     pub max_hp: f32,
     pub form: HeartForm,
@@ -655,7 +663,7 @@ pub struct Heart {
 
 impl Heart {
     fn new(hp: f32, reform: f32) -> Heart {
-        Heart { pos: Vec2::ZERO, move_from: Vec2::ZERO, move_to: Vec2::ZERO, move_t0: -1.0, move_t1: -1.0, hp, max_hp: hp, form: HeartForm::Core, phase_max: hp, nodes: Vec::new(), open: 1.0, broken: false, punch: 0.0, flash: 0.0, rot: 0.0, reform, charge: 0.0 }
+        Heart { pos: Vec2::ZERO, move_from: Vec2::ZERO, move_to: Vec2::ZERO, move_t0: -1.0, move_t1: -1.0, charging: false, hp, max_hp: hp, form: HeartForm::Core, phase_max: hp, nodes: Vec::new(), open: 1.0, broken: false, punch: 0.0, flash: 0.0, rot: 0.0, reform, charge: 0.0 }
     }
     /// Where node `k` is on the play field.
     pub fn node_pos(&self, k: usize) -> Vec2 {
@@ -774,6 +782,11 @@ pub struct World {
     /// Shot times of the current song per TEMPO level (`level::gun_track`). Empty when the song
     /// is not known ahead of time (live audio, drift): the gun then locks to a beat subdivision.
     pub gun: Vec<Vec<f32>>,
+    /// Resonance: a meter (0..1) filled by playing close to the music (grazes, kills, on-beat
+    /// dashes, hurting the Heart). Full, it rings for `RESONANCE_SECS` (`res_t` counts down):
+    /// more damage, double score, a wider magnet.
+    pub resonance: f32,
+    pub res_t: f32,
     /// Live audio: the song is not known ahead, so each section the generator announces becomes
     /// a Heart phase on the spot (`push_live_phase`).
     pub live_phases: bool,
@@ -899,6 +912,8 @@ impl World {
             last_hit_age: 0.0,
             mercy: 1.0,
             gun: Vec::new(),
+            resonance: 0.0,
+            res_t: 0.0,
             live_phases: false,
             pacifist: false,
             base_mods: 0,
@@ -1003,6 +1018,26 @@ impl World {
                 return;
             }
             Vec2::ZERO
+        } else if self.heart.form == HeartForm::Overdrive {
+            // Overdrive: it charges. The lane is drawn for a beat, then it crosses in one.
+            let bl = self.beat_len.clamp(0.25, 1.0);
+            let here = self.heart.pos;
+            let d = self.player.pos - here;
+            let dist = d.length();
+            if t - self.heart.move_t1 < CHARGE_EVERY_BEATS * bl || dist < 140.0 {
+                return;
+            }
+            let mut to = here + d / dist * (dist + 150.0).min(600.0);
+            to.x = to.x.clamp(-HALF_W + 120.0, HALF_W - 120.0);
+            to.y = to.y.clamp(-HALF_H + 120.0, HALF_H - 120.0);
+            let wait = bl.max(0.6);
+            self.heart.move_from = here;
+            self.heart.move_to = to;
+            self.heart.move_t0 = t + wait;
+            self.heart.move_t1 = t + wait + bl.clamp(0.35, 0.7);
+            self.heart.charging = true;
+            self.snd(Sfx::Slam, 0.7, to.x);
+            return;
         } else {
             if t - self.heart.move_t1 < stay || self.pressure() < 0.5 {
                 return;
@@ -1113,6 +1148,7 @@ impl World {
             return;
         }
         let floor = self.phase_floor();
+        self.resonate(1.2 * dmg / self.heart.max_hp.max(1.0));
         self.heart.hp = (self.heart.hp - dmg).max(floor);
         self.heart.flash = 1.0;
         self.add_score(dmg * 4.0);
@@ -1261,6 +1297,7 @@ impl World {
         self.player.fire_phase = 0;
         self.gun.clear();
         self.painters.clear();
+        self.res_t = 0.0;
         self.armed = 0;
         if self.player.up(UpgradeId::Encore) > 0 {
             self.player.shield = true;
@@ -1286,7 +1323,25 @@ impl World {
     }
 
     fn add_score(&mut self, base: f32) {
-        self.score += (base * self.mult() * self.score_mult).round().max(0.0) as u64;
+        let res = if self.res_t > 0.0 { RESONANCE_SCORE } else { 1.0 };
+        self.score += (base * self.mult() * self.score_mult * res).round().max(0.0) as u64;
+    }
+
+    /// Feed the resonance meter; when it fills, resonance starts.
+    fn resonate(&mut self, amount: f32) {
+        if self.res_t > 0.0 || self.dead {
+            return;
+        }
+        self.resonance += amount;
+        if self.resonance >= 1.0 {
+            self.resonance = 0.0;
+            self.res_t = RESONANCE_SECS;
+            let pos = self.player.pos;
+            self.text(pos + vec2(0.0, -56.0), "RESONANCE", C_ACCENT, 34.0, 1.8);
+            self.burst(pos, 40, 620.0, C_ACCENT, 5.0);
+            self.snd(Sfx::Upgrade, 0.8, pos.x);
+            self.flash = self.flash.max(0.2);
+        }
     }
 
     pub fn burst(&mut self, pos: Vec2, n: usize, speed: f32, col: u8, size: f32) {
@@ -1946,6 +2001,7 @@ impl World {
         self.add_score(score);
         self.add_combo(1.0);
         self.stats.kills += 1;
+        self.resonate(0.035);
         self.snd(Sfx::Kill, if kind == EnemyKind::Elite { 1.0 } else { 0.55 }, pos.x);
         self.drop_shards(pos, shards, kind == EnemyKind::Elite);
         self.burst(pos, 10 + shards * 4, 360.0, col, 5.0);
@@ -2048,6 +2104,12 @@ impl World {
         if t >= self.heart.move_t0 && self.heart.move_t1 > self.heart.move_t0 {
             let k = ((t - self.heart.move_t0) / (self.heart.move_t1 - self.heart.move_t0)).clamp(0.0, 1.0);
             self.heart.pos = self.heart.move_from.lerp(self.heart.move_to, smooth01(k));
+            if k >= 1.0 && self.heart.charging {
+                self.heart.charging = false;
+                self.shake = self.shake.max(0.35);
+                let at = self.heart.pos;
+                self.burst(at, 24, 520.0, C_DANGER, 5.0);
+            }
         }
         // Valve: open for the first half of every bar. The other forms are simply open or shut.
         let open_to = match self.heart.form {
@@ -2066,6 +2128,7 @@ impl World {
             self.encore();
         }
         self.window.peak_mult = self.window.peak_mult.max(self.mult());
+        self.res_t = (self.res_t - dt).max(0.0);
         // DODGE: staying alive is the score.
         if self.pacifist && active && !self.dead {
             self.survive_acc += dt * 20.0;
@@ -2175,6 +2238,7 @@ impl World {
             let pos = p.pos;
             self.snd(Sfx::Dash, 0.5, pos.x);
             if on_beat_dash {
+                self.resonate(0.06);
                 self.text(pos + vec2(0.0, -34.0), "ON BEAT", C_ACCENT, 18.0, 0.7);
                 self.snd(Sfx::Shard, 0.7, pos.x);
             }
@@ -2277,6 +2341,8 @@ impl World {
         if self.pacifist {
             return;
         }
+        // Resonance adds damage on top of the shot (it is not part of the gun's own rhythm).
+        let res_boost = if self.res_t > 0.0 { RESONANCE_DMG } else { 1.0 };
         // GLASS: fragile, but it hits hard.
         let scale = if self.mods & MOD_GLASS != 0 { scale * 1.6 } else { scale };
         // DOWNBEAT: the first shot after each downbeat is charged.
@@ -2290,7 +2356,7 @@ impl World {
         let p = &mut self.player;
         let bounce = p.ups[UpgradeId::Ricochet as usize];
         let n = 1 + p.ups[UpgradeId::Chord as usize] as usize;
-        let dmg = (1.0 + 0.5 * p.ups[UpgradeId::Gain as usize] as f32) * scale;
+        let dmg = (1.0 + 0.5 * p.ups[UpgradeId::Gain as usize] as f32) * scale * res_boost;
         let pierce = p.ups[UpgradeId::Pierce as usize];
         let base = p.aim_dir.y.atan2(p.aim_dir.x);
         p.muzzle = scale.clamp(0.7, 1.6);
@@ -2632,6 +2698,7 @@ impl World {
         }
         if grazes > 0 && !hit {
             self.stats.grazes += grazes;
+            self.resonate(0.022 * grazes as f32);
             let k = grazes as f32 * if self.pacifist { 3.0 } else { 1.0 };
             self.add_score(GRAZE_SCORE * k);
             self.add_combo(0.25 * grazes as f32);
@@ -2722,7 +2789,7 @@ impl World {
 
     fn update_pickups(&mut self, dt: f32) {
         let ppos = self.player.pos;
-        let mag = self.player.magnet_r();
+        let mag = self.player.magnet_r() * if self.res_t > 0.0 { 2.0 } else { 1.0 };
         let mut got = 0u32;
         let mut healed = false;
         for s in self.shards.iter_mut() {

@@ -3242,6 +3242,18 @@ impl Renderer {
             return;
         }
         let pal = &self.pal;
+        if h.charging {
+            // a charge: the whole lane it will cross is lit, brightening until it goes
+            let d = h.move_to - h.pos;
+            let n = d.normalize_or_zero();
+            let side = vec2(-n.y, n.x) * (HEART_R + 16.0);
+            let go = (1.0 - (h.move_t0 - w.t).max(0.0) / 0.7).clamp(0.2, 1.0);
+            let c0 = alpha(pal.danger, 0.34 * go * lv);
+            let c1 = alpha(pal.danger, 0.10 * go * lv);
+            quad4([h.pos + side, h.move_to + side, h.move_to - side, h.pos - side], [c0, c1, c1, c0]);
+            line(h.pos + side, h.move_to + side, 2.5, alpha(pal.danger, 0.9 * go * lv));
+            line(h.pos - side, h.move_to - side, 2.5, alpha(pal.danger, 0.9 * go * lv));
+        }
         let wait = ((h.move_t0 - w.t) / (h.move_t1 - h.move_t0).max(0.1)).clamp(0.0, 1.0);
         let a = lv * (0.9 - 0.3 * wait);
         let pulse = 0.8 + 0.2 * (self.time * 10.0).sin();
@@ -3561,6 +3573,15 @@ impl Renderer {
             return;
         }
         let blink = if p.invuln > 0.0 && p.dash_t <= 0.0 { 0.45 + 0.55 * ((self.time * 30.0).sin() * 0.5 + 0.5) } else { 1.0 };
+        // Resonance: rings pulse out from the player on every beat
+        if w.res_t > 0.0 {
+            let fade = (w.res_t / 0.6).min(1.0);
+            for k in 0..2 {
+                let ph = (1.0 - w.beat_pulse + k as f32 * 0.5).fract();
+                arc(p.pos, 26.0 + 70.0 * ph, 0.0, TAU, 2.5, alpha(pal.accent, 0.7 * (1.0 - ph) * fade));
+            }
+            poly_lines(p.pos, 6, 30.0, self.time * 2.0, 2.0, alpha(WHITE, 0.6 * fade));
+        }
         // ORBIT blades: turning crescents with a faint ring showing their path
         if p.blades() > 0 {
             arc(p.pos, BLADE_ORBIT_R, 0.0, TAU, 1.0, alpha(pal.accent, 0.12));
@@ -3924,6 +3945,14 @@ impl Renderer {
             line(vec2(cx, cy), vec2(cx + cw, cy), 1.0 * u, alpha(WHITE, 0.25));
             line(vec2(cx, cy), vec2(cx + cw * cf, cy), 3.0 * u, mc);
             line(vec2(cx + cw, cy - 5.0 * u), vec2(cx + cw, cy + 5.0 * u), 1.0 * u, alpha(WHITE, 0.35));
+            // Resonance: the meter, or the time left while it rings
+            let ry = cy + 20.0 * u;
+            let ringing = w.res_t > 0.0;
+            let rf = if ringing { w.res_t / RESONANCE_SECS } else { w.resonance.clamp(0.0, 1.0) };
+            let rc = if ringing { mixc(pal.accent, WHITE, 0.5 + 0.5 * (self.time * 12.0).sin()) } else { alpha(pal.secondary, 0.9) };
+            line(vec2(cx, ry), vec2(cx + cw, ry), 1.0 * u, alpha(WHITE, 0.2));
+            line(vec2(cx, ry), vec2(cx + cw * rf, ry), if ringing { 4.0 } else { 2.5 } * u, rc);
+            vtext(if ringing { "RESONANCE" } else { "RES" }, cx + cw + 10.0 * u, ry + 6.0 * u, 13.0 * u, alpha(rc, 0.95), -1);
 
             // HP diamonds
             let y = sh - m - 14.0 * u;
