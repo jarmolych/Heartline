@@ -384,15 +384,124 @@ pub struct Tile {
     pub tag: u8,
 }
 
+/// What the Heart is in the current phase of the song, and so what the player has to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeartForm {
+    /// No phases known (live audio, drift): one plain health bar.
+    Core,
+    /// Calm sections: the shell is closed; break the shield nodes circling the arena.
+    Shell,
+    /// Normal sections: it only opens for the first half of every bar.
+    Valve,
+    /// Intense sections: three linked cores orbit it and break in order.
+    Split,
+    /// Drops: fully exposed, takes extra damage.
+    Overdrive,
+}
+
+impl HeartForm {
+    pub fn of(kind: SectionKind) -> HeartForm {
+        match kind {
+            SectionKind::Calm => HeartForm::Shell,
+            SectionKind::Normal => HeartForm::Valve,
+            SectionKind::Intense => HeartForm::Split,
+            SectionKind::Drop => HeartForm::Overdrive,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            HeartForm::Core => "",
+            HeartForm::Shell => "SHELL",
+            HeartForm::Valve => "VALVE",
+            HeartForm::Split => "SPLIT",
+            HeartForm::Overdrive => "OVERDRIVE",
+        }
+    }
+    pub fn hint(self) -> &'static str {
+        match self {
+            HeartForm::Core => "",
+            HeartForm::Shell => "the shell is closed: break the shield nodes",
+            HeartForm::Valve => "it opens on the downbeat",
+            HeartForm::Split => "break the lit core, then the next",
+            HeartForm::Overdrive => "exposed: pour it on",
+        }
+    }
+    /// How much of the player's damage realistically lands in this form. A phase's share of the
+    /// Heart's health is its length times this, so every form takes about as long to beat.
+    fn yield_(self) -> f32 {
+        match self {
+            HeartForm::Core => 1.0,
+            HeartForm::Shell => 0.55,
+            HeartForm::Valve => 0.65,
+            HeartForm::Split => 0.6,
+            HeartForm::Overdrive => 1.3,
+        }
+    }
+    fn has_nodes(self) -> bool {
+        matches!(self, HeartForm::Shell | HeartForm::Split)
+    }
+}
+
+/// A shield node (Shell) or a core (Split): a target that orbits the Heart.
+#[derive(Clone, Copy, Debug)]
+pub struct Node {
+    pub ang: f32,
+    pub hp: f32,
+    pub max_hp: f32,
+    pub flash: f32,
+}
+
+pub const NODE_R: f32 = 22.0;
+/// Damage multipliers: Overdrive, Valve open, Valve closed.
+const OVERDRIVE_DMG: f32 = 1.5;
+const VALVE_OPEN_DMG: f32 = 1.25;
+const VALVE_SHUT_DMG: f32 = 0.2;
+/// Pressure multiplier while a phase is beaten and the song has not moved on yet.
+const PURGATORY_PRESSURE: f32 = 0.35;
+
+/// One phase of the Heart: a section of the song.
+#[derive(Clone, Copy, Debug)]
+pub struct HeartPhase {
+    pub t0: f32,
+    pub t1: f32,
+    pub kind: SectionKind,
+    /// Heart health at which this phase is beaten (0 for the last one).
+    pub floor: f32,
+}
+
 pub struct Heart {
     pub hp: f32,
     pub max_hp: f32,
+    pub form: HeartForm,
+    /// Health this phase started with above its floor (for the HUD).
+    pub phase_max: f32,
+    pub nodes: Vec<Node>,
+    /// 0 = shut, 1 = open (Valve form; 1 in the exposed forms).
+    pub open: f32,
     pub broken: bool,
     pub punch: f32,
     pub flash: f32,
     pub rot: f32,
     pub reform: f32,
     pub charge: f32,
+}
+
+impl Heart {
+    fn new(hp: f32, reform: f32) -> Heart {
+        Heart { hp, max_hp: hp, form: HeartForm::Core, phase_max: hp, nodes: Vec::new(), open: 1.0, broken: false, punch: 0.0, flash: 0.0, rot: 0.0, reform, charge: 0.0 }
+    }
+    /// Where node `k` is on the play field.
+    pub fn node_pos(&self, k: usize) -> Vec2 {
+        let a = self.nodes.get(k).map_or(0.0, |n| n.ang);
+        match self.form {
+            HeartForm::Shell => vec2(a.cos() * HALF_W * 0.72, a.sin() * HALF_H * 0.66),
+            _ => vec2(a.cos(), a.sin()) * 178.0,
+        }
+    }
+    /// Index of the node that can be damaged in Split form: the first one still alive.
+    pub fn lit_node(&self) -> Option<usize> {
+        self.nodes.iter().position(|n| n.hp > 0.0)
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -404,6 +513,8 @@ pub struct Stats {
     pub hearts_broken: u32,
     pub songs: u32,
     pub notes_shot: u32,
+    /// Heart phases beaten before their section ended.
+    pub phases_broken: u32,
     /// Sum of the damage multipliers of every shot the gun fired (1.0 = one nominal shot).
     pub gun_dmg: f32,
     /// Hits taken per source (`SRC_*`).
@@ -480,6 +591,17 @@ pub struct World {
     /// Shot times of the current song per TEMPO level (`level::gun_track`). Empty when the song
     /// is not known ahead of time (live audio, drift): the gun then locks to a beat subdivision.
     pub gun: Vec<Vec<f32>>,
+    /// The Heart's phases for this song (empty when the song is not known ahead of time).
+    pub phases: Vec<HeartPhase>,
+    pub phase_i: usize,
+    /// True between beating a phase early and the start of the next section.
+    pub purgatory: bool,
+    /// 0..1 envelope following `purgatory` (visuals).
+    pub purg: f32,
+    /// 0..1 envelope kicked when a new Heart form appears (HUD hint).
+    pub form_banner: f32,
+    /// Beats since the last downbeat.
+    bar_beat: u32,
     /// Musical layers currently driving attacks (bit = `LayerKind as u8`), for the HUD.
     pub armed: u8,
     /// 0..1 glow per layer: rises while the layer is armed.
@@ -517,7 +639,7 @@ impl World {
         World {
             t: 0.0,
             player: Player::new(),
-            heart: Heart { hp: 100.0, max_hp: 100.0, broken: false, punch: 0.0, flash: 0.0, rot: 0.0, reform: 0.0, charge: 0.0 },
+            heart: Heart::new(100.0, 0.0),
             bullets: Vec::with_capacity(MAX_BULLETS),
             shots: Vec::with_capacity(128),
             enemies: Vec::with_capacity(MAX_ENEMIES),
@@ -565,6 +687,12 @@ impl World {
             last_hit_age: 0.0,
             mercy: 1.0,
             gun: Vec::new(),
+            phases: Vec::new(),
+            phase_i: 0,
+            purgatory: false,
+            purg: 0.0,
+            form_banner: 0.0,
+            bar_beat: 0,
             armed: 0,
             layer_glow: [0.0; N_LAYERS],
             chime: 0.0,
@@ -580,7 +708,145 @@ impl World {
         let h = hardness(self.diff);
         let r0 = (r0 + 0.45 * h).min(0.95);
         let k = smooth01(self.active_t / (secs * (1.0 - 0.6 * h)));
-        (r0 + (1.0 - r0) * k) * (1.0 + RUN_ESCALATION * self.song_idx as f32) * self.mercy
+        (r0 + (1.0 - r0) * k) * (1.0 + RUN_ESCALATION * self.song_idx as f32) * self.mercy * if self.purgatory { PURGATORY_PRESSURE } else { 1.0 }
+    }
+
+    /// Give the Heart one phase per section of the song. Call after `begin_song`.
+    pub fn set_phases(&mut self, sections: &[(f32, f32, SectionKind)]) {
+        let weight = |s: &(f32, f32, SectionKind)| (s.1 - s.0).max(0.0) * HeartForm::of(s.2).yield_();
+        let total: f32 = sections.iter().map(weight).sum::<f32>().max(1e-3);
+        let mut left = self.heart.max_hp;
+        self.phases.clear();
+        for (i, s) in sections.iter().enumerate() {
+            left -= self.heart.max_hp * weight(s) / total;
+            let floor = if i + 1 == sections.len() { 0.0 } else { left.max(0.0) };
+            self.phases.push(HeartPhase { t0: s.0, t1: s.1, kind: s.2, floor });
+        }
+        self.phase_i = 0;
+        self.purgatory = false;
+    }
+
+    /// Heart health at which the current phase is beaten.
+    pub fn phase_floor(&self) -> f32 {
+        self.phases.get(self.phase_i).map_or(0.0, |p| p.floor)
+    }
+
+    /// 0..1 of the current phase's health that is left.
+    pub fn phase_frac(&self) -> f32 {
+        ((self.heart.hp - self.phase_floor()) / self.heart.phase_max.max(1e-3)).clamp(0.0, 1.0)
+    }
+
+    /// Seconds until the current phase's section ends.
+    pub fn phase_left(&self) -> f32 {
+        self.phases.get(self.phase_i).map_or(0.0, |p| (p.t1 - self.t).max(0.0))
+    }
+
+    fn enter_phase(&mut self, idx: usize) {
+        if self.phases.is_empty() || self.heart.broken {
+            return;
+        }
+        let idx = idx.min(self.phases.len() - 1);
+        let form = HeartForm::of(self.phases[idx].kind);
+        if form != self.heart.form {
+            self.form_banner = 1.0;
+        }
+        self.phase_i = idx;
+        self.purgatory = false;
+        self.heart.form = form;
+        self.heart.phase_max = (self.heart.hp - self.phases[idx].floor).max(1.0);
+        self.heart.nodes.clear();
+        if form.has_nodes() {
+            let a0 = self.rng.angle();
+            let hp = self.heart.phase_max / 3.0;
+            for k in 0..3 {
+                self.heart.nodes.push(Node { ang: a0 + k as f32 * TAU / 3.0, hp, max_hp: hp, flash: 0.0 });
+            }
+        }
+    }
+
+    /// The point a shot should go to hurt the Heart from `from`, if anything can be hurt now.
+    pub fn heart_target(&self, from: Vec2) -> Option<Vec2> {
+        if self.heart.broken || self.purgatory {
+            return None;
+        }
+        match self.heart.form {
+            HeartForm::Shell => (0..self.heart.nodes.len())
+                .filter(|&k| self.heart.nodes[k].hp > 0.0)
+                .map(|k| self.heart.node_pos(k))
+                .min_by(|a, b| a.distance(from).partial_cmp(&b.distance(from)).unwrap_or(std::cmp::Ordering::Equal)),
+            HeartForm::Split => self.heart.lit_node().map(|k| self.heart.node_pos(k)),
+            _ => Some(Vec2::ZERO),
+        }
+    }
+
+    /// Take `dmg` off the Heart, stopping at the current phase's floor.
+    fn damage_heart(&mut self, dmg: f32) {
+        if dmg <= 0.0 || self.heart.broken || self.purgatory {
+            return;
+        }
+        let floor = self.phase_floor();
+        self.heart.hp = (self.heart.hp - dmg).max(floor);
+        self.heart.flash = 1.0;
+        self.add_score(dmg * 4.0);
+        let nodes_gone = self.heart.form.has_nodes() && !self.heart.nodes.is_empty() && self.heart.nodes.iter().all(|n| n.hp <= 0.0);
+        if nodes_gone {
+            self.heart.hp = floor;
+        }
+        if self.heart.hp <= floor + 1e-3 {
+            if self.phases.is_empty() || self.phase_i + 1 >= self.phases.len() {
+                self.break_heart();
+            } else {
+                self.enter_purgatory();
+            }
+        }
+    }
+
+    /// The phase was beaten before its section ended: a breather with a clock.
+    fn enter_purgatory(&mut self) {
+        self.purgatory = true;
+        self.stats.phases_broken += 1;
+        self.heart.nodes.clear();
+        self.pulses.clear();
+        // Everything hostile in the air becomes a shootable note.
+        for b in self.bullets.iter_mut() {
+            b.soft = true;
+            b.kind = B_NOTE;
+            b.r = 8.0;
+        }
+        self.add_score(1500.0);
+        self.snd(Sfx::Clear, 0.9, 0.0);
+        self.shake = self.shake.max(0.6);
+        self.flash = self.flash.max(0.5);
+        self.burst(Vec2::ZERO, 60, 700.0, C_PRIMARY, 7.0);
+        self.text(vec2(0.0, -120.0), "PURGATORY", C_ACCENT, 54.0, 2.6);
+        self.text(vec2(0.0, -78.0), "phase broken early - everything is shootable", C_WHITE, 22.0, 2.6);
+        let left = self.phase_left();
+        if left > 5.0 {
+            self.spawn_orbs(left.min(14.0));
+        }
+    }
+
+    fn break_heart(&mut self) {
+        self.heart.hp = 0.0;
+        self.heart.broken = true;
+        self.heart.nodes.clear();
+        self.stats.hearts_broken += 1;
+        self.snd(Sfx::HeartBreak, 1.0, 0.0);
+        self.add_score(5000.0);
+        self.shake = 1.0;
+        self.flash = 0.8;
+        self.burst(Vec2::ZERO, 90, 900.0, C_PRIMARY, 8.0);
+        self.burst(Vec2::ZERO, 50, 600.0, C_WHITE, 6.0);
+        self.text(vec2(0.0, -120.0), "HEART BROKEN", C_ACCENT, 54.0, 3.0);
+        self.text(vec2(0.0, -78.0), "victory lap - everything is shootable", C_WHITE, 22.0, 3.0);
+        // Every bullet on the field becomes a reward.
+        let pts: Vec<Vec2> = self.bullets.iter().map(|b| b.pos).collect();
+        self.bullets.clear();
+        for (n, p) in pts.into_iter().enumerate() {
+            if n % 3 == 0 {
+                self.drop_shards(p, 1, false);
+            }
+        }
     }
 
     /// The pressure at which a mechanic with base threshold `p` unlocks on this difficulty.
@@ -609,7 +875,11 @@ impl World {
         self.song_idx = song_idx;
         self.rng = Rng::new(seed ^ 0xA5A5_5A5A);
         let hp = active_secs * 2.6 * (1.0 + 0.3 * song_idx as f32) * (0.75 + 0.25 * self.diff);
-        self.heart = Heart { hp, max_hp: hp, broken: false, punch: 0.0, flash: 0.0, rot: 0.0, reform: 1.0, charge: 0.0 };
+        self.heart = Heart::new(hp, 1.0);
+        self.phases.clear();
+        self.phase_i = 0;
+        self.purgatory = false;
+        self.bar_beat = 0;
         self.ended = false;
         self.dead = false;
         self.beat_count = 0;
@@ -681,6 +951,10 @@ impl World {
     // -----------------------------------------------------------------------------------------
 
     pub fn apply(&mut self, e: &LevelEvent) {
+        // Purgatory is a breather: only the Heart's (now harmless) pulses keep coming.
+        if self.purgatory && matches!(e.ev, Ev::Tick { .. } | Ev::Spawn { .. } | Ev::Laser { .. } | Ev::Tiles { .. } | Ev::Shockwave { .. }) {
+            return;
+        }
         let late = (self.t - e.t).clamp(0.0, 0.25);
         let p = self.pressure();
         match e.ev {
@@ -693,6 +967,7 @@ impl World {
                 }
             }
             Ev::Pulse { pattern, count, speed, rot, soft } => {
+                let soft = soft || self.purgatory;
                 // Scale the planned pulse by the current pressure.
                 let count = if count == 0 { 0 } else { ((count as f32 * p).round() as u16).clamp(3, 64) };
                 let speed = speed * (0.82 + 0.18 * p.min(1.25));
@@ -771,6 +1046,7 @@ impl World {
                 self.palette = palette;
                 self.section_banner = 2.4;
                 self.heart.reform = 1.0;
+                self.enter_phase(idx as usize);
                 self.groove_amt = match kind {
                     SectionKind::Calm => 0.15,
                     SectionKind::Normal => 0.28,
@@ -809,6 +1085,7 @@ impl World {
 
     fn on_beat(&mut self, down: bool) {
         self.beat_pulse = 1.0;
+        self.bar_beat = if down { 0 } else { self.bar_beat + 1 };
         if down {
             self.bar_pulse = 1.0;
         }
@@ -848,7 +1125,7 @@ impl World {
         let dmg = (1.0 + 0.5 * self.player.up(UpgradeId::Gain) as f32) * (self.beat_len / 0.5).clamp(0.5, 2.0);
         for k in 0..n {
             let from = self.player.drone_pos(k);
-            let mut target = if self.heart.broken { None } else { Some(Vec2::ZERO) };
+            let mut target = self.heart_target(from);
             let mut best = 520.0f32;
             for en in &self.enemies {
                 let d = en.pos.distance(from);
@@ -869,7 +1146,7 @@ impl World {
         if count == 0 {
             return;
         }
-        if self.heart.broken {
+        if self.heart.broken || self.purgatory {
             count = (count / 2).max(2);
             soft = true;
         }
@@ -1186,6 +1463,20 @@ impl World {
         self.heart.flash = (self.heart.flash - dt * 8.0).max(0.0);
         self.heart.reform = (self.heart.reform - dt * 0.9).max(0.0);
         self.heart.rot += dt * (0.25 + 0.9 * intensity);
+        // Valve: open for the first half of every bar. The other forms are simply open or shut.
+        let open_to = match self.heart.form {
+            HeartForm::Valve => (self.bar_beat < 2) as u8 as f32,
+            HeartForm::Shell | HeartForm::Split => 0.0,
+            _ => 1.0,
+        };
+        self.heart.open += (open_to - self.heart.open) * (dt * 12.0).min(1.0);
+        let spin = if self.heart.form == HeartForm::Shell { 0.12 } else { 0.55 };
+        for n in self.heart.nodes.iter_mut() {
+            n.ang += dt * spin * if active { 1.0 } else { 0.2 };
+            n.flash = (n.flash - dt * 7.0).max(0.0);
+        }
+        self.purg += ((self.purgatory as u8 as f32) - self.purg) * (dt * 3.0).min(1.0);
+        self.form_banner = (self.form_banner - dt / 3.5).max(0.0);
         self.combo_idle += dt;
         if self.combo_idle > 3.0 {
             self.combo = (self.combo - dt * (0.8 + self.combo * 0.05)).max(0.0);
@@ -1364,6 +1655,7 @@ impl World {
     fn collide_shots(&mut self) {
         let mut killed: Vec<(EnemyKind, Vec2)> = Vec::new();
         let mut heart_dmg = 0.0f32;
+        let mut node_hits: Vec<(usize, f32)> = Vec::new();
         let mut sparks: Vec<(Vec2, u8)> = Vec::new();
         let mut notes: Vec<Vec2> = Vec::new();
         let mut si = 0;
@@ -1372,12 +1664,33 @@ impl World {
                 let s = &self.shots[si];
                 (s.pos, s.r, s.dmg)
             };
-            // Heart
-            if !self.heart.broken && sp.length() < HEART_R + sr {
-                heart_dmg += dmg;
-                sparks.push((sp, C_WHITE));
-                self.shots.swap_remove(si);
-                continue 'shots;
+            // Heart: its nodes first, then the body (how much lands depends on the form).
+            if !self.heart.broken && !self.purgatory {
+                let lit = self.heart.lit_node();
+                for k in 0..self.heart.nodes.len() {
+                    if self.heart.nodes[k].hp > 0.0 && self.heart.node_pos(k).distance(sp) < NODE_R + sr {
+                        if self.heart.form == HeartForm::Shell || lit == Some(k) {
+                            node_hits.push((k, dmg));
+                            sparks.push((sp, C_WHITE));
+                        } else {
+                            sparks.push((sp, C_SECONDARY));
+                        }
+                        self.shots.swap_remove(si);
+                        continue 'shots;
+                    }
+                }
+                if sp.length() < HEART_R + sr {
+                    let mul = match self.heart.form {
+                        HeartForm::Core => 1.0,
+                        HeartForm::Overdrive => OVERDRIVE_DMG,
+                        HeartForm::Valve => if self.heart.open > 0.5 { VALVE_OPEN_DMG } else { VALVE_SHUT_DMG },
+                        HeartForm::Shell | HeartForm::Split => 0.0,
+                    };
+                    heart_dmg += dmg * mul;
+                    sparks.push((sp, if mul >= 1.0 { C_WHITE } else { C_SECONDARY }));
+                    self.shots.swap_remove(si);
+                    continue 'shots;
+                }
             }
             // Enemies
             let mut consumed = false;
@@ -1443,32 +1756,23 @@ impl World {
         for (kind, pos) in killed {
             self.kill_enemy(kind, pos);
         }
-        if heart_dmg > 0.0 && !self.heart.broken {
-            self.heart.hp -= heart_dmg;
-            self.heart.flash = 1.0;
-            self.add_score(heart_dmg * 4.0);
-            if self.heart.hp <= 0.0 {
-                self.heart.hp = 0.0;
-                self.heart.broken = true;
-                self.stats.hearts_broken += 1;
-                self.snd(Sfx::HeartBreak, 1.0, 0.0);
-                self.add_score(5000.0);
-                self.shake = 1.0;
-                self.flash = 0.8;
-                self.burst(Vec2::ZERO, 90, 900.0, C_PRIMARY, 8.0);
-                self.burst(Vec2::ZERO, 50, 600.0, C_WHITE, 6.0);
-                self.text(vec2(0.0, -120.0), "HEART BROKEN", C_ACCENT, 54.0, 3.0);
-                self.text(vec2(0.0, -78.0), "victory lap - everything is shootable", C_WHITE, 22.0, 3.0);
-                // Every bullet on the field becomes a reward.
-                let pts: Vec<Vec2> = self.bullets.iter().map(|b| b.pos).collect();
-                self.bullets.clear();
-                for (n, p) in pts.into_iter().enumerate() {
-                    if n % 3 == 0 {
-                        self.drop_shards(p, 1, false);
-                    }
-                }
+        for (k, dmg) in node_hits {
+            let Some(n) = self.heart.nodes.get_mut(k) else { continue };
+            let take = dmg.min(n.hp);
+            n.hp -= take;
+            n.flash = 1.0;
+            let dead = n.hp <= 0.0;
+            if dead {
+                let pos = self.heart.node_pos(k);
+                self.burst(pos, 26, 480.0, C_PRIMARY, 6.0);
+                self.drop_shards(pos, 3, false);
+                self.snd(Sfx::Kill, 0.9, pos.x);
+                self.add_score(400.0);
+                self.shake = self.shake.max(0.35);
             }
+            self.damage_heart(take);
         }
+        self.damage_heart(heart_dmg);
     }
 
     fn update_enemies(&mut self, dt: f32, active: bool) {

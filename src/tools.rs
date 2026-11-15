@@ -87,6 +87,7 @@ pub fn simulate(an: &crate::analysis::Analysis, level: &crate::level::Level, dif
     let mut w = World::new(diff, false);
     w.begin_song(level.active_secs, song_idx, level.seed);
     w.gun = level.gun.clone();
+    w.set_phases(&level.phases);
     w.beat_len = if level.bpm > 1.0 { 60.0 / level.bpm } else { 0.5 };
     let mut bot = DelayedBot::new(bot_delay);
     let dt = 1.0 / 120.0;
@@ -691,8 +692,8 @@ pub fn bot_input(w: &World) -> Input {
         }
     }
 
-    // Aim at the nearest enemy, else the Heart.
-    let mut aim = Vec2::ZERO;
+    // Aim at the nearest enemy, else whatever part of the Heart can be hurt right now.
+    let mut aim = w.heart_target(p).unwrap_or(Vec2::ZERO);
     let mut best = 520.0f32;
     for e in &w.enemies {
         let dd = e.pos.distance(p);
