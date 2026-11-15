@@ -459,8 +459,18 @@ fn shift_tiles(p: TilePattern, n: u32) -> TilePattern {
 }
 
 /// How long before a kick the Heart announces its pulse (approach ring closing on the beat).
-pub fn pulse_lead(beat_len: f32) -> f32 {
-    (beat_len * 0.9).clamp(0.42, 0.6)
+pub fn pulse_lead(beat_len: f32, diff: f32) -> f32 {
+    (beat_len * 0.9).clamp(0.42, 0.6) * (1.12 - 0.37 * hardness(diff))
+}
+
+/// Budget multipliers of the gentlest and the hardest difficulty tier (`main.rs::DIFFS`).
+pub const DIFF_MIN: f32 = 0.7;
+pub const DIFF_MAX: f32 = 3.2;
+
+/// Where a difficulty multiplier sits between the gentlest (0) and the hardest (1) tier. The
+/// rules that are not budgets (warning time, ramp, mercy, unlock order) scale with this.
+pub fn hardness(diff: f32) -> f32 {
+    ((diff - DIFF_MIN) / (DIFF_MAX - DIFF_MIN)).clamp(0.0, 1.0)
 }
 
 fn pulse_speed(pattern: Pattern, i: f32, kind: SectionKind, diff: f32) -> f32 {
@@ -662,7 +672,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         let i = kick_times.partition_point(|&k| k <= t + 0.02);
         i < kick_times.len() && kick_times[i] - t < within
     };
-    let lead_p = pulse_lead(beat_len);
+    let lead_p = pulse_lead(beat_len, diff);
     let mut bullets = Bucket::new(BULLETS_PER_SEC * diff, 2.4);
     let mut last_pulse = -10.0f32;
     let mut phase = [rng.angle(), rng.angle(), rng.angle(), rng.angle()];
@@ -1183,7 +1193,7 @@ impl LiveGen {
                             self.soft_n % deck.soft_every == 0
                         };
                         // Only delayed (look-ahead) live mode knows a kick early enough to announce it.
-                        let lead = if self.lookahead >= 0.5 { pulse_lead(self.beat_len) } else { 0.0 };
+                        let lead = if self.lookahead >= 0.5 { pulse_lead(self.beat_len, self.diff) } else { 0.0 };
                         let speed = pulse_speed(pattern, i, self.kind, self.diff);
                         out.push(LevelEvent { t: o.t, lead, ev: Ev::Pulse { pattern, count, speed, rot, soft } });
                     }
