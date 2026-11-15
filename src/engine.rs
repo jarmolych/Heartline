@@ -83,9 +83,10 @@ pub enum Sfx {
     Heal,
     NoteShot,
     Clear,
+    Shot,
 }
 
-const SFX_COUNT: usize = 14;
+const SFX_COUNT: usize = 15;
 
 fn build_sfx_bank() -> Vec<Arc<Vec<f32>>> {
     let sr = SFX_SR as f32;
@@ -177,6 +178,8 @@ fn build_sfx_bank() -> Vec<Arc<Vec<f32>>> {
         }
         s * 0.3
     }));
+    // Shot: a muted, low "tk" under the player's heavier shots (they land on the song's rhythm).
+    bank.push(make(0.045, &mut |t, _| (tau * (430.0 + 700.0 * (-t * 120.0).exp()) * t).sin() * (-t * 75.0).exp() * 0.26));
     debug_assert_eq!(bank.len(), SFX_COUNT);
     bank
 }
