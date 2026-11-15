@@ -746,6 +746,10 @@ impl Rally {
                     let mut e = Orb { id, extra: true, ..*o };
                     e.y1 = o.y1 + side * CRACK_SPREAD;
                     e.land = fold(e.y1);
+                    // The split orb is a lob: it reaches the strike line one beat after the
+                    // main orb, so the two are returned one after the other, never together.
+                    e.tb = o.tb + o.blen;
+                    e.t1 = t + (e.tb - t) / frac;
                     o.y1 -= side * CRACK_SPREAD * 0.35;
                     o.land = fold(o.y1);
                     self.orbs[k] = e;
@@ -1171,6 +1175,8 @@ mod tests {
         let o = r.orbs.iter().find(|o| o.state == OrbState::Flying && !o.extra).expect("launched");
         assert!((o.tb - beats[k + 1]).abs() < 1e-4, "perfect tb {} vs {}", o.tb, beats[k + 1]);
         assert_eq!(r.orbs.iter().filter(|o| o.extra).count(), 1, "crack splits");
+        let e = r.orbs.iter().find(|o| o.extra).unwrap();
+        assert!((e.tb - o.tb - BPM_BEAT).abs() < 1e-3, "the split orb must arrive one beat later: {} vs {}", e.tb, o.tb);
     }
 
     #[test]
