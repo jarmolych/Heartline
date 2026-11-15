@@ -1058,8 +1058,8 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
 
 /// Backdrops: 0 sunset (striped sun), 1 moonrise (full moon), 2 ocean dusk (sun in the sea),
 /// 3 wire globe, 4 nebula, 5 ringed planet, 6 black hole, 7 binary sunset, 8 aurora, 9 tide
-/// (ranks of waves over the horizon).
-pub const N_SCENES: u8 = 10;
+/// (ranks of waves over the horizon), 10 prism (a striped triangle with rays).
+pub const N_SCENES: u8 = 11;
 /// Weather: 0 none, 1 rain of lines (pulses with the hats), 2 drifting dust, 3 aurora.
 pub const N_WEATHER: u8 = 4;
 /// Floor: 0 full grid, 1 open grid (every other line), 2 marks at the intersections.
@@ -1097,13 +1097,13 @@ pub fn mood(an: &Analysis) -> Mood {
     let (scenes, props, weathers): (&[u8], &[u8], &[u8]) = if tropical {
         (&[2, 7, 0, 9, 2], &[1, 1, 1, 0], &[0, 0, 1, 2])
     } else if density > 7.0 && !bright {
-        (&[6, 3, 5, 0, 4], &[3, 3, 0, 2, 4], &[1, 1, 0, 3])
+        (&[6, 3, 5, 0, 4, 10], &[3, 3, 0, 2, 4], &[1, 1, 0, 3])
     } else if density > 7.0 {
-        (&[3, 0, 7, 6, 8], &[3, 0, 4, 1, 0], &[0, 1, 3, 0])
+        (&[3, 0, 7, 6, 8, 10], &[3, 0, 4, 1, 0], &[0, 1, 3, 0])
     } else if density < 3.5 {
         (&[1, 4, 8, 5, 9, 2], &[4, 0, 2, 0, 1], &[2, 3, 0, 2])
     } else {
-        (&[0, 1, 2, 4, 5, 6, 7, 8, 9], &[0, 1, 2, 3, 4, 0], &[0, 0, 1, 2, 3])
+        (&[0, 1, 2, 4, 5, 6, 7, 8, 9, 10], &[0, 1, 2, 3, 4, 0], &[0, 0, 1, 2, 3])
     };
     Mood { scene: pick(scenes, 0), weather: pick(weathers, 8), floor: ((h >> 16) % N_FLOORS as u64) as u8, prop: pick(props, 24) }
 }

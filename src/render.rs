@@ -1169,7 +1169,8 @@ vec3 skyBase(float sc, vec2 p) {
         else if (sc < 6.5) { z = vec3(0.0, 0.0, 0.02); h = vec3(0.20, 0.07, 0.10); starD = 0.12; }
         else if (sc < 7.5) { z = vec3(0.13, 0.03, 0.20); h = vec3(0.92, 0.36, 0.46); starD = 0.02; }
         else if (sc < 8.5) { z = vec3(0.0, 0.02, 0.06); h = vec3(0.04, 0.17, 0.22); starD = 0.0; }
-        else { z = vec3(0.0, 0.02, 0.08); h = vec3(0.06, 0.20, 0.38); starD = 0.10; }
+        else if (sc < 9.5) { z = vec3(0.0, 0.02, 0.08); h = vec3(0.06, 0.20, 0.38); starD = 0.10; }
+        else { z = vec3(0.05, 0.01, 0.12); h = vec3(0.55, 0.16, 0.50); starD = 0.07; }
         // keep some of the palette so the sky still belongs to the land in front of it
         z = mix(z, pz, 0.25);
         h = mix(h, ph, 0.3);
@@ -1351,6 +1352,31 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
             col += ac * body * rays * fold * (0.42 - 0.08 * fi) * (1.0 + 0.5 * u_bass);
             col += vec3(0.6, 1.0, 0.8) * smoothstep(0.012, 0.0, abs(up)) * 0.25 * fold;
         }
+    } else if (sc > 9.5) {
+        // prism: a great striped triangle in the sun's colours, a thin frame of light around
+        // it that flares on the kick, and three rays fanning out behind
+        float R = r * 1.25 * (1.0 + 0.035 * u_bass);
+        vec2 c = q - vec2(0.0, 0.10 * R);
+        // distance to an upright triangle: apex at the top, base below
+        float k = 1.7320508;
+        vec2 tq = vec2(abs(c.x) - R, -c.y + R / k);
+        if (tq.x + k * tq.y > 0.0) tq = vec2(tq.x - k * tq.y, -k * tq.x - tq.y) * 0.5;
+        tq.x -= clamp(tq.x, -2.0 * R, 0.0);
+        float d = -length(tq) * sign(tq.y);
+        float yp = (c.y + R * 0.2) / R;
+        vec3 pc = mix(u_sunA, u_sunB, clamp(yp * 0.7 + 0.5, 0.0, 1.0));
+        float bars = yp < 0.0 ? 1.0 : step(0.1 + 0.5 * yp, fract(yp * 6.0 - u_time * 0.22));
+        for (int i = 0; i < 3; i++) {
+            float a = -1.5708 + (float(i) - 1.0) * 0.55 + 0.05 * sin(u_time * 0.4 + float(i));
+            vec2 dv = vec2(cos(a), sin(a));
+            float along = dot(c, dv);
+            float off2 = abs(dot(c, vec2(-dv.y, dv.x)));
+            col += mix(u_sunA, vec3(1.0), 0.3) * 0.10 * smoothstep(0.05 + 0.10 * along, 0.0, off2) * step(0.0, along) * exp(-along * 2.2) * (1.0 + 0.8 * u_mood2.z);
+        }
+        col += u_sunB * (0.22 * exp(-max(d, 0.0) * 14.0) + 0.10 * exp(-max(d, 0.0) * 3.0)) * (1.0 + 0.6 * u_bass) * step(0.0, d);
+        col = mix(col, pc * 0.72, smoothstep(0.003, 0.0, d) * bars);
+        float frame = abs(d - 0.022);
+        col += mix(u_grid, vec3(1.0), 0.4) * smoothstep(0.004 + px, 0.004 - px, frame) * (0.55 + 0.9 * u_mood2.z);
     } else {
         // tide: rank on rank of waves standing up over the horizon under a small moon; they
         // swell with the bass and their crests light on the kick
