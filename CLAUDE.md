@@ -58,6 +58,22 @@ on GitHub, so it always builds and every feature can be reverted with one click.
 - **Starting new work:** `git switch main && git pull --ff-only` first, so the branch starts from
   the latest `main`.
 
+## What the player wants (standing brief, 2026-11-15)
+- **Take the wheel.** "Improve" does not mean keep the current mechanics: overhaul things where
+  that is the better move, and work on every part of the game, not a few areas. Add creative
+  things the player would not have thought of. Do not stop early.
+- **Art direction, in the player's words:** what makes the original striped sun great is that it
+  has a CRT-style texture and faded edges, so it looks right as a flat 2D image, it is synced
+  to the song, and it is always pulsing or moving. So: flat shapes with scan bars cut through
+  them, soft glowing edges, a bass pulse, constant motion, and something on every element that
+  reacts to the music. No shaded surface textures (the player rejected a textured planet and
+  moon), no thin spiky silhouettes, nothing static, nothing flat and unlit (give objects a lit
+  face, a dark side and an outline). Look at a screenshot next to the sunset before shipping.
+- **Sync matters most.** Attacks, the gun and the visuals must all sit on the music. The player
+  notices at once when something drifts off the beat.
+- The plans in `docs/plans/` hold the history: read the newest one's Progress and open items
+  first (`0.5-depth.md` as of this writing).
+
 ## Project basics
 - Rust is not on PATH: `"$USERPROFILE/.cargo/bin/cargo.exe"`.
 - Keep CRLF line endings, use pure-Rust dependencies, and keep level generation deterministic.
