@@ -23,6 +23,7 @@ pub enum Icon {
     Visuals,
     Display,
     Back,
+    Road,
 }
 
 fn a(c: Color, alpha: f32) -> Color {
@@ -121,6 +122,13 @@ pub fn icon(k: Icon, cx: f32, cy: f32, s: f32, col: Color) {
             draw_rectangle_lines(cx - 0.9 * s, cy - 0.75 * s, 1.8 * s, 1.15 * s, th, col);
             poly(&[(-0.4, 0.85), (0.4, 0.85)], cx, cy, s, th, col, false);
             poly(&[(0.0, 0.4), (0.0, 0.85)], cx, cy, s, th, col, false);
+        }
+        Icon::Road => {
+            poly(&[(-0.95, 0.9), (-0.2, -0.9)], cx, cy, s, th, col, false);
+            poly(&[(0.95, 0.9), (0.2, -0.9)], cx, cy, s, th, col, false);
+            poly(&[(0.0, 0.9), (0.0, 0.45)], cx, cy, s, th, col, false);
+            poly(&[(0.0, 0.1), (0.0, -0.25)], cx, cy, s, th, col, false);
+            poly(&[(0.0, -0.5), (0.0, -0.75)], cx, cy, s, th, col, false);
         }
         Icon::Back => {
             poly(&[(0.9, 0.0), (-0.8, 0.0)], cx, cy, s, th, col, false);

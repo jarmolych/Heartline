@@ -2303,18 +2303,159 @@ impl Renderer {
 
     /// Draw the whole scene (background, world, drift visuals) and post-process it to the screen.
     pub fn draw_scene(&mut self, world: &World, dt: f32, idle: f32, progress: f32) {
-        self.scene_pass(world, dt, idle, progress, None);
+        self.scene_pass(world, dt, idle, progress, None, None);
     }
 
     /// Rally mode: the same scene and music layer (`music` has no enemies or bullets), with the
     /// Rally avatars, orbs and end-line ridges in place of the combat entities, then the score HUD.
     /// `me` is the local player (0 = host / left).
     pub fn draw_rally(&mut self, r: &Rally, music: &World, me: usize, dt: f32) {
-        self.scene_pass(music, dt, 0.0, 0.0, Some((r, me & 1)));
+        self.scene_pass(music, dt, 0.0, 0.0, Some((r, me & 1)), None);
         self.draw_rally_hud(r, me & 1);
     }
 
-    fn scene_pass(&mut self, world: &World, dt: f32, idle: f32, progress: f32, rally: Option<(&Rally, usize)>) {
+    /// Highway mode: the menu vista with the road and everything on it drawn into the scene.
+    pub fn draw_runner(&mut self, r: &crate::runner::Runner, music: &World, dt: f32, progress: f32) {
+        self.scene_pass(music, dt, 1.0, progress, None, Some(r));
+    }
+
+    /// The Highway road, in the vista's own perspective: a point `x` across (in road units) and
+    /// `z` ahead (0 = the player's line, 1 = a note that has just appeared) lands where the
+    /// floor grid would put it.
+    fn draw_runner_world(&self, r: &crate::runner::Runner, w: &World) {
+        use crate::runner::{NoteKind, LEAD};
+        const D0: f32 = 1.3;
+        // A gentle perspective: notes are readable for their whole approach.
+        const DZ: f32 = 6.5;
+        const LANE: f32 = 0.22;
+        let pal = &self.pal;
+        let px = self.view.sh / self.view.scale / 1080.0;
+        let proj = |x: f32, z: f32, lift: f32| -> (Vec2, f32) {
+            let d = D0 + z.max(-0.05) * DZ;
+            let s = D0 / d;
+            (self.vs(0.5 + x / d, HZ + (1.05 - HZ) / d - lift * s), s)
+        };
+        let edge = 1.5 * LANE;
+        // the road bed and its lane lines
+        let (nl, _) = proj(-edge, 0.0, 0.0);
+        let (nr, _) = proj(edge, 0.0, 0.0);
+        let (fl, _) = proj(-edge, 1.0, 0.0);
+        let (fr, _) = proj(edge, 1.0, 0.0);
+        quad4([nl, nr, fr, fl], [alpha(pal.bg0, 0.82), alpha(pal.bg0, 0.82), alpha(pal.bg0, 0.45), alpha(pal.bg0, 0.45)]);
+        gl_use_material(&self.add_mat);
+        for k in 0..4 {
+            let x = (k as f32 - 1.5) * LANE;
+            let outer = k == 0 || k == 3;
+            let (a, _) = proj(x, 0.0, 0.0);
+            let (b, _) = proj(x, 1.0, 0.0);
+            let c = if outer { pal.primary } else { pal.grid };
+            seg(a, b, if outer { 3.5 } else { 2.0 } * px, alpha(c, 0.9 + 0.1 * w.beat_pulse), alpha(c, 0.12));
+        }
+        // beat lines rolling toward the player
+        let i0 = r.beats.partition_point(|&b| b < r.t);
+        for (k, &b) in r.beats.iter().enumerate().skip(i0).take_while(|(_, &b)| b < r.t + LEAD) {
+            let z = (b - r.t) / LEAD;
+            let down = k >= r.downbeat && (k - r.downbeat) % 4 == 0;
+            let (a, s) = proj(-edge, z, 0.0);
+            let (c, _) = proj(edge, z, 0.0);
+            line(a, c, (if down { 2.5 } else { 1.2 }) * px * (0.4 + 0.6 * s), alpha(pal.grid, (if down { 0.55 } else { 0.22 }) * (0.3 + 0.7 * s)));
+        }
+        gl_use_default_material();
+        // notes, far to near
+        let lo = r.notes.partition_point(|n| n.t < r.t - 0.12);
+        let hi = r.notes.partition_point(|n| n.t < r.t + LEAD);
+        for n in r.notes[lo..hi].iter().rev() {
+            if n.state == 1 {
+                continue;
+            }
+            let z = (n.t - r.t) / LEAD;
+            let fade = (1.0 - z).clamp(0.0, 1.0).powf(0.35) * if z < 0.0 { 0.5 } else { 1.0 };
+            let x = n.lane as f32 * LANE;
+            match n.kind {
+                NoteKind::Wall => {
+                    let col = if n.state == 2 { WHITE } else { pal.danger };
+                    let (bl, s) = proj(x - 0.44 * LANE, z, 0.0);
+                    let (br, _) = proj(x + 0.44 * LANE, z, 0.0);
+                    let (tl, _) = proj(x - 0.44 * LANE, z, 0.17);
+                    let (tr, _) = proj(x + 0.44 * LANE, z, 0.17);
+                    quad4([bl, br, tr, tl], [alpha(pal.bg0, 0.85 * fade), alpha(pal.bg0, 0.85 * fade), alpha(col, 0.45 * fade), alpha(col, 0.45 * fade)]);
+                    gl_use_material(&self.add_mat);
+                    let wd = 3.0 * px * (0.4 + 0.6 * s);
+                    for (p, q) in [(bl, br), (br, tr), (tr, tl), (tl, bl)] {
+                        line(p, q, wd, alpha(col, fade));
+                    }
+                    // scan bars, like the sun's
+                    for k in 1..4 {
+                        let f = k as f32 / 4.0;
+                        line(bl.lerp(tl, f), br.lerp(tr, f), wd * 0.6, alpha(col, 0.5 * fade));
+                    }
+                    gl_use_default_material();
+                }
+                NoteKind::Bar => {
+                    let col = if n.state == 2 { WHITE } else { pal.accent };
+                    let (gl, s) = proj(-edge, z, 0.0);
+                    let (gr, _) = proj(edge, z, 0.0);
+                    let (a, _) = proj(-edge, z, 0.04);
+                    let (b, _) = proj(edge, z, 0.04);
+                    line(gl, gr, 5.0 * px * s, alpha(pal.bg0, 0.7 * fade));
+                    gl_use_material(&self.add_mat);
+                    line(a, b, 7.0 * px * (0.3 + 0.7 * s), alpha(col, fade));
+                    line(a, b, 2.5 * px * (0.3 + 0.7 * s), alpha(WHITE, fade));
+                    line(gl, a, 3.0 * px * s, alpha(col, 0.8 * fade));
+                    line(gr, b, 3.0 * px * s, alpha(col, 0.8 * fade));
+                    gl_use_default_material();
+                }
+                NoteKind::Gem | NoteKind::Star => {
+                    if n.state == 2 {
+                        continue;
+                    }
+                    let star = n.kind == NoteKind::Star;
+                    let (c, s) = proj(x, z, 0.035 + 0.008 * (self.time * 5.0 + n.t * 9.0).sin());
+                    let rr = (if star { 20.0 } else { 12.0 }) * px * (0.25 + 0.75 * s);
+                    gl_use_material(&self.add_mat);
+                    disc2(c, rr * 2.2, 12, alpha(if star { WHITE } else { pal.accent }, 0.3 * fade), alpha(pal.accent, 0.0));
+                    diamond(c, rr, 2.5 * px * s.max(0.4), alpha(if star { WHITE } else { pal.accent }, fade));
+                    if star {
+                        line(c - vec2(rr * 1.8, 0.0), c + vec2(rr * 1.8, 0.0), 1.5 * px, alpha(WHITE, fade));
+                        line(c - vec2(0.0, rr * 1.8), c + vec2(0.0, rr * 1.8), 1.5 * px, alpha(WHITE, fade));
+                    }
+                    gl_use_default_material();
+                    diamond_fill(c, rr * 0.45, alpha(WHITE, fade));
+                }
+            }
+        }
+        // the craft
+        let hgt = r.height();
+        let cx = r.lane_x * LANE;
+        let (ground, _) = proj(cx, 0.0, 0.0);
+        let bob = 0.006 * w.beat_pulse;
+        let (c, _) = proj(cx, 0.0, 0.03 + bob + 0.15 * hgt);
+        let blink = if r.invuln > 0.0 { 0.4 + 0.6 * ((self.time * 30.0).sin() * 0.5 + 0.5) } else { 1.0 };
+        disc2(ground, 52.0 * px * (1.0 - 0.4 * hgt), 16, alpha(BLACK, 0.6), alpha(BLACK, 0.0));
+        let nose = c + vec2(0.0, -52.0) * px;
+        let l = c + vec2(-42.0, 24.0) * px;
+        let rr = c + vec2(42.0, 24.0) * px;
+        let tail = c + vec2(0.0, 9.0) * px;
+        quad4([nose, rr, tail, l], [alpha(pal.bg0, 0.9 * blink); 4]);
+        gl_use_material(&self.add_mat);
+        let col = mixc(pal.primary, WHITE, r.glow);
+        for (p, q) in [(nose, rr), (rr, tail), (tail, l), (l, nose)] {
+            line(p, q, 3.0 * px, alpha(col, blink));
+        }
+        // engine: a flame that kicks with the beat and stretches in a jump
+        let flame = (18.0 + 26.0 * w.beat_pulse + 30.0 * hgt) * px;
+        seg(tail, tail + vec2(0.0, flame), 9.0 * px, alpha(pal.accent, 0.9 * blink), alpha(pal.secondary, 0.0));
+        if r.glow > 0.02 {
+            arc(c, (40.0 + 50.0 * (1.0 - r.glow)) * px, 0.0, TAU, 3.0 * px, alpha(pal.accent, r.glow));
+        }
+        if r.flash > 0.02 {
+            arc(c, (30.0 + 90.0 * (1.0 - r.flash)) * px, 0.0, TAU, 4.0 * px, alpha(pal.danger, r.flash));
+        }
+        gl_use_default_material();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scene_pass(&mut self, world: &World, dt: f32, idle: f32, progress: f32, rally: Option<(&Rally, usize)>, runner: Option<&crate::runner::Runner>) {
         self.resize_if_needed();
         self.time += dt;
         if self.pal_t < 1.0 {
@@ -2458,6 +2599,9 @@ impl Renderer {
         self.draw_particles(world);
         gl_use_default_material();
         self.draw_texts(world, tscale);
+        if let Some(rn) = runner {
+            self.draw_runner_world(rn, world);
+        }
 
         // ---- bloom ----
         let (hw, hh) = ((self.pw / 2) as f32, (self.ph / 2) as f32);

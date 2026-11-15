@@ -11,6 +11,7 @@ mod net;
 mod rally;
 mod render;
 mod rng;
+mod runner;
 mod synth;
 mod tools;
 mod ui;
@@ -321,6 +322,8 @@ enum Screen {
     Options,
     /// Run setup, reached from PLAY: mode, difficulty, starting track, other sources.
     Setup,
+    /// Highway: the three-lane side mode (`runner.rs`).
+    Runner,
     LiveSetup,
     /// LAN Rally: host/join, lobby, countdown, match and results (`App::lan` holds the stage).
     Lan,
@@ -335,6 +338,19 @@ enum Phase {
     Song,
     Intermission(f32),
     Dying(f32),
+}
+
+/// One Highway run.
+struct RunSession {
+    r: runner::Runner,
+    an: Arc<Analysis>,
+    title: String,
+    /// The cosmetic level events (beats, hits, sections, chimes) that make the vista react.
+    events: Vec<LevelEvent>,
+    cursor: usize,
+    key: String,
+    saved: bool,
+    best: bool,
 }
 
 struct Song {
@@ -371,12 +387,14 @@ struct LiveRun {
 const MENU_MUSIC_GAIN: f32 = 0.5;
 // Rows of the title menu: (icon, label, tooltip).
 const M_PLAY: usize = 0;
-const M_LAN: usize = 1;
-const M_LIBRARY: usize = 2;
-const M_OPTIONS: usize = 3;
-const M_QUIT: usize = 4;
-const MENU_ROWS: [(Icon, &str, &str); 5] = [
+const M_HIGHWAY: usize = 1;
+const M_LAN: usize = 2;
+const M_LIBRARY: usize = 3;
+const M_OPTIONS: usize = 4;
+const M_QUIT: usize = 5;
+const MENU_ROWS: [(Icon, &str, &str); 6] = [
     (Icon::Play, "PLAY", "Set up a run: endless or a single track, the difficulty, the starting song. Live audio and loose files are in there too."),
+    (Icon::Road, "HIGHWAY", "A side mode on this track: race down the grid. Switch lanes around the walls (kicks), jump the bars (snares), collect the gems (hats). Uses the difficulty chosen in PLAY."),
     (Icon::Lan, "LAN RALLY", "A beat-locked paddle duel against a second PC on your network. The host picks the song."),
     (Icon::Library, "MUSIC LIBRARY", "The folder or .m3u playlist that runs and this menu draw from. ENTER picks a folder, SHIFT+ENTER a playlist, or drop either on this row."),
     (Icon::Options, "OPTIONS", "Volumes, sync offset, how hard the scene pulses with the music, windowed or fullscreen."),
@@ -506,6 +524,8 @@ struct App {
     max_bullets: usize,
     max_enemies: usize,
     log: Vec<String>,
+    /// Highway session (Some while `screen == Screen::Runner`).
+    runner: Option<Box<RunSession>>,
     /// LAN Rally session (Some while `screen == Screen::Lan`).
     lan: Option<Box<Lan>>,
 }
@@ -909,7 +929,108 @@ impl App {
         }
     }
 
+    fn save_scores(&self) {
+        if let Some(path) = scores_path() {
+            let mut text = String::new();
+            for (k, v) in &self.scores {
+                text.push_str(&format!("{k}\t{}\t{}\n", v.0, v.1));
+            }
+            let _ = std::fs::write(path, text);
+        }
+    }
+
+    /// Start Highway on the track the menu is playing (it is already analysed).
+    fn start_highway(&mut self) {
+        let Some((path, loaded)) = self.juke.loaded.as_ref().filter(|(p, _)| Some(p) == self.juke.list.get(self.juke.idx)) else {
+            self.say("still reading the music: try again in a moment");
+            return;
+        };
+        let title = track_title(path);
+        let events: Vec<LevelEvent> = loaded.level.events.iter().copied().filter(|e| matches!(e.ev, Ev::Beat { .. } | Ev::Hit { .. } | Ev::Section { .. } | Ev::Chime { .. })).collect();
+        let sess = RunSession {
+            r: runner::Runner::new(&loaded.an, self.diff()),
+            an: loaded.an.clone(),
+            key: format!("{}|{}|HIGHWAY", title.replace(['\t', '\n', '|'], " "), DIFFS[self.diff].1),
+            title,
+            events,
+            cursor: 0,
+            saved: false,
+            best: false,
+        };
+        let (track, mood, bpm) = (loaded.track.clone(), loaded.level.mood, loaded.level.bpm);
+        self.world = World::new(self.diff(), true);
+        self.world.mood = mood;
+        self.world.beat_len = if bpm > 1.0 { 60.0 / bpm } else { 0.5 };
+        self.audio.play_ex(track, 0.0, false, 0.35);
+        self.juke.playing = false;
+        self.juke.last_t = -1.0;
+        self.runner = Some(Box::new(sess));
+        self.screen = Screen::Runner;
+    }
+
+    /// One frame of Highway. Returns 0..1 through the song.
+    fn step_highway(&mut self, dt: f32) -> f32 {
+        let auto = self.args.selftest.is_some();
+        let t = (self.audio.song_time() as f32 - self.offset_ms / 1000.0).max(0.0);
+        let finished = self.audio.finished();
+        let Some(s) = self.runner.as_mut() else {
+            self.to_menu();
+            return 0.0;
+        };
+        while s.cursor < s.events.len() && s.events[s.cursor].at() <= t {
+            let e = s.events[s.cursor];
+            s.cursor += 1;
+            self.world.apply(&e);
+        }
+        let feat = feat_at(&s.an, t);
+        let bp = beat_pos(&s.r.beats, t);
+        self.world.t = t;
+        self.world.update(dt, t, &Input::default(), bp, &feat, s.an.intensity_at(t), false);
+        let (steer, jump) = if auto {
+            s.r.autopilot()
+        } else {
+            let right = is_key_pressed(KeyCode::D) || is_key_pressed(KeyCode::Right);
+            let left = is_key_pressed(KeyCode::A) || is_key_pressed(KeyCode::Left);
+            (right as i32 - left as i32, is_key_pressed(KeyCode::Space) || is_key_pressed(KeyCode::W) || is_key_pressed(KeyCode::Up))
+        };
+        let was_done = s.r.done;
+        s.r.step(dt, t, steer, jump);
+        if finished && t > 3.0 {
+            s.r.done = true;
+        }
+        for fx in s.r.fx.clone() {
+            let (sfx, gain) = match fx {
+                runner::RunFx::Gem => (Sfx::Shard, 0.5),
+                runner::RunFx::Star => (Sfx::Upgrade, 0.6),
+                runner::RunFx::Clear => (Sfx::NoteShot, 0.7),
+                runner::RunFx::Perfect => (Sfx::Shield, 0.6),
+                runner::RunFx::Hit => (Sfx::Hurt, 1.0),
+                runner::RunFx::Jump => (Sfx::Dash, 0.4),
+                runner::RunFx::Lane => (Sfx::UiMove, 0.4),
+            };
+            self.audio.sfx(sfx, gain, s.r.lane_x * 0.6);
+        }
+        if s.r.done && !was_done {
+            if s.r.dead {
+                self.audio.fade_out(0.8);
+            }
+            if !s.saved && !auto {
+                s.saved = true;
+                if s.r.score > 0 && self.scores.get(&s.key).map_or(true, |b| s.r.score > b.0) {
+                    s.best = true;
+                    self.scores.insert(s.key.clone(), (s.r.score, 1));
+                }
+            }
+        }
+        let p = t / s.r.duration.max(0.1);
+        if self.runner.as_ref().is_some_and(|s| s.best && s.saved) {
+            self.save_scores();
+        }
+        p
+    }
+
     fn to_menu(&mut self) {
+        self.runner = None;
         self.juke.playing = false;
         self.audio.stop();
         self.audio.stop_live();
@@ -2681,6 +2802,7 @@ async fn run(args: Args) {
         visuals: 0,
         menu_sel: 0,
         quit_armed: false,
+        runner: None,
         setup_mode: 0,
         mutators: 0,
         mut_col: 0,
@@ -2886,6 +3008,10 @@ async fn run(args: Args) {
                     progress = hud.progress;
                 }
             }
+            Screen::Runner => {
+                idle_target = 1.0;
+                progress = app.step_highway(dt);
+            }
             _ => {
                 // Menu-like screens: drift mode with the menu music; the player can still fly around.
                 let mut input = app.gather_input(false);
@@ -2910,6 +3036,10 @@ async fn run(args: Args) {
         }
 
         // ---- draw ----
+        if app.args.screen == "highway" && app.screen == Screen::Menu && app.juke.loaded.as_ref().is_some_and(|(p, _)| Some(p) == app.juke.list.get(app.juke.idx)) {
+            app.args.screen.clear();
+            app.start_highway();
+        }
         if let Some((scene, weather, floor, prop)) = app.args.mood {
             app.world.mood = level::Mood { scene, weather, floor, prop };
         }
@@ -2929,11 +3059,15 @@ async fn run(args: Args) {
             // Menu-like screens: no player or Heart in the vista, and the music sits lower than in a run.
             let in_run = matches!(app.screen, Screen::Play | Screen::Paused);
             app.rend.menu = !in_run;
-            let duck_to = if in_run { if matches!(app.phase, Phase::Dying(_)) { 0.35 } else { 1.0 } } else { MENU_MUSIC_GAIN };
+            let duck_to = if in_run { if matches!(app.phase, Phase::Dying(_)) { 0.35 } else { 1.0 } } else if app.screen == Screen::Runner { 1.0 } else { MENU_MUSIC_GAIN };
             app.music_gain += (duck_to - app.music_gain).clamp(-1.5 * dt, 1.5 * dt);
             app.audio.set_volume(if app.args.mute { 0.0 } else { app.volume * app.music_gain });
-            app.rend.draw_scene(&app.world, dt, app.idle, progress);
-            app.rend.draw_hud(&app.world, &hud, app.idle);
+            if let (Screen::Runner, Some(s)) = (app.screen, app.runner.as_ref()) {
+                app.rend.draw_runner(&s.r, &app.world, dt, progress);
+            } else {
+                app.rend.draw_scene(&app.world, dt, app.idle, progress);
+                app.rend.draw_hud(&app.world, &hud, app.idle);
+            }
         }
         let pal = app.rend.pal;
         let (sw, sh) = (screen_width(), screen_height());
@@ -2977,6 +3111,7 @@ async fn run(args: Args) {
                         app.screen = Screen::Setup;
                         app.menu_sel = S_START;
                     }
+                    Some(M_HIGHWAY) => app.start_highway(),
                     Some(M_LAN) => app.lan_open(),
                     Some(M_LIBRARY) => {
                         // SHIFT + ENTER picks an .m3u playlist instead of a folder.
@@ -3494,6 +3629,73 @@ async fn run(args: Args) {
                 } else if can_retry && is_key_pressed(KeyCode::Enter) {
                     let q = app.queue.clone();
                     app.start_run(q);
+                }
+            }
+            Screen::Runner => {
+                let mut again = false;
+                let mut leave = is_key_pressed(KeyCode::Escape);
+                if let Some(s) = app.runner.as_ref() {
+                    let r = &s.r;
+                    let m = 34.0 * u;
+                    render::vtext(&format!("{:08}", r.score), m, m + 40.0 * u, 42.0 * u, WHITE, -1);
+                    let mult = 1 + (r.combo / 20).min(7);
+                    render::vtext(&format!("X{mult}"), m, m + 82.0 * u, 26.0 * u, if mult >= 4 { pal.accent } else { pal.primary }, -1);
+                    text_left(&format!("combo {}", r.combo), m + 70.0 * u, m + 80.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.75));
+                    text_shadow(&s.title, sw * 0.5, m + 8.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85), 0);
+                    let (bx, bw) = (sw * 0.5 - 260.0 * u, 520.0 * u);
+                    draw_rectangle(bx, m + 22.0 * u, bw, 3.0 * u, Color::new(1.0, 1.0, 1.0, 0.2));
+                    draw_rectangle(bx, m + 22.0 * u, bw * progress.clamp(0.0, 1.0), 3.0 * u, pal.accent);
+                    render::vtext("HIGHWAY", sw - m, m + 26.0 * u, 26.0 * u, pal.secondary, 1);
+                    for i in 0..r.max_hp {
+                        let (cx, cy) = (m + 16.0 * u + i as f32 * 34.0 * u, sh - m - 14.0 * u);
+                        if i < r.hp {
+                            draw_poly(cx, cy, 4, 12.0 * u, 0.0, pal.primary);
+                        } else {
+                            draw_poly_lines(cx, cy, 4, 12.0 * u, 0.0, 1.5 * u, Color::new(pal.primary.r, pal.primary.g, pal.primary.b, 0.4));
+                        }
+                    }
+                    if r.label_t > 0.0 && !r.done {
+                        let a = (r.label_t / 0.25).min(1.0);
+                        let col = if r.label == "HIT" { pal.danger } else { pal.accent };
+                        render::vtext(r.label, sw * 0.5, sh * 0.70, 40.0 * u, Color::new(col.r, col.g, col.b, a), 0);
+                    }
+                    if r.t < 6.0 && !r.done {
+                        text_shadow("A / D  change lane        SPACE  jump the bars        ESC  menu", sw * 0.5, sh * 0.62, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.8), 0);
+                    }
+                    if r.done {
+                        dim(0.6);
+                        render::vtext(if r.dead { "CRASHED" } else { "ROAD COMPLETE" }, sw * 0.5, sh * 0.24, 80.0 * u, if r.dead { pal.danger } else { pal.accent }, 0);
+                        text_center(&format!("{:08}", r.score), sw * 0.5, sh * 0.36, 96.0 * u, WHITE);
+                        if s.best {
+                            text_center("NEW BEST", sw * 0.5, sh * 0.42, 34.0 * u, pal.accent);
+                        } else if let Some((b, _)) = app.scores.get(&s.key) {
+                            text_center(&format!("best {b}"), sw * 0.5, sh * 0.42, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                        }
+                        let rows = [
+                            ("obstacles cleared", format!("{}", r.cleared)),
+                            ("perfect jumps", format!("{}", r.perfects)),
+                            ("gems", format!("{}", r.gems)),
+                            ("best combo", format!("{}", r.best_combo)),
+                            ("hits taken", format!("{}", r.hits)),
+                        ];
+                        let mut y = sh * 0.50;
+                        for (k, v) in rows {
+                            text_left(k, sw * 0.5 - 230.0 * u, y, 28.0 * u, Color::new(1.0, 1.0, 1.0, 0.75));
+                            let w = text_w(&v, 28.0 * u);
+                            text_left(&v, sw * 0.5 + 230.0 * u - w, y, 28.0 * u, WHITE);
+                            y += 36.0 * u;
+                        }
+                        text_center("ENTER  again        ESC  menu", sw * 0.5, sh * 0.82, 28.0 * u, pal.accent);
+                        again = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
+                    }
+                } else {
+                    leave = true;
+                }
+                if leave {
+                    app.to_menu();
+                } else if again {
+                    app.runner = None;
+                    app.start_highway();
                 }
             }
             Screen::Lan => app.lan_ui(u, sw, sh),
