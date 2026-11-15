@@ -1447,7 +1447,44 @@ struct LanMatch {
     wall0: f64,
 }
 
+/// Name of the inbound firewall rule Heartline offers to add for LAN Rally.
+const FIREWALL_RULE: &str = "Heartline LAN Rally";
+
+/// Ask Windows (read-only, no elevation) whether the Heartline firewall rule exists. The answer
+/// arrives on the channel after `delay` seconds plus however long `netsh` takes.
+fn firewall_check(delay: f32) -> Receiver<bool> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs_f32(delay));
+        let ok = std::process::Command::new("netsh")
+            .args(["advfirewall", "firewall", "show", "rule", &format!("name={FIREWALL_RULE}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let _ = tx.send(ok);
+    });
+    rx
+}
+
+/// Ask Windows to add an inbound allow rule for this exe on Private networks. This starts an
+/// elevated `netsh`, so Windows shows its administrator prompt and nothing changes unless the
+/// player approves it there. Only ever called from the button on the LAN screen.
+fn firewall_allow() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let rule = format!(
+        "advfirewall firewall add rule name=\"{FIREWALL_RULE}\" dir=in action=allow program=\"{}\" profile=private enable=yes",
+        exe.display()
+    );
+    let ps = format!("Start-Process netsh -Verb RunAs -WindowStyle Hidden -ArgumentList '{}'", rule.replace('\'', "''"));
+    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &ps]).spawn();
+}
+
 struct Lan {
+    /// Pending answer of `firewall_check`, and the last answer.
+    firewall: Option<Receiver<bool>>,
+    firewall_ok: Option<bool>,
     host: bool,
     stage: LanStage,
     net: Option<net::Net>,
@@ -1488,6 +1525,9 @@ struct Lan {
 impl Lan {
     fn new(log_dir: Option<&Path>) -> Lan {
         Lan {
+            // Automated runs skip the firewall question.
+            firewall: if log_dir.is_none() { Some(firewall_check(0.0)) } else { None },
+            firewall_ok: if log_dir.is_none() { None } else { Some(true) },
             local: false,
             host: false,
             stage: LanStage::Choose,
@@ -2152,9 +2192,32 @@ impl App {
                 ];
                 let act = menu_list(&items, &mut lan.sel, x, 260.0 * u, u, &self.rend, &self.audio);
                 let fy = sh - 150.0 * u;
-                text_left("The first time you host, Windows Firewall asks whether Heartline may use the network.", x, fy, 22.0 * u, pal.accent);
-                text_left("Allow it on Private networks. Heartline never changes firewall settings itself.", x, fy + 28.0 * u, 22.0 * u, soft);
-                text_left("Both PCs must be on the same network. Ports: TCP 47820 (game), UDP 47821 (finding hosts).", x, fy + 56.0 * u, 22.0 * u, soft);
+                // Hosting needs an inbound firewall rule. Heartline only adds one when asked to
+                // here, and Windows shows its own permission prompt before anything changes.
+                let fw = lan.firewall.as_ref().and_then(|rx| rx.try_recv().ok());
+                if let Some(ok) = fw {
+                    lan.firewall_ok = Some(ok);
+                    lan.firewall = None;
+                }
+                let (fmsg, fcol) = match lan.firewall_ok {
+                    Some(true) => ("Windows Firewall: Heartline is allowed on private networks.", pal.primary),
+                    Some(false) => ("Windows Firewall: no rule for Heartline yet, so other PCs cannot reach a match you host.", pal.accent),
+                    None => ("Windows Firewall: checking...", soft),
+                };
+                text_left(fmsg, x, fy - 62.0 * u, 22.0 * u, fcol);
+                if lan.firewall_ok == Some(false) {
+                    let (hv, click) = ui::button(x, fy - 48.0 * u, 470.0 * u, 44.0 * u, None, "ALLOW HEARTLINE (Windows will ask)", false, false, u, &pal);
+                    if hv {
+                        text_left("Adds one inbound rule for this exe on Private networks. Windows asks for administrator approval first.", x + 490.0 * u, fy - 20.0 * u, 20.0 * u, soft);
+                    }
+                    if click {
+                        firewall_allow();
+                        lan.firewall_ok = None;
+                        lan.firewall = Some(firewall_check(3.0));
+                    }
+                }
+                text_left("Both PCs must be on the same network. Ports: TCP 47820 (game), UDP 47821 (finding hosts).", x, fy + 28.0 * u, 22.0 * u, soft);
+                text_left("If hosts are not found, type the host's IP on the JOIN screen.", x, fy + 56.0 * u, 22.0 * u, soft);
                 match act {
                     Some(0) => self.lan_start_host(&mut lan, None),
                     Some(1) => {
