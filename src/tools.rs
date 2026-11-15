@@ -42,6 +42,8 @@ pub struct SimOut {
     /// (seconds spent, hits taken) per section kind: Calm, Normal, Intense, Drop.
     pub by_kind: [(f32, u32); 4],
     pub heart_broken: Option<f32>,
+    /// Heart phases broken early.
+    pub breaks: u32,
     pub level: u32,
     pub kills: u32,
     pub max_bullets: usize,
@@ -82,16 +84,26 @@ impl DelayedBot {
 
 /// Play `level` with the bot at a fixed 120 Hz step, no window, no audio. On death the bot is
 /// revived so the whole song is measured.
-pub fn simulate(an: &crate::analysis::Analysis, level: &crate::level::Level, diff: f32, bot_delay: f32, song_idx: u32) -> SimOut {
+pub fn simulate(an: &crate::analysis::Analysis, level: &crate::level::Level, diff: f32, bot_delay: f32, song_idx: u32, give: u32) -> SimOut {
     use crate::analysis::SectionKind;
     let mut w = World::new(diff, false);
+    // `--give N`: start with N upgrades (damage first) and N levels, to test a strong build.
+    {
+        use crate::game::UpgradeId as U;
+        const ORDER: [U; 8] = [U::Gain, U::Chord, U::Tempo, U::Gain, U::Pierce, U::Echo, U::Chord, U::Tempo];
+        for k in 0..give as usize {
+            let up = ORDER[k % ORDER.len()];
+            w.player.ups[up as usize] = (w.player.ups[up as usize] + 1).min(up.max());
+        }
+        w.player.level = give;
+    }
     w.begin_song(level.active_secs, song_idx, level.seed);
     w.gun = level.gun.clone();
     w.set_phases(&level.phases);
     w.beat_len = if level.bpm > 1.0 { 60.0 / level.bpm } else { 0.5 };
     let mut bot = DelayedBot::new(bot_delay);
     let dt = 1.0 / 120.0;
-    let mut out = SimOut {
+    let mut out = SimOut { breaks: 0,
         first_death: None,
         deaths: 0,
         hit_times: Vec::new(),
@@ -165,6 +177,7 @@ pub fn simulate(an: &crate::analysis::Analysis, level: &crate::level::Level, dif
     out.by_pat = w.stats.by_pat;
     out.by_tile = w.stats.by_tile;
     out.level = w.player.level;
+    out.breaks = w.stats.phases_broken;
     out.kills = w.stats.kills;
     out.mean_bullets = (bullet_sum / steps.max(1) as f64) as f32;
     out
@@ -203,7 +216,10 @@ fn sim_report(args: &Args) {
             let diff = crate::DIFFS[di].0;
             for run in 0..args.runs.max(1) {
                 let level = crate::level::generate(&loaded.an, args.seed + run as u64, diff);
-                let o = simulate(&loaded.an, &level, diff, delay, args.song_idx);
+                let o = simulate(&loaded.an, &level, diff, delay, args.song_idx, args.give);
+                if args.give > 0 {
+                    println!("    with {} upgrades: {} phase(s) broken early, heart broken at {:?}", args.give, o.breaks, o.heart_broken.map(|t| t as i32));
+                }
                 let per_min = |k: usize| -> String {
                     let (secs, hits) = o.by_kind[k];
                     if secs < 5.0 { "  - ".to_string() } else { format!("{:4.1}", hits as f32 * 60.0 / secs) }
