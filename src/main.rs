@@ -13,6 +13,7 @@ mod render;
 mod rng;
 mod synth;
 mod tools;
+mod ui;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ use game::{Input, UpgradeId, World};
 use level::{Ev, Level, LevelEvent, LiveGen, Timeline};
 use rally::{Character, FxKind, Rally, RallyInput, RallyMusic};
 use render::{text_center, text_left, text_shadow, text_w, HudInfo, Renderer};
+use ui::Icon;
 
 // ---------------------------------------------------------------------------------------------
 // Command line
@@ -292,6 +294,8 @@ enum Screen {
     Menu,
     /// Settings sub-screen of the menu (volumes, sync offset, visuals, display).
     Options,
+    /// Run setup, reached from PLAY: mode, difficulty, starting track, other sources.
+    Setup,
     LiveSetup,
     /// LAN Rally: host/join, lobby, countdown, match and results (`App::lan` holds the stage).
     Lan,
@@ -338,25 +342,49 @@ struct LiveRun {
 
 /// Menu music plays at this fraction of the in-run music volume.
 const MENU_MUSIC_GAIN: f32 = 0.5;
-// Rows of the main menu, and the groups they are drawn in: (first row, heading).
-const M_START: usize = 0;
-const M_SINGLE: usize = 1;
-const M_DIFF: usize = 2;
-const M_LIBRARY: usize = 3;
-const M_FILES: usize = 4;
-const M_FOLDER: usize = 5;
-const M_LIVE: usize = 6;
-const M_LAN: usize = 7;
-const M_OPTIONS: usize = 8;
-const M_QUIT: usize = 9;
-const MENU_GROUPS: [(usize, &str); 4] = [(M_START, "PLAY"), (M_LIBRARY, "MUSIC"), (M_LIVE, "OTHER MODES"), (M_OPTIONS, "")];
-// Rows of the options screen.
+// Rows of the title menu: (icon, label, tooltip).
+const M_PLAY: usize = 0;
+const M_LAN: usize = 1;
+const M_LIBRARY: usize = 2;
+const M_OPTIONS: usize = 3;
+const M_QUIT: usize = 4;
+const MENU_ROWS: [(Icon, &str, &str); 5] = [
+    (Icon::Play, "PLAY", "Set up a run: endless or a single track, the difficulty, the starting song. Live audio and loose files are in there too."),
+    (Icon::Lan, "LAN RALLY", "A beat-locked paddle duel against a second PC on your network. The host picks the song."),
+    (Icon::Library, "MUSIC LIBRARY", "The folder or .m3u playlist that runs and this menu draw from. ENTER picks a folder, SHIFT+ENTER a playlist, or drop either on this row."),
+    (Icon::Options, "OPTIONS", "Volumes, sync offset, how hard the scene pulses with the music, windowed or fullscreen."),
+    (Icon::Quit, "QUIT", "Close Heartline."),
+];
+// Rows of the run setup screen.
+const S_MODE: usize = 0;
+const S_DIFF: usize = 1;
+const S_TRACK: usize = 2;
+const S_START: usize = 3;
+const S_OTHER: usize = 4;
+const SETUP_MODES: [(Icon, &str, &str); 2] = [
+    (Icon::Endless, "ENDLESS RUN", "This track, then the library keeps coming. HP, upgrades and score carry over until you fall."),
+    (Icon::Single, "SINGLE TRACK", "Just this song. You can still carry on into more songs from the results screen."),
+];
+const SETUP_OTHER: [(Icon, &str, &str); 3] = [
+    (Icon::Files, "PLAY FILES...", "Pick audio files or an .m3u playlist and play them in order. Dropping files on the window does the same."),
+    (Icon::Folder, "PLAY FOLDER...", "Pick a folder and play everything in it."),
+    (Icon::Live, "LIVE AUDIO", "Play against whatever your PC is playing right now. The level is built on the fly."),
+];
+// Rows of the options screen: (icon, label, tooltip).
 const O_MUSIC: usize = 0;
 const O_SFX: usize = 1;
 const O_SYNC: usize = 2;
 const O_VISUALS: usize = 3;
+#[allow(dead_code)]
 const O_DISPLAY: usize = 4;
 const O_BACK: usize = 5;
+const OPTION_ROWS: [(Icon, &str, &str); 5] = [
+    (Icon::Music, "MUSIC VOLUME", "How loud the song is in a run. The menu plays it at half of this."),
+    (Icon::Sfx, "EFFECTS VOLUME", "How loud hits, pickups and menu sounds are."),
+    (Icon::Sync, "SYNC OFFSET", "Raise it if attacks land before you hear the beat (soundbar or Bluetooth lag); lower it if they land late."),
+    (Icon::Visuals, "VISUALS", "How hard the scene pulses with the music: zoom punches, flashes, rings. SUBTLE or OFF for comfort."),
+    (Icon::Display, "DISPLAY", "Windowed or borderless fullscreen. F11 switches anywhere."),
+];
 /// How long the menu stays on one track before cross-fading to the next.
 const MENU_TRACK_SECS: f32 = 75.0;
 
@@ -406,6 +434,9 @@ struct App {
     /// Index into `VISUALS`.
     visuals: usize,
     menu_sel: usize,
+    /// Run setup: ENDLESS RUN (true) or SINGLE TRACK, and the focused button of the last row.
+    setup_endless: bool,
+    setup_col: usize,
     dialog: Option<Receiver<Vec<PathBuf>>>,
     /// True when the open folder dialog is choosing the music library (not starting a run).
     dialog_library: bool,
@@ -634,6 +665,47 @@ impl App {
         let first_theme = rng.below(synth::THEME_COUNT);
         lib.extend((0..synth::THEME_COUNT).map(|k| theme_path((first_theme + k) % synth::THEME_COUNT)));
         self.juke = Jukebox { list: lib, idx: 0, loaded: None, loader: None, cursor: 0, last_t: -1.0, playing: false, fails: 0, played: 0.0 };
+    }
+
+    /// What the menu jukebox is playing: (title, hint line).
+    fn juke_title(&self) -> (String, String) {
+        let (title, hint) = match (&self.juke.loaded, self.juke.list.get(self.juke.idx)) {
+            (_, None) => ("no music found".to_string(), "choose MUSIC LIBRARY or drop files on the window".to_string()),
+            (Some((p, l)), Some(want)) if p == want => (l.track.name.clone(), "Q / E  change track".to_string()),
+            (_, Some(want)) => (track_title(want), "reading the music...".to_string()),
+        };
+        let title: String = if title.chars().count() > 38 { title.chars().take(35).chain("...".chars()).collect() } else { title };
+        (title, hint)
+    }
+
+    /// Ask for audio files or a playlist to play (the answer arrives through `dialog`).
+    fn open_files_dialog(&mut self) {
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let mut exts: Vec<&str> = decode::AUDIO_EXTS.to_vec();
+            exts.extend(["m3u", "m3u8"]);
+            let r = rfd::FileDialog::new().set_title("Heartline - choose songs or a playlist").add_filter("Audio and playlists", &exts).pick_files();
+            let _ = tx.send(r.unwrap_or_default());
+        });
+        self.dialog = Some(rx);
+        self.dialog_library = false;
+    }
+
+    /// Ask for a folder to play, or (with `library`) for the music library: a folder, or an
+    /// .m3u playlist when `playlist` is set.
+    fn open_folder_dialog(&mut self, library: bool, playlist: bool) {
+        let (tx, rx) = channel();
+        let start_dir = self.music_dir.clone().map(|d| if d.is_dir() { d } else { d.parent().map(Path::to_path_buf).unwrap_or(d) });
+        std::thread::spawn(move || {
+            let mut d = rfd::FileDialog::new().set_title(if library { "Heartline - choose your music library folder" } else { "Heartline - choose a music folder to play" });
+            if let Some(sd) = start_dir {
+                d = d.set_directory(sd);
+            }
+            let picked = if playlist { d.add_filter("Playlist", &["m3u", "m3u8"]).pick_file() } else { d.pick_folder() };
+            let _ = tx.send(picked.map(|p| vec![p]).unwrap_or_default());
+        });
+        self.dialog = Some(rx);
+        self.dialog_library = library;
     }
 
     fn juke_next(&mut self, dir: i32) {
@@ -873,7 +945,7 @@ impl App {
             }
         }
         // Keep the next track warming up in the background.
-        if self.loader.is_none() && !matches!(self.screen, Screen::Menu | Screen::Options) && self.live.is_none() {
+        if self.loader.is_none() && !matches!(self.screen, Screen::Menu | Screen::Options | Screen::Setup) && self.live.is_none() {
             let want = if self.song.is_some() && self.phase == Phase::Song { self.qi + 1 } else { self.qi };
             let have = self.ready.as_ref().map(|r| r.0);
             if want < self.queue.len() && have != Some(want) {
@@ -2377,6 +2449,8 @@ async fn run(args: Args) {
         fullscreen: false,
         visuals: 0,
         menu_sel: 0,
+        setup_endless: true,
+        setup_col: 0,
         dialog: None,
         dialog_library: false,
         esc_used: false,
@@ -2423,6 +2497,11 @@ async fn run(args: Args) {
     if args.screen == "live" {
         app.audio.refresh_devices();
         app.screen = Screen::LiveSetup;
+    } else if args.screen == "setup" {
+        app.screen = Screen::Setup;
+        app.menu_sel = S_START;
+    } else if args.screen == "options" {
+        app.screen = Screen::Options;
     } else if args.live {
         // Devices are enumerated on the audio thread; give it a moment.
         for _ in 0..60 {
@@ -2471,7 +2550,7 @@ async fn run(args: Args) {
 
         // ---- dropped files / dialog results ----
         let dropped: Vec<PathBuf> = get_dropped_files().into_iter().filter_map(|f| f.path).collect();
-        if !dropped.is_empty() && matches!(app.screen, Screen::Menu | Screen::Options | Screen::Results | Screen::LiveSetup) {
+        if !dropped.is_empty() && matches!(app.screen, Screen::Menu | Screen::Options | Screen::Setup | Screen::Results | Screen::LiveSetup) {
             let as_library = app.screen == Screen::Menu && app.menu_sel == M_LIBRARY && dropped.len() == 1 && (dropped[0].is_dir() || is_playlist(&dropped[0]));
             if as_library {
                 app.music_dir = Some(dropped[0].clone());
@@ -2613,88 +2692,39 @@ async fn run(args: Args) {
                     .unwrap_or("none")
                     .to_string();
                 let n_lib = app.juke.list.len().saturating_sub(synth::THEME_COUNT);
-                // Indexed by the `M_*` constants.
-                let items = vec![
-                    "START RUN   (endless, from this track)".to_string(),
-                    "SINGLE TRACK".to_string(),
-                    format!("DIFFICULTY   {}", DIFFS[app.diff].1),
-                    format!("MUSIC LIBRARY   {lib_name}  ({n_lib} tracks)"),
-                    "PLAY FILES...".to_string(),
-                    "PLAY FOLDER...".to_string(),
-                    "LIVE AUDIO   (what your PC is playing)".to_string(),
-                    "LAN RALLY   (two PCs, same network)".to_string(),
-                    "OPTIONS...".to_string(),
-                    "QUIT".to_string(),
-                ];
-                let mx0 = 110.0 * u;
-                let mut ys: Vec<f32> = Vec::with_capacity(items.len());
-                let mut y = 286.0 * u;
-                for i in 0..items.len() {
-                    if i > 0 && MENU_GROUPS.iter().any(|g| g.0 == i) {
-                        y += 34.0 * u;
-                    }
-                    ys.push(y);
-                    y += 54.0 * u;
+                let mut tip = ui::Tip::default();
+                let items: Vec<(Icon, String)> = MENU_ROWS
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (r.0, if i == M_LIBRARY { format!("{}   {lib_name}  ({n_lib})", r.1) } else { r.1.to_string() }))
+                    .collect();
+                let x = 110.0 * u;
+                let ys: Vec<f32> = (0..items.len()).map(|i| 300.0 * u + i as f32 * 68.0 * u).collect();
+                app.menu_sel = app.menu_sel.min(items.len() - 1);
+                let before = app.menu_sel;
+                let (act, hov) = if app.dialog.is_none() { ui::icon_list(&items, &ys, &mut app.menu_sel, x, 520.0 * u, 58.0 * u, u, &pal, app.rend.time) } else { (None, None) };
+                if act.is_some() {
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                } else if app.menu_sel != before {
+                    app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
                 }
-                for (row, name) in MENU_GROUPS {
-                    if !name.is_empty() {
-                        text_left(&render::spaced(name), mx0 + 2.0 * u, ys[row] - 9.0 * u, 19.0 * u, Color::new(pal.primary.r, pal.primary.g, pal.primary.b, 0.95));
-                    }
-                }
-                let act = if app.dialog.is_none() { menu_list_at(&items, &ys, &mut app.menu_sel, mx0, u, &app.rend, &app.audio) } else { None };
-                // left/right changes the track on the play rows and the tier on DIFFICULTY
-                let dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
-                let track_dirk = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32 + if app.menu_sel <= M_SINGLE { dirk } else { 0 };
+                let shown = hov.unwrap_or(app.menu_sel);
+                tip.set(MENU_ROWS[shown].1, MENU_ROWS[shown].2, hov.is_some());
+                let track_dirk = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32;
                 if track_dirk != 0 && app.dialog.is_none() {
                     app.juke_next(track_dirk);
                 }
-                let mut changed = false;
-                if dirk != 0 && app.menu_sel == M_DIFF {
-                    app.diff = ((app.diff as i32 + dirk).rem_euclid(DIFFS.len() as i32)) as usize;
-                    changed = true;
-                }
                 match act {
-                    Some(M_START) => app.start_from_juke(0, true),
-                    Some(M_SINGLE) => app.start_from_juke(0, false),
-                    Some(M_DIFF) => {
-                        app.diff = (app.diff + 1) % DIFFS.len();
-                        changed = true;
-                    }
-                    Some(M_FILES) => {
-                        let (tx, rx) = channel();
-                        std::thread::spawn(move || {
-                            let exts: Vec<&str> = decode::AUDIO_EXTS.to_vec();
-                            let mut exts = exts;
-                            exts.extend(["m3u", "m3u8"]);
-                            let r = rfd::FileDialog::new().set_title("Heartline - choose songs or a playlist").add_filter("Audio and playlists", &exts).pick_files();
-                            let _ = tx.send(r.unwrap_or_default());
-                        });
-                        app.dialog = Some(rx);
-                        app.dialog_library = false;
-                    }
-                    Some(M_FOLDER) | Some(M_LIBRARY) => {
-                        let library = act == Some(M_LIBRARY);
-                        // SHIFT + ENTER on MUSIC LIBRARY picks an .m3u playlist instead of a folder.
-                        let playlist = library && (is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift));
-                        let (tx, rx) = channel();
-                        let start_dir = app.music_dir.clone().map(|d| if d.is_dir() { d } else { d.parent().map(Path::to_path_buf).unwrap_or(d) });
-                        std::thread::spawn(move || {
-                            let mut d = rfd::FileDialog::new().set_title(if library { "Heartline - choose your music library folder" } else { "Heartline - choose a music folder to play" });
-                            if let Some(sd) = start_dir {
-                                d = d.set_directory(sd);
-                            }
-                            let picked = if playlist { d.add_filter("Playlist", &["m3u", "m3u8"]).pick_file() } else { d.pick_folder() };
-                            let _ = tx.send(picked.map(|p| vec![p]).unwrap_or_default());
-                        });
-                        app.dialog = Some(rx);
-                        app.dialog_library = library;
-                    }
-                    Some(M_LIVE) => {
-                        app.audio.refresh_devices();
-                        app.screen = Screen::LiveSetup;
-                        app.menu_sel = 0;
+                    Some(M_PLAY) => {
+                        app.screen = Screen::Setup;
+                        app.menu_sel = S_START;
                     }
                     Some(M_LAN) => app.lan_open(),
+                    Some(M_LIBRARY) => {
+                        // SHIFT + ENTER picks an .m3u playlist instead of a folder.
+                        let playlist = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+                        app.open_folder_dialog(true, playlist);
+                    }
                     Some(M_OPTIONS) => {
                         app.screen = Screen::Options;
                         app.menu_sel = 0;
@@ -2702,124 +2732,273 @@ async fn run(args: Args) {
                     Some(M_QUIT) => break,
                     _ => {}
                 }
+                let (title, hint) = app.juke_title();
+                app.rend.draw_now_playing(sw - 700.0 * u, 110.0 * u, 590.0 * u, u, &app.world, &title, &hint, progress);
+                let hy = sh - 60.0 * u;
+                text_shadow("WASD move   mouse aim   SPACE dash   F auto-fire   ESC / P pause   F11 fullscreen", 110.0 * u, hy + 28.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.55), -1);
+                tip.draw(110.0 * u, hy, u, &pal);
+                if app.dialog.is_some() {
+                    text_shadow("waiting for the file dialog...", sw * 0.5, sh * 0.5, 28.0 * u, pal.accent, 0);
+                }
+            }
+            Screen::Setup => {
+                dim(0.62);
+                let x = 110.0 * u;
+                let w = 760.0 * u;
+                render::vtext("RUN SETUP", x, 130.0 * u, 64.0 * u, WHITE, -1);
+                let mut tip = ui::Tip::default();
+                let busy = app.dialog.is_some();
+                let nd = DIFFS.len();
+                let mut dirk = 0i32;
+                if !busy {
+                    let dv = is_key_pressed(KeyCode::Down) as i32 - is_key_pressed(KeyCode::Up) as i32;
+                    if dv != 0 {
+                        app.menu_sel = (app.menu_sel as i32 + dv).rem_euclid(5) as usize;
+                        app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
+                    }
+                    dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
+                }
+                let row = app.menu_sel.min(S_OTHER);
+                let mut changed = false;
+                let mut pick = false;
+
+                // ---- mode: both choices stay visible ----
+                ui::heading("RUN", x, 212.0 * u, u, &pal);
+                let modes: Vec<(Option<Icon>, &str)> = SETUP_MODES.iter().map(|m| (Some(m.0), m.1)).collect();
+                let cur = if app.setup_endless { 0 } else { 1 };
+                let (click, hov) = ui::segments(x, 224.0 * u, w, 62.0 * u, &modes, cur, row == S_MODE, u, &pal);
+                if let Some(i) = hov {
+                    tip.set(SETUP_MODES[i].1, SETUP_MODES[i].2, true);
+                } else if row == S_MODE {
+                    tip.set(SETUP_MODES[cur].1, SETUP_MODES[cur].2, false);
+                }
+                if let Some(i) = click.filter(|_| !busy) {
+                    app.setup_endless = i == 0;
+                    app.menu_sel = S_MODE;
+                    pick = true;
+                }
+                if row == S_MODE && dirk != 0 {
+                    app.setup_endless = !app.setup_endless;
+                    pick = true;
+                }
+
+                // ---- difficulty: one tile per tier, the hovered or chosen one is described ----
+                ui::heading("DIFFICULTY", x, 334.0 * u, u, &pal);
+                let gap = 12.0 * u;
+                let ts = (w - gap * (nd as f32 - 1.0)) / nd as f32;
+                let ty = 346.0 * u;
+                let mut shown = app.diff;
+                for i in 0..nd {
+                    let (hv, click) = ui::diff_tile(x + i as f32 * (ts + gap), ty, ts, i, nd, i == app.diff, row == S_DIFF, u, &pal);
+                    if hv {
+                        shown = i;
+                        tip.set(DIFFS[i].1, DIFFS[i].2, true);
+                    }
+                    if click && !busy {
+                        app.diff = i;
+                        app.menu_sel = S_DIFF;
+                        changed = true;
+                        pick = true;
+                    }
+                }
+                if row == S_DIFF && dirk != 0 {
+                    app.diff = (app.diff as i32 + dirk).rem_euclid(nd as i32) as usize;
+                    shown = app.diff;
+                    changed = true;
+                    pick = true;
+                }
+                let dcol = ui::diff_color(shown, nd, &pal);
+                text_left(DIFFS[shown].1, x, ty + ts + 44.0 * u, 34.0 * u, dcol);
+                text_left(&format!("{} / {}", shown + 1, nd), x + text_w(DIFFS[shown].1, 34.0 * u) + 18.0 * u, ty + ts + 44.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
+                text_left(DIFFS[shown].2, x, ty + ts + 74.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85));
+                if row == S_DIFF {
+                    tip.set(DIFFS[app.diff].1, DIFFS[app.diff].2, false);
+                }
+
+                // ---- starting track ----
+                let ky = 590.0 * u;
+                ui::heading("STARTING TRACK", x, ky - 12.0 * u, u, &pal);
+                let (title, _) = app.juke_title();
+                let bw = 58.0 * u;
+                let (hl, cl) = ui::button(x, ky, bw, 56.0 * u, None, "<", false, false, u, &pal);
+                let (hr, cr) = ui::button(x + w - bw, ky, bw, 56.0 * u, None, ">", false, false, u, &pal);
+                let hm = ui::hover(x + bw, ky, w - 2.0 * bw, 56.0 * u);
+                draw_rectangle(x + bw + 8.0 * u, ky, w - 2.0 * bw - 16.0 * u, 56.0 * u, Color::new(0.0, 0.0, 0.05, 0.5));
+                if row == S_TRACK {
+                    draw_rectangle(x - 10.0 * u, ky, 3.0 * u, 56.0 * u, pal.accent);
+                }
+                text_center(&title, x + w * 0.5, ky + 37.0 * u, 26.0 * u, WHITE);
+                let mut track_dirk = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32;
+                if row == S_TRACK {
+                    track_dirk += dirk;
+                }
+                if !busy {
+                    track_dirk += cr as i32 - cl as i32;
+                }
+                if track_dirk != 0 && !busy {
+                    app.juke_next(track_dirk.signum());
+                    if cl || cr {
+                        app.menu_sel = S_TRACK;
+                    }
+                }
+                if hl || hr || hm || row == S_TRACK {
+                    tip.set("STARTING TRACK", "The song the run starts on: the one the menu is playing. Q / E or the arrows step through your library.", hl || hr || hm);
+                }
+
+                // ---- start ----
+                let (hs, cs) = ui::button(x, 690.0 * u, 320.0 * u, 68.0 * u, Some(Icon::Play), "START", row == S_START, true, u, &pal);
+                if hs || row == S_START {
+                    tip.set("START", if app.setup_endless { SETUP_MODES[0].2 } else { SETUP_MODES[1].2 }, hs);
+                }
+                text_left("ENTER  start        ESC  back", x + 350.0 * u, 732.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+
+                // ---- other things to play ----
+                ui::heading("OR PLAY SOMETHING ELSE", x, 814.0 * u, u, &pal);
+                let ow = (w - 2.0 * gap) / 3.0;
+                let mut other: Option<usize> = None;
+                if row == S_OTHER && dirk != 0 {
+                    app.setup_col = (app.setup_col as i32 + dirk).rem_euclid(3) as usize;
+                    pick = true;
+                }
+                for (i, o) in SETUP_OTHER.iter().enumerate() {
+                    let focus = row == S_OTHER && app.setup_col == i;
+                    let (hv, click) = ui::button(x + i as f32 * (ow + gap), 826.0 * u, ow, 54.0 * u, Some(o.0), o.1, focus, false, u, &pal);
+                    if hv || focus {
+                        tip.set(o.1, o.2, hv);
+                    }
+                    if click && !busy {
+                        other = Some(i);
+                    }
+                }
+                let enter = !busy && (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter));
+                if enter && row == S_OTHER {
+                    other = Some(app.setup_col);
+                }
+                let start = (cs && !busy) || (enter && row != S_OTHER);
+                if pick {
+                    app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
+                }
                 if changed {
                     app.save_settings();
                 }
-                // Now-playing card
-                let (title, hint) = match (&app.juke.loaded, app.juke.list.get(app.juke.idx)) {
-                    (_, None) => ("no music found".to_string(), "choose MUSIC LIBRARY or drop files on the window".to_string()),
-                    (Some((p, l)), Some(want)) if p == want => (l.track.name.clone(), "Q / E  change track        ENTER  play it".to_string()),
-                    (_, Some(want)) => (track_title(want), "reading the music...".to_string()),
-                };
-                let title: String = if title.chars().count() > 38 { title.chars().take(37).chain("…".chars()).collect() } else { title };
-                app.rend.draw_now_playing(sw - 700.0 * u, 110.0 * u, 590.0 * u, u, &app.world, &title, &hint, progress);
-                let hy = sh - 60.0 * u;
-                let help = match app.menu_sel {
-                    M_DIFF => DIFFS[app.diff].2,
-                    M_LAN => "LAN RALLY: a beat-locked paddle duel against a second PC on your network; the host picks the song",
-                    M_LIBRARY => "MUSIC LIBRARY: ENTER picks a folder, SHIFT+ENTER an .m3u playlist (or drop either here). Runs and the menu draw from it",
-                    M_START => "START RUN: this track, then the library keeps coming. HP, upgrades and score carry over until you fall",
-                    M_SINGLE => "SINGLE TRACK: just this song; you can still carry on into more songs from the results screen",
-                    M_OPTIONS => "OPTIONS: volumes, sync offset, visual intensity, display",
-                    _ => "drop audio files or folders on the window to play them",
-                };
-                text_shadow(help, 110.0 * u, hy, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.8), -1);
-                text_shadow("WASD move   mouse aim   SPACE dash   F auto-fire   ESC / P pause   F11 fullscreen", 110.0 * u, hy + 28.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.55), -1);
-                if app.dialog.is_some() {
+                if start {
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                    let endless = app.setup_endless;
+                    app.start_from_juke(0, endless);
+                } else if let Some(i) = other {
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                    match i {
+                        0 => app.open_files_dialog(),
+                        1 => app.open_folder_dialog(false, false),
+                        _ => {
+                            app.audio.refresh_devices();
+                            app.screen = Screen::LiveSetup;
+                            app.menu_sel = 0;
+                        }
+                    }
+                } else if is_key_pressed(KeyCode::Escape) && !busy {
+                    app.screen = Screen::Menu;
+                    app.menu_sel = M_PLAY;
+                }
+                tip.draw(x, sh - 60.0 * u, u, &pal);
+                if busy {
                     text_shadow("waiting for the file dialog...", sw * 0.5, sh * 0.5, 28.0 * u, pal.accent, 0);
                 }
             }
             Screen::Options => {
                 dim(0.5);
                 let x = 110.0 * u;
-                let y0 = 256.0 * u;
                 render::vtext("OPTIONS", x, 130.0 * u, 64.0 * u, WHITE, -1);
-                // Indexed by the `O_*` constants.
-                let items = vec![
-                    "MUSIC VOLUME".to_string(),
-                    "EFFECTS VOLUME".to_string(),
-                    format!("SYNC OFFSET   {:+.0} ms", app.offset_ms),
-                    format!("VISUALS   {}", VISUALS[app.visuals].1),
-                    format!("DISPLAY   {}", if app.fullscreen { "BORDERLESS FULLSCREEN" } else { "WINDOWED" }),
-                    "BACK".to_string(),
-                ];
-                let act = menu_list(&items, &mut app.menu_sel, x, y0, u, &app.rend, &app.audio);
-                // Volume rows are sliders: drag with the mouse, or Left / Right.
-                let act = match act {
-                    Some(O_MUSIC) | Some(O_SFX) => None,
-                    a => a,
-                };
-                let mut slid = false;
-                for (row, is_sfx) in [(O_MUSIC, false), (O_SFX, true)] {
-                    let by = y0 + row as f32 * 54.0 * u;
-                    let (tx, tw) = (x + 262.0 * u, 176.0 * u);
-                    let ty = by + 23.0 * u;
-                    let v = if is_sfx { app.sfx_volume } else { app.volume };
-                    let on = app.menu_sel == row;
-                    let col = if on { pal.accent } else { pal.primary };
-                    draw_rectangle(tx, ty - 1.5 * u, tw, 3.0 * u, Color::new(1.0, 1.0, 1.0, 0.22));
-                    draw_rectangle(tx, ty - 1.5 * u, tw * v, 3.0 * u, col);
-                    draw_circle(tx + tw * v, ty, if on { 8.0 } else { 6.0 } * u, WHITE);
-                    draw_circle_lines(tx + tw * v, ty, if on { 11.0 } else { 9.0 } * u, 1.5 * u, col);
-                    text_left(&format!("{:.0}%", v * 100.0), tx + tw + 20.0 * u, by + 31.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85));
-                    let (mx, my) = mouse_position();
-                    if is_mouse_button_down(MouseButton::Left) && my >= by && my <= by + 46.0 * u && mx >= tx - 14.0 * u && mx <= tx + tw + 14.0 * u {
-                        let nv = (((mx - tx) / tw).clamp(0.0, 1.0) * 20.0).round() / 20.0;
-                        if (nv - v).abs() > 0.001 {
-                            if is_sfx { app.sfx_volume = nv } else { app.volume = nv }
-                            app.menu_sel = row;
-                            slid = true;
+                let mut tip = ui::Tip::default();
+                let dv = is_key_pressed(KeyCode::Down) as i32 - is_key_pressed(KeyCode::Up) as i32;
+                if dv != 0 {
+                    app.menu_sel = (app.menu_sel as i32 + dv).rem_euclid(O_BACK as i32 + 1) as usize;
+                    app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
+                }
+                let dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
+                let (cx, cw, rh) = (x + 330.0 * u, 430.0 * u, 56.0 * u);
+                let mut changed = false;
+                let old_sfx = app.sfx_volume;
+                for (r, row) in OPTION_ROWS.iter().enumerate() {
+                    let y = 250.0 * u + r as f32 * 74.0 * u;
+                    let hv = ui::hover(x, y, 330.0 * u + cw + 110.0 * u, rh);
+                    if hv && mouse_delta_position() != Vec2::ZERO {
+                        app.menu_sel = r;
+                    }
+                    let focus = app.menu_sel == r;
+                    let col = if focus { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.72) };
+                    ui::icon(row.0, x + 26.0 * u, y + rh * 0.5, 15.0 * u, if focus { pal.accent } else { col });
+                    text_left(row.1, x + 60.0 * u, y + rh * 0.5 + 9.0 * u, 26.0 * u, col);
+                    if hv || focus {
+                        tip.set(row.1, row.2, hv);
+                    }
+                    let k = if focus { dirk } else { 0 };
+                    let note = |s: &str| text_left(s, cx + cw + 22.0 * u, y + rh * 0.5 + 8.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85));
+                    match r {
+                        O_MUSIC | O_SFX => {
+                            let v = if r == O_SFX { app.sfx_volume } else { app.volume };
+                            let mut nv = (v + 0.1 * k as f32).clamp(0.0, 1.0);
+                            if let Some(d) = ui::slider(cx, y, cw, rh, v, focus, u, &pal) {
+                                nv = (d * 20.0).round() / 20.0;
+                            }
+                            if (nv - v).abs() > 0.001 {
+                                if r == O_SFX { app.sfx_volume = nv } else { app.volume = nv }
+                                changed = true;
+                            }
+                            note(&format!("{:.0}%", nv * 100.0));
+                        }
+                        O_SYNC => {
+                            let v = app.offset_ms;
+                            let mut nv = (v + 10.0 * k as f32).clamp(-100.0, 300.0);
+                            if let Some(d) = ui::slider(cx, y, cw, rh, (v + 100.0) / 400.0, focus, u, &pal) {
+                                nv = ((d * 400.0 - 100.0) / 10.0).round() * 10.0;
+                            }
+                            if (nv - v).abs() > 0.5 {
+                                app.offset_ms = nv;
+                                changed = true;
+                            }
+                            note(&format!("{:+.0} ms", nv));
+                        }
+                        O_VISUALS => {
+                            let labels: Vec<(Option<Icon>, &str)> = VISUALS.iter().map(|v| (None, v.1)).collect();
+                            let (click, _) = ui::segments(cx, y, cw, rh, &labels, app.visuals, focus, u, &pal);
+                            let nv = click.unwrap_or(((app.visuals as i32 + k).rem_euclid(VISUALS.len() as i32)) as usize);
+                            if nv != app.visuals {
+                                app.visuals = nv;
+                                changed = true;
+                            }
+                        }
+                        _ => {
+                            let (click, _) = ui::segments(cx, y, cw, rh, &[(None, "WINDOWED"), (None, "BORDERLESS")], app.fullscreen as usize, focus, u, &pal);
+                            let nv = match click {
+                                Some(i) => i == 1,
+                                None => app.fullscreen ^ (k != 0),
+                            };
+                            if nv != app.fullscreen {
+                                app.fullscreen = nv;
+                                display::set_borderless(nv);
+                                changed = true;
+                            }
                         }
                     }
                 }
-                let dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
-                let mut changed = slid;
-                if dirk != 0 {
-                    changed = true;
-                    match app.menu_sel {
-                        O_MUSIC => app.volume = (app.volume + 0.1 * dirk as f32).clamp(0.0, 1.0),
-                        O_SFX => app.sfx_volume = (app.sfx_volume + 0.1 * dirk as f32).clamp(0.0, 1.0),
-                        O_SYNC => app.offset_ms = (app.offset_ms + 10.0 * dirk as f32).clamp(-100.0, 300.0),
-                        O_VISUALS => app.visuals = ((app.visuals as i32 + dirk).rem_euclid(VISUALS.len() as i32)) as usize,
-                        _ => changed = false,
-                    }
+                let by = 250.0 * u + O_BACK as f32 * 74.0 * u + 10.0 * u;
+                let (hb, cb) = ui::button(x, by, 240.0 * u, rh, Some(Icon::Back), "BACK", app.menu_sel == O_BACK, false, u, &pal);
+                if hb || app.menu_sel == O_BACK {
+                    tip.set("BACK", "Return to the menu. ESC does the same. Settings are saved as you change them.", hb);
                 }
-                let mut back = is_key_pressed(KeyCode::Escape);
-                match act {
-                    Some(O_SYNC) => {
-                        app.offset_ms = if app.offset_ms >= 295.0 { -100.0 } else { app.offset_ms + 10.0 };
-                        changed = true;
-                    }
-                    Some(O_VISUALS) => {
-                        app.visuals = (app.visuals + 1) % VISUALS.len();
-                        changed = true;
-                    }
-                    Some(O_DISPLAY) => {
-                        app.fullscreen = !app.fullscreen;
-                        display::set_borderless(app.fullscreen);
-                        changed = true;
-                    }
-                    Some(O_BACK) => back = true,
-                    _ => {}
-                }
+                let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
                 if changed {
                     let mute = app.args.mute;
                     app.audio.set_sfx_volume(if mute { 0.0 } else { app.sfx_volume });
-                    if app.menu_sel == O_SFX && !is_mouse_button_down(MouseButton::Left) || (slid && is_mouse_button_pressed(MouseButton::Left)) {
+                    if (app.sfx_volume - old_sfx).abs() > 0.001 {
                         app.audio.sfx(Sfx::Shard, 1.0, 0.0);
                     }
                     app.save_settings();
                 }
-                let help = match app.menu_sel {
-                    O_MUSIC => "MUSIC VOLUME: drag the slider or use LEFT / RIGHT. The menu plays quieter than a run",
-                    O_SFX => "EFFECTS VOLUME: drag the slider or use LEFT / RIGHT",
-                    O_SYNC => "SYNC OFFSET: raise it if attacks land before you hear the beat (soundbar / Bluetooth lag), lower it if they land late",
-                    O_VISUALS => "VISUALS: how hard the scene pulses with the music (zoom punches, flashes, rings). SUBTLE or OFF for comfort",
-                    O_DISPLAY => "DISPLAY: windowed or borderless fullscreen (F11 anywhere)",
-                    _ => "ESC  back to the menu",
-                };
-                text_shadow(help, x, sh - 60.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.8), -1);
-                if back {
+                tip.draw(x, sh - 60.0 * u, u, &pal);
+                if cb || is_key_pressed(KeyCode::Escape) || (enter && app.menu_sel == O_BACK) {
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
                     app.screen = Screen::Menu;
                     app.menu_sel = M_OPTIONS;
                 }
@@ -2913,8 +3092,8 @@ async fn run(args: Args) {
                     app.start_live();
                 }
                 if is_key_pressed(KeyCode::Escape) {
-                    app.screen = Screen::Menu;
-                    app.menu_sel = M_LIVE;
+                    app.screen = Screen::Setup;
+                    app.menu_sel = S_OTHER;
                 }
             }
             Screen::Paused => {
