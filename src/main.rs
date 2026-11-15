@@ -395,7 +395,22 @@ const M_CODEX: usize = 3;
 const M_LIBRARY: usize = 4;
 const M_OPTIONS: usize = 5;
 const M_QUIT: usize = 6;
-const CODEX_TABS: [&str; 5] = ["THE HEART", "ENEMIES", "UPGRADES", "THE MUSIC", "RECORDS"];
+const CODEX_TABS: [&str; 6] = ["THE HEART", "ENEMIES", "UPGRADES", "THE MUSIC", "RECORDS", "MILESTONES"];
+/// Milestones: (id kept in the scores file, name, how to earn it).
+const MILESTONES: [(&str, &str, &str); 12] = [
+    ("heart", "HEARTBREAKER", "Break a Heart."),
+    ("depth3", "GOING DEEPER", "Reach depth 3 in one run."),
+    ("depth5", "THE ABYSS", "Reach depth 5 in one run."),
+    ("clean", "UNTOUCHED", "Clear a track without taking a hit."),
+    ("graze", "PAPER THIN", "Graze 150 bullets in one run."),
+    ("breaker", "IMPATIENT", "Break five Heart phases early in one run."),
+    ("resonant", "IN TUNE", "Set resonance ringing three times in one run."),
+    ("glass", "GLASS CANNON", "Clear a track with the GLASS mutator on."),
+    ("flatline", "FLATLINER", "Clear a track on FLATLINE."),
+    ("dodge", "PACIFIST", "Finish a track in DODGE."),
+    ("road", "ROAD WARRIOR", "Finish a Highway road with rank A or S."),
+    ("jumps", "PERFECT TIMING", "Land 20 perfect jumps in one Highway road."),
+];
 const CODEX_HEART: [(&str, &str); 10] = [
     ("CHARGE", "While the body of the Heart can be hurt, a charge appears far from it. Carry it into the ring around the Heart to take a fifth of the phase at once. A hit knocks it loose."),
     ("SHELL", "Calm sections. The Heart is immune: break the three shield nodes circling the arena."),
@@ -972,6 +987,41 @@ impl App {
         }
     }
 
+    /// Earn a milestone (once): it is kept with the scores and announced.
+    fn earn(&mut self, id: &str) {
+        let key = format!("ACH|{id}");
+        if self.scores.contains_key(&key) || self.args.selftest.is_some() {
+            return;
+        }
+        self.scores.insert(key, (1, 0));
+        self.save_scores();
+        if let Some(m) = MILESTONES.iter().find(|m| m.0 == id) {
+            self.say(format!("MILESTONE   {}", m.1));
+            self.audio.sfx(Sfx::Upgrade, 0.9, 0.0);
+        }
+    }
+
+    /// At the end of a run: which milestones did it earn?
+    fn check_milestones(&mut self) {
+        let st = self.world.stats;
+        let cleared = st.songs >= 1;
+        let depth = self.world.song_idx + 1;
+        let mut got: Vec<&str> = Vec::new();
+        if st.hearts_broken >= 1 { got.push("heart"); }
+        if depth >= 3 { got.push("depth3"); }
+        if depth >= 5 { got.push("depth5"); }
+        if cleared && st.hits == 0 { got.push("clean"); }
+        if st.grazes >= 150 { got.push("graze"); }
+        if st.phases_broken >= 5 { got.push("breaker"); }
+        if st.resonances >= 3 { got.push("resonant"); }
+        if cleared && self.world.base_mods & game::MOD_GLASS != 0 { got.push("glass"); }
+        if cleared && self.diff == DIFFS.len() - 1 { got.push("flatline"); }
+        if cleared && self.world.pacifist { got.push("dodge"); }
+        for id in got {
+            self.earn(id);
+        }
+    }
+
     fn save_scores(&self) {
         if let Some(path) = scores_path() {
             let mut text = String::new();
@@ -1037,6 +1087,7 @@ impl App {
             (right as i32 - left as i32, is_key_pressed(KeyCode::Space) || is_key_pressed(KeyCode::W) || is_key_pressed(KeyCode::Up))
         };
         let was_done = s.r.done;
+        let mut earned: Vec<&str> = Vec::new();
         s.r.step(dt, t, steer, jump);
         if finished && t > 3.0 {
             s.r.done = true;
@@ -1058,6 +1109,12 @@ impl App {
                 self.audio.fade_out(0.8);
             }
             if !s.saved && !auto {
+                if matches!(s.r.rank(), "S" | "A") {
+                    earned.push("road");
+                }
+                if s.r.perfects >= 20 {
+                    earned.push("jumps");
+                }
                 s.saved = true;
                 if s.r.score > 0 && self.scores.get(&s.key).map_or(true, |b| s.r.score > b.0) {
                     s.best = true;
@@ -1068,6 +1125,9 @@ impl App {
         let p = t / s.r.duration.max(0.1);
         if self.runner.as_ref().is_some_and(|s| s.best && s.saved) {
             self.save_scores();
+        }
+        for id in earned {
+            self.earn(id);
         }
         p
     }
@@ -1105,6 +1165,7 @@ impl App {
         if self.args.selftest.is_some() || self.run_key.is_empty() || self.live.is_some() {
             return;
         }
+        self.check_milestones();
         let (score, depth) = (self.world.score, self.world.song_idx + 1);
         if self.scores.get(&self.run_key).map_or(true, |b| score > b.0) && score > 0 {
             self.run_best = true;
@@ -3812,8 +3873,23 @@ async fn run(args: Args) {
                         }
                     }
                     3 => CODEX_MUSIC.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 66.0)),
+                    5 => {
+                        let have = MILESTONES.iter().filter(|m| app.scores.contains_key(&format!("ACH|{}", m.0))).count();
+                        text_left(&format!("{have} of {} earned", MILESTONES.len()), x, y0 - 34.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                        for (k, m) in MILESTONES.iter().enumerate() {
+                            let y = y0 + k as f32 * 54.0 * u;
+                            let done = app.scores.contains_key(&format!("ACH|{}", m.0));
+                            let c = if done { pal.accent } else { Color::new(1.0, 1.0, 1.0, 0.35) };
+                            draw_poly_lines(x + 14.0 * u, y - 8.0 * u, 4, 13.0 * u, 0.0, 2.0 * u, c);
+                            if done {
+                                draw_poly(x + 14.0 * u, y - 8.0 * u, 4, 7.0 * u, 0.0, c);
+                            }
+                            text_left(m.1, x + 44.0 * u, y, 26.0 * u, c);
+                            text_left(m.2, x + 360.0 * u, y, 22.0 * u, if done { soft } else { Color::new(1.0, 1.0, 1.0, 0.5) });
+                        }
+                    }
                     _ => {
-                        let mut rows: Vec<(&String, &(u64, u32))> = app.scores.iter().collect();
+                        let mut rows: Vec<(&String, &(u64, u32))> = app.scores.iter().filter(|(k, _)| !k.starts_with("ACH|")).collect();
                         rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
                         if rows.is_empty() {
                             text_left("No scores yet. Finish a run or a Highway road and it will be kept here.", x, y0, 24.0 * u, soft);
