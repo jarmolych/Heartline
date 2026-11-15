@@ -3255,6 +3255,17 @@ impl Renderer {
         arc(Vec2::ZERO, HEART_R, 0.0, TAU, 2.0, alpha(pal.primary, 0.4 * lv));
         let top = self.pj(Vec2::ZERO, HEART_Z - 20.0);
         seg(Vec2::ZERO, top, 2.0, alpha(pal.primary, 0.35 * lv), alpha(pal.primary, 0.0));
+        // The beat ring: every pulse is timed to cross it on a beat. It lights with the beat and
+        // carries a tick for each beat of the bar.
+        let br = BEAT_RING_R;
+        arc(Vec2::ZERO, br, 0.0, TAU, 1.5, alpha(WHITE, (0.06 + 0.22 * w.beat_pulse) * lv));
+        arc(Vec2::ZERO, br, 0.0, TAU, 5.0, alpha(pal.primary, 0.10 * w.beat_pulse * lv));
+        for k in 0..16 {
+            let a = k as f32 * TAU / 16.0;
+            let long = k % 4 == 0;
+            let d = dir(a);
+            line(d * (br - if long { 9.0 } else { 4.0 }), d * (br + if long { 9.0 } else { 4.0 }), 1.5, alpha(WHITE, (0.10 + 0.25 * w.beat_pulse) * lv));
+        }
         arc(Vec2::ZERO, 132.0, 0.0, TAU, 1.5, alpha(WHITE, 0.12 * lv));
         arc(Vec2::ZERO, 132.0, -PI * 0.5, -PI * 0.5 + TAU * progress.clamp(0.0, 1.0), 3.0, alpha(pal.accent, 0.9 * lv));
         if !h.broken {
