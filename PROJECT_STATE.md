@@ -67,13 +67,16 @@ merging the last one brings everything:
 38. `feat/milestones` — twelve milestones, sixth Codex page
 39. `feat/live-predict` — reactive live mode announces pulses from the predicted beat
 40. `docs/fourth-pass-t8` — plan progress, README and this file
+41. `feat/comb-sweep` — Comb and Sweep attack patterns
+42. `feat/track-picker` — track list in run setup, depth frames around the arena
+43. `docs/fifth-pass-t9` — plan progress, README and this file
 
 The third playtest (2026-11-15) and what was done about it are in
 `docs/plans/0.4-playtest-3.md`. The depth pass that followed (every area of the game, planned
 and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "Known weak
 spots" first.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T8-win-x64` (built from branch 40).
+**Test build:** `#UserTesting\Heartline-0.3.0-T9-win-x64` (built from branch 43).
 
 **Verified by machine only:** 39 unit tests, `--sim` balance runs, screenshots of the menu
 screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any
@@ -86,7 +89,7 @@ Boss rush mode; per-mood rim and Heart shapes; live mode on the new generator an
 capture (`docs/plans/live-audio.md`, needs the player's answers to its section 6).
 
 Balance (`--sim`, 6 Straftat songs, 120 ms bot, hits per minute, LULLABY to FLATLINE):
-about 2.0 / 2.4 / 3.8 / 3.5 / 4.7 / 5.9 / 7.2 (after the second pass of 0.5).
+2.2 / 2.3 / 3.8 / 4.8 / 5.3 / 5.3 / 6.4 (after the fifth pass of 0.5).
 
 ## What the player said (2026-11-14 playtest of 0.1) — the brief for 0.2
 - Dies within ~30 s on any song; difficulty should NOT depend on the song (slow songs were much
@@ -229,6 +232,8 @@ SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia
 tools, balance simulator, bot · `rng.rs` PRNG · `runner.rs` Highway side mode.
 
 ## Session Log
+- 2026-11-15 — Fifth pass of 0.5: Comb and Sweep patterns, track list, depth frames. 39 unit
+  tests pass; shipped `Heartline-0.3.0-T9`.
 - 2026-11-15 — Fourth pass of 0.5: carry-a-charge objective, milestones, live pulses announced
   from the predicted beat. 39 unit tests pass; shipped `Heartline-0.3.0-T8`.
 - 2026-11-15 — Third pass of 0.5: Highway overdrive / close calls / rank, three elite kinds,
