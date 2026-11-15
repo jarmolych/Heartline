@@ -6,22 +6,21 @@ music. Written in Rust (macroquad + cpal + symphonia + rustfft). See `DESIGN.md`
 
 ## Play
 
-Run `heartline.exe`. The menu plays music straight away: your **music library** folder
-(shuffled) or, until one is set, three built-in synthwave tracks. `Q` / `E` change the track.
+Run `heartline.exe`. The menu plays music straight away: your **music library** (a folder or an
+`.m3u` playlist, shuffled) or, until one is set, three built-in synthwave tracks. `Q` / `E`
+change the track, and the backdrop changes with it. Hover anything for a tooltip.
 
-- **PLAY THIS TRACK** — fight the song the menu is playing (it is already analysed, so it
-  starts instantly). **SHUFFLE RUN** — that track plus four more as one roguelike run: HP,
-  upgrades and score carry over and the Heart gets tougher each track.
-- **PLAY FILES / PLAY FOLDER**, or drop audio files or folders on the window
-  (mp3, flac, ogg, wav, m4a/aac ...).
-- **MUSIC LIBRARY** — choose the folder the menu and SHUFFLE RUN draw from.
-- **LIVE AUDIO** — play against whatever your PC is playing (reactive, or delayed look-ahead
-  through a second output device; sound effects are off in live mode).
-- **SYNC OFFSET** — if attacks land before you hear the beat (soundbars and Bluetooth add
-  lag), raise it; if they land late, lower it.
-- **VISUALS** — FULL / SUBTLE / OFF: how hard the scene pulses with the music (kick zoom
-  punches, grid ripples, snare rings, the waveform ring around the Heart, build-up and drop
-  hits). Choose SUBTLE or OFF if motion or flashing bothers you.
+- **PLAY** opens the run setup:
+  - **ENDLESS RUN** (this track, then the library keeps coming), **SINGLE TRACK**, or
+    **DAILY SEED** (an endless run on today's seed).
+  - **Difficulty**: seven tiers from LULLABY (no-fail) to FLATLINE (one life). Hover a tile to
+    read what it does before choosing it.
+  - **PLAY FILES / PLAY FOLDER** (or drop files, folders or playlists on the window), and
+    **LIVE AUDIO**: play against whatever your PC is playing.
+- **LAN RALLY**: a beat-locked paddle duel for two PCs on the same network.
+- **MUSIC LIBRARY**: ENTER picks a folder, SHIFT+ENTER an `.m3u` playlist.
+- **OPTIONS**: volumes, SYNC OFFSET (raise it if attacks land before you hear the beat), VISUALS
+  (FULL / SUBTLE / OFF: how hard the scene pulses with the music), windowed or fullscreen.
 
 Settings are saved in `heartline.cfg` next to the exe.
 
@@ -29,9 +28,9 @@ Settings are saved in `heartline.cfg` next to the exe.
 |---|---|
 | WASD / arrows | move |
 | Mouse | aim |
-| LMB (or auto-fire, toggle `F`) | fire — the gun fires on beat subdivisions |
+| LMB (or auto-fire, toggle `F`) | fire — the gun plays the song's own rhythm; damage per second is the same on every song |
 | Space / Shift / RMB | dash (invulnerable while dashing) |
-| Esc / P | pause (files) / Esc: back to menu (live) |
+| Esc / P | pause (quitting a run asks twice) |
 | Q / E (menu) | previous / next track |
 | F11 | fullscreen |
 
@@ -55,7 +54,19 @@ How it plays:
 | Bar lines | tile-strike phrases: pillars rise for a bar, then slam beat by beat |
 | A drop | shockwave ring with gaps + an elite |
 | A calm part | upgrade orbs, heals |
+| Chimes, bells, plucks | wisps drift in from where the note sits in pitch |
 | Silence / loading | the arena relaxes into the synthwave landscape until the music returns |
+
+- **The song's layers drive the level.** Beat, bass, snare, hats, lead and chimes are each tied to
+  one kind of attack while they play. Which ones are active is lit at the top right; a part of
+  the song that returns brings its attacks and its colours back.
+- **The Heart has a phase per section of the song.** SHELL (calm): it is immune, break the three
+  shield nodes. VALVE (groove): it opens for the first half of every bar. SPLIT (surge): break
+  the lit core, then the next. OVERDRIVE (drop): exposed, extra damage. Beat a phase before its
+  section ends and you get **purgatory**: a breather with a clock where everything is shootable.
+- **Rewards are graded.** Calm sections, purgatory and a cleared track grade how you did since
+  the last reward (C to S). Better grades offer more choices and rare upgrades.
+- **Every song after the first is a depth** that adds one run modifier (shown in red).
 
 White square bullets can be shot down; hot round ones must be dodged. Shards fill the XP bar;
 when it fills, three upgrade orbs appear — fly into one (every upgrade also heals 1). Empty the

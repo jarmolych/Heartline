@@ -15,15 +15,44 @@ Full plan in `DESIGN.md`, player-facing notes in `README.md`.
 - [ ] Later: per-song high scores, gamepad, Heart boss phases, side mode (beat platformer)
 
 ## Where the work is now (read this first)
-The sections below describe 0.2 and are kept for background. Current work is **0.3**, driven by
-`docs/plans/0.3-playtest-2.md` (its "Progress" notes say what is done and what is next). The repo
-uses task branches and pull requests (see `CLAUDE.md`); `gh` is not installed here, so PRs are
-opened in the browser. Branches not yet merged into `main` as of 2026-11-15:
-- `docs/director-rethink` — plan change only (slice 11: musical layers + director credits).
-- `feat/playlists-endless-run` — M3U playlists, endless runs, menu track rotation (slices 14, 5, 1).
-- `feat/gun-track` — slice 3: the gun fires on a per-song gun track with exact constant DPS.
+The sections further down describe 0.2 and are kept for background. Current work is **0.3**,
+driven by `docs/plans/0.3-playtest-2.md`: every slice has a "Progress" note saying what is done,
+what was changed from the proposal and what is still open.
 
-Latest test build: `#UserTesting\Heartline-0.3.0-T2-win-x64` (does not include `feat/gun-track`).
+**Branches (2026-11-15).** The repo uses task branches and pull requests (see `CLAUDE.md`);
+`gh` is not installed here, so PRs are opened in the browser. Nothing below is merged into
+`main` yet. The branches are stacked in this order, each containing the ones before it, so
+merging the last one brings everything:
+1. `docs/director-rethink` — plan change only
+2. `feat/playlists-endless-run` — M3U playlists, endless runs, menu track rotation
+3. `feat/menu-options-screen` — menu groups + options screen (superseded by 8)
+4. `feat/gun-track` — gun fires on a per-song track, exact DPS (branched from `main`, merged
+   into 5)
+5. `tune/tier-rules` — per-tier ramp, mercy, warnings, unlocks
+6. `feat/song-phases` — analysis: layers, chimes, phases
+7. `feat/menu-run-setup` — RoR2-style menu: icons, run setup, tooltips (`src/ui.rs`)
+8. `feat/layer-director` — director credits arm layers; wisp enemy
+9. `feat/heart-phases` — Heart forms per section, purgatory
+10. `feat/rewards-depth` — graded rewards, rare upgrades, depth modifiers, daily seed
+11. `art/song-moods` — per-song backdrops, weather, floor styles
+12. `fix/live-pause` — pause in live mode, quit asks twice
+13. `fix/rally-fairness` — Crack lob, firewall rule offer
+14. `docs/state-0.3-t3` — README and this file
+
+**Test build:** `#UserTesting\Heartline-0.3.0-T3-win-x64` (built from branch 14).
+
+**Verified by machine only:** 35 unit tests, `--sim` balance runs, screenshots of the menu
+screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any
+of it feels or sounds, mouse hover tooltips and slider dragging, the firewall button (it was
+never run), a two-PC Rally match, live-mode pause with real audio.
+
+**Still open from the plan** (details in the plan's Progress notes): a Heart that roams or
+charges and side objectives; the full purgatory look; reward delivery variety and run outros;
+Boss rush mode; per-mood rim and Heart shapes; live mode on the new generator and per-app
+capture (`docs/plans/live-audio.md`, needs the player's answers to its section 6).
+
+Balance (`--sim`, 6 Straftat songs, 120 ms bot, hits per minute, LULLABY to FLATLINE):
+1.5 / 2.1 / 3.1 / 3.5 / 5.5 / 6.8 / 8.4.
 
 ## What the player said (2026-11-14 playtest of 0.1) — the brief for 0.2
 - Dies within ~30 s on any song; difficulty should NOT depend on the song (slow songs were much
@@ -159,15 +188,15 @@ Build / run / test:
   CRLF file to LF; use the Edit tool or `perl -pi`, then check with `file`.
 
 ## Source map
-`main.rs` app flow / menu / jukebox / settings / CLI · `analysis.rs` DSP (offline +
+`main.rs` app flow / menu / jukebox / settings / CLI · `ui.rs` menu widgets, icons, tooltips · `analysis.rs` DSP (offline +
 `StreamAnalyzer`) · `level.rs` events + `generate` + `LiveGen` · `game.rs` simulation ·
 `render.rs` shaders / drawing / HUD / UI widgets · `engine.rs` audio thread (playback, crossfade,
 SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia · `tools.rs` CLI
 tools, balance simulator, bot · `rng.rs` PRNG.
 
 ## Session Log
-- 2026-11-15 — Slice 3 of the 0.3 plan (gun track, exact DPS, shot tick) on `feat/gun-track`;
-  33 unit tests pass.
+- 2026-11-15 — 0.3 plan slices 1, 2, 3, 4, 7 (pause), 8, 9, 10, 11, 12, 13 and a new slice 15
+  (RoR2-style menu) on stacked branches; 35 unit tests pass; shipped `Heartline-0.3.0-T3`.
 - 2026-11-13 — Researched stack, installed Rust, wrote DESIGN.md, built 0.1.0, packaged to
   `#UserTesting/Heartline-0.1.0-win-x64/`.
 - 2026-11-14 — First playtest feedback. 0.2 work: generator rewrite (directed, per-second
