@@ -165,7 +165,6 @@ fn v3(c: Color) -> Vec3 {
 // Low-level primitives (no heap allocation: everything goes straight into the batcher)
 // ---------------------------------------------------------------------------------------------
 
-#[inline]
 thread_local! {
     /// Added to every vertex: lets the Heart's layers be drawn around the origin and placed
     /// wherever the Heart is (`set_origin`).
@@ -176,6 +175,7 @@ fn set_origin(o: Vec2) {
     ORIGIN.with(|c| c.set(o));
 }
 
+#[inline]
 fn vtx(p: Vec2, c: Color) -> Vertex {
     let o = ORIGIN.with(|c| c.get());
     Vertex::new(p.x + o.x, p.y + o.y, 0.0, 0.0, 0.0, c)
@@ -4039,6 +4039,12 @@ impl Renderer {
         let s = r.score();
         vtext(&s[0].to_string(), cx - 44.0 * u, y, 64.0 * u, cols[0], 1);
         vtext("-", cx, y - 8.0 * u, 36.0 * u, alpha(WHITE, 0.6), 0);
+        // rally length, once it is long enough to have sped up
+        if r.heat >= 4 {
+            let hot = (r.heat / 4).min(6) as f32 / 6.0;
+            let pulse = 0.75 + 0.25 * (self.time * (6.0 + 8.0 * hot)).sin();
+            vtext(&format!("RALLY {}", r.heat), cx, y + 64.0 * u, 20.0 * u, alpha(mixc(self.pal.accent, self.pal.danger, hot), pulse), 0);
+        }
         vtext(&s[1].to_string(), cx + 44.0 * u, y, 64.0 * u, cols[1], -1);
         for i in 0..2 {
             let x = cx + rally::fwd(i) * -44.0 * u;

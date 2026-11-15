@@ -270,8 +270,18 @@ pub struct Fx {
     pub err: i16,
 }
 
+/// Rally heat: every this many returns in one rally the orb's flight loses half a beat ...
+const HEAT_STEP: u32 = 4;
+/// ... down to this many beats.
+const HEAT_MIN_FLIGHT: f32 = 1.0;
+
 #[derive(Clone, Debug)]
 pub struct Rally {
+    /// Returns in the current rally (host side; resets when a point is scored). The longer the
+    /// rally, the shorter the orb's flight.
+    pub heat: u32,
+    /// Chance the bot misjudges an incoming orb (practice: set from the difficulty tier).
+    pub bot_miss: f32,
     pub t: f32,
     pub players: [Player; 2],
     pub orbs: [Orb; MAX_ORBS],
@@ -484,6 +494,8 @@ impl Rally {
             ch: chars[i],
         };
         Rally {
+            heat: 0,
+            bot_miss: BOT_MISS,
             t: 0.0,
             players: [player(0), player(1)],
             orbs: [Orb::DEAD; MAX_ORBS],
@@ -675,6 +687,7 @@ impl Rally {
                         let a = o.owner as usize & 1;
                         self.scores[a] = self.scores[a].saturating_add(1);
                         self.last_conceder = d as u8;
+                        self.heat = 0;
                         o.state = OrbState::Dead;
                         self.push_fx(FxKind::Score, a, at);
                     } else if o.extra {
@@ -708,7 +721,17 @@ impl Rally {
         let d = vec2(f * a.cos(), a.sin());
         let xe = end_x(1 - h);
         let from = vec2(from.x.clamp(-HALF_W + 1.0, HALF_W - 1.0), fold(from.y));
-        let tb = arrival_time(m, t, perfect);
+        // Heat: a long rally speeds up, half a beat at a time.
+        self.heat += 1;
+        let mut tb = arrival_time(m, t, perfect);
+        let cut = (self.heat / HEAT_STEP) as f32 * 0.5;
+        if cut > 0.0 {
+            let b = beat_len_at(m.beats, t);
+            let floor = t + (HEAT_MIN_FLIGHT * b).max(MIN_FLIGHT_S);
+            let want = (tb - cut * b).max(floor);
+            let i = grid_after(m.beats, want - BEAT_EPS, DEFAULT_BEAT);
+            tb = grid_time(m.beats, i, DEFAULT_BEAT).min(tb);
+        }
         // constant x speed: strike line on `tb`, the end line a little after
         let frac = ((strike_x(1 - h) - from.x) / (xe - from.x)).clamp(0.05, 1.0);
         o.state = OrbState::Flying;
@@ -801,7 +824,9 @@ impl Rally {
                 let pred = if o.tb > t { o.strike_point() } else { o.eval(t + 0.03) };
                 let key = ((o.id as u64) << 8) ^ (o.tb.to_bits() as u64) << 1 ^ me as u64;
                 let miss = h01(self.seed, key);
-                let err = if miss < BOT_MISS { if miss < BOT_MISS * 0.5 { BOT_MISS_OFF } else { -BOT_MISS_OFF } } else { 0.0 };
+                // A hot rally is harder to read, for the bot too.
+                let bm = (self.bot_miss + 0.02 * (self.heat / HEAT_STEP) as f32).min(0.6);
+                let err = if miss < bm { if miss < bm * 0.5 { BOT_MISS_OFF } else { -BOT_MISS_OFF } } else { 0.0 };
                 target = vec2(strike_x(me) - f * BOT_STANDOFF, pred.y + err);
                 // face between the incoming orb and the goal so the arc covers it
                 let to_orb = (o.pos - p.pos).normalize_or_zero();

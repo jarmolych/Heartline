@@ -2149,7 +2149,9 @@ impl App {
     fn lan_begin(&mut self, lan: &mut Lan, start_local: f64, seed: u64, chars: [u8; 2]) {
         let Some((_, l)) = &lan.loaded else { return };
         let ch = |i: u8| Character::from_index(i).unwrap_or(Character::Sub);
-        let rally = Rally::new(seed, [ch(chars[0]), ch(chars[1])]);
+        let mut rally = Rally::new(seed, [ch(chars[0]), ch(chars[1])]);
+        // The practice bot is as sharp as the chosen difficulty tier.
+        rally.bot_miss = [0.40, 0.32, 0.22, 0.16, 0.11, 0.07, 0.04][self.diff.min(6)];
         let an = l.an.clone();
         let bars: Vec<f32> = if an.beats.is_empty() { Vec::new() } else { an.beats[an.downbeat.min(an.beats.len() - 1)..].iter().step_by(4).copied().collect() };
         let beat_len = if l.level.bpm > 1.0 { 60.0 / l.level.bpm } else { 0.5 };
