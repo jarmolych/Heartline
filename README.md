@@ -27,8 +27,8 @@ change the track, and the backdrop changes with it. Hover anything for a tooltip
   the gems on the hats.
 - **LAN RALLY**: a beat-locked paddle duel for two PCs on the same network. Long rallies speed
   up; the practice bot is as sharp as your difficulty tier.
-- **CODEX**: what every Heart form, enemy and upgrade does, how the music becomes the level, and
-  your best scores.
+- **CODEX**: what every Heart form, enemy and upgrade does, how the music becomes the level,
+  your best scores, and twelve milestones to earn.
 - **MUSIC LIBRARY**: ENTER picks a folder, SHIFT+ENTER an `.m3u` playlist.
 - **OPTIONS**: volumes, SYNC OFFSET (raise it if attacks land before you hear the beat), VISUALS
   (FULL / SUBTLE / OFF: how hard the scene pulses with the music), windowed or fullscreen.
@@ -80,6 +80,8 @@ How it plays:
   a beat before it glides there, and it holds its fire on the way.
 - **It charges.** In OVERDRIVE the Heart lights a lane through where you stand and crosses it a
   beat later. The last section of a song is the FINALE: every pulse has a shootable echo.
+- **Carry the charge.** While the Heart's body can be hurt, a charge appears far from it. Walk
+  it into the ring around the Heart to take a fifth of the phase at once; a hit knocks it loose.
 - **Resonance.** Grazes, kills, on-beat dashes and hurting the Heart fill the meter under your
   combo. Full, it rings for eight seconds: more damage, double score.
 - **Bullets arrive on the beat.** Every pulse is timed to cross the ticked ring around the Heart
