@@ -324,6 +324,8 @@ enum Screen {
     Setup,
     /// Highway: the three-lane side mode (`runner.rs`).
     Runner,
+    /// Codex: what everything in the game is, and the best scores.
+    Codex,
     LiveSetup,
     /// LAN Rally: host/join, lobby, countdown, match and results (`App::lan` holds the stage).
     Lan,
@@ -389,13 +391,50 @@ const MENU_MUSIC_GAIN: f32 = 0.5;
 const M_PLAY: usize = 0;
 const M_HIGHWAY: usize = 1;
 const M_LAN: usize = 2;
-const M_LIBRARY: usize = 3;
-const M_OPTIONS: usize = 4;
-const M_QUIT: usize = 5;
-const MENU_ROWS: [(Icon, &str, &str); 6] = [
+const M_CODEX: usize = 3;
+const M_LIBRARY: usize = 4;
+const M_OPTIONS: usize = 5;
+const M_QUIT: usize = 6;
+const CODEX_TABS: [&str; 5] = ["THE HEART", "ENEMIES", "UPGRADES", "THE MUSIC", "RECORDS"];
+const CODEX_HEART: [(&str, &str); 9] = [
+    ("SHELL", "Calm sections. The Heart is immune: break the three shield nodes circling the arena."),
+    ("VALVE", "Groove sections. It opens for the first half of every bar; while shut, shots do a fifth."),
+    ("SPLIT", "Surge sections. Three linked cores orbit it and only the lit one can be hurt. Break them in order."),
+    ("OVERDRIVE", "Drops. Exposed, taking half again as much damage, and it charges down a lit lane: step out of it."),
+    ("FINALE", "The last section of a song. Every pulse has an echo half a beat later, made of shootable notes."),
+    ("PURGATORY", "Break a phase before its section ends and everything becomes shootable for up to nine seconds."),
+    ("RAGE", "Each early break grows what is left of the Heart and adds a tenth to the pressure for that song."),
+    ("RELOCATION", "From PULSE up it moves on bar lines. A ring shows where; it holds its fire on the way."),
+    ("BEAT RING", "The ticked ring around the Heart. Every pulse is timed to cross it on a beat."),
+];
+const CODEX_ENEMIES: [(&str, &str); 9] = [
+    ("CHASER", "Walks at you. Arrives on the snare."),
+    ("DARTER", "Flies straight through where you were when it appeared, then leaves."),
+    ("ORBITER", "Circles the arena and shoots at you every few beats."),
+    ("SPLITTER", "Slow and tough; breaks into three fast minis."),
+    ("METRONOME", "Plants itself and fires a three-shot fan on every downbeat. Its ring fills through the bar."),
+    ("CYMBAL", "Drifts in, arms when close, and bursts into a ring two beats later. Kill it first."),
+    ("WISP", "Appears on the song's chimes, where the note sits in pitch. Light, weaving, fades if ignored."),
+    ("ELITE", "Arrives with a drop. A lot of health and a ring of shots, half of them shootable."),
+    ("SPRITE", "Ear candy made visible. Harmless and golden: catch it for a heal."),
+];
+const CODEX_MUSIC: [(&str, &str); 10] = [
+    ("BEAT", "The kick drives the Heart's pulses."),
+    ("BASS", "A sustained low end brings tile strikes: pillars that rise for a bar, then slam on the beat."),
+    ("SNARE", "Snares open the portals enemies arrive through."),
+    ("HATS", "Hi-hats leave shards to collect, and dart streams in the hottest bars."),
+    ("LEAD", "Sustained notes sweep laser walls across the floor."),
+    ("CHIMES", "Pitched hits high in the mix send wisps."),
+    ("EAR CANDY", "A flourish the song rarely plays: a comet trailing shards, a keypad of shards, or a sprite."),
+    ("GRAZE", "Slip past a bullet at close range without being hit: score, combo, and it feeds resonance."),
+    ("RESONANCE", "The meter under the combo bar. Full, it rings for eight seconds: more damage, double score."),
+    ("GRADES", "Calm sections, purgatory and a cleared track grade you from C to S. Better grades offer more, and rarer, upgrades."),
+];
+const MENU_ROWS: [(Icon, &str, &str); 7] = [
     (Icon::Play, "PLAY", "Set up a run: endless or a single track, the difficulty, the starting song. Live audio and loose files are in there too."),
     (Icon::Road, "HIGHWAY", "A side mode on this track: race down the grid. Switch lanes around the walls (kicks), jump the bars (snares), collect the gems (hats). Uses the difficulty chosen in PLAY."),
     (Icon::Lan, "LAN RALLY", "A beat-locked paddle duel against a second PC on your network. The host picks the song."),
+    (Icon::Files, "CODEX", "What everything is: the Heart's forms, the enemies, every upgrade, how the music becomes the level, and your best scores."),
     (Icon::Library, "MUSIC LIBRARY", "The folder or .m3u playlist that runs and this menu draw from. ENTER picks a folder, SHIFT+ENTER a playlist, or drop either on this row."),
     (Icon::Options, "OPTIONS", "Volumes, sync offset, how hard the scene pulses with the music, windowed or fullscreen."),
     (Icon::Quit, "QUIT", "Close Heartline."),
@@ -1185,7 +1224,7 @@ impl App {
             }
         }
         // Keep the next track warming up in the background.
-        if self.loader.is_none() && !matches!(self.screen, Screen::Menu | Screen::Options | Screen::Setup) && self.live.is_none() {
+        if self.loader.is_none() && !matches!(self.screen, Screen::Menu | Screen::Options | Screen::Setup | Screen::Codex) && self.live.is_none() {
             let want = if self.song.is_some() && self.phase == Phase::Song { self.qi + 1 } else { self.qi };
             let have = self.ready.as_ref().map(|r| r.0);
             if want < self.queue.len() && have != Some(want) {
@@ -2870,6 +2909,9 @@ async fn run(args: Args) {
         app.menu_sel = S_START;
     } else if args.screen == "options" {
         app.screen = Screen::Options;
+    } else if args.screen == "codex" {
+        app.screen = Screen::Codex;
+        app.menu_sel = args.mode.min(CODEX_TABS.len() - 1);
     } else if args.live {
         // Devices are enumerated on the audio thread; give it a moment.
         for _ in 0..60 {
@@ -3114,6 +3156,10 @@ async fn run(args: Args) {
                         app.menu_sel = S_START;
                     }
                     Some(M_HIGHWAY) => app.start_highway(),
+                    Some(M_CODEX) => {
+                        app.screen = Screen::Codex;
+                        app.menu_sel = 0;
+                    }
                     Some(M_LAN) => app.lan_open(),
                     Some(M_LIBRARY) => {
                         // SHIFT + ENTER picks an .m3u playlist instead of a folder.
@@ -3698,6 +3744,76 @@ async fn run(args: Args) {
                 } else if again {
                     app.runner = None;
                     app.start_highway();
+                }
+            }
+            Screen::Codex => {
+                dim(0.72);
+                let x = 110.0 * u;
+                render::vtext("CODEX", x, 130.0 * u, 64.0 * u, WHITE, -1);
+                let nt = CODEX_TABS.len();
+                let dirk = (is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::E)) as i32 - (is_key_pressed(KeyCode::Left) || is_key_pressed(KeyCode::Q)) as i32;
+                if dirk != 0 {
+                    app.menu_sel = (app.menu_sel as i32 + dirk).rem_euclid(nt as i32) as usize;
+                    app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
+                }
+                let tab = app.menu_sel.min(nt - 1);
+                let tabs: Vec<(Option<Icon>, &str)> = CODEX_TABS.iter().map(|t| (None, *t)).collect();
+                let (click, _) = ui::segments(x, 170.0 * u, 1100.0 * u, 50.0 * u, &tabs, tab, true, u, &pal);
+                if let Some(i) = click {
+                    app.menu_sel = i;
+                }
+                let soft = Color::new(1.0, 1.0, 1.0, 0.85);
+                let y0 = 280.0 * u;
+                let entry = |k: usize, name: &str, body: &str, step: f32| {
+                    let y = y0 + k as f32 * step * u;
+                    text_left(name, x, y, 26.0 * u, pal.accent);
+                    for (i, l) in ui::wrap(body, 22.0 * u, sw - x - 420.0 * u).iter().enumerate() {
+                        text_left(l, x + 240.0 * u, y + i as f32 * 26.0 * u, 22.0 * u, soft);
+                    }
+                };
+                match tab {
+                    0 => CODEX_HEART.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 72.0)),
+                    1 => CODEX_ENEMIES.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 72.0)),
+                    2 => {
+                        // two columns: emblem, name, what it does, how far it levels
+                        for (k, up) in UpgradeId::ALL.iter().enumerate() {
+                            let (col, row) = (k / 10, k % 10);
+                            let cx = x + col as f32 * 840.0 * u;
+                            let y = y0 + row as f32 * 68.0 * u;
+                            let c = if up.rare() { pal.danger } else { pal.accent };
+                            render::upgrade_emblem(*up, vec2(cx + 22.0 * u, y - 8.0 * u), 17.0 * u, 2.4 * u, WHITE, c, app.rend.time);
+                            text_left(up.name(), cx + 60.0 * u, y, 26.0 * u, c);
+                            text_left(&format!("{}{}", if up.rare() { "rare  " } else { "" }, if up.max() > 1 { format!("levels 1-{}", up.max()) } else { "one level".to_string() }), cx + 60.0 * u, y + 24.0 * u, 18.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
+                            text_left(up.desc(), cx + 280.0 * u, y, 22.0 * u, soft);
+                        }
+                    }
+                    3 => CODEX_MUSIC.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 66.0)),
+                    _ => {
+                        let mut rows: Vec<(&String, &(u64, u32))> = app.scores.iter().collect();
+                        rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+                        if rows.is_empty() {
+                            text_left("No scores yet. Finish a run or a Highway road and it will be kept here.", x, y0, 24.0 * u, soft);
+                        }
+                        text_left("track", x, y0 - 34.0 * u, 18.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
+                        for (k, (key, v)) in rows.iter().take(16).enumerate() {
+                            let y = y0 + k as f32 * 40.0 * u;
+                            let mut it = key.split('|');
+                            let (title, tier, mode) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+                            let title: String = if title.chars().count() > 40 { title.chars().take(38).chain("..".chars()).collect() } else { title.to_string() };
+                            text_left(&title, x, y, 24.0 * u, WHITE);
+                            text_left(tier, x + 640.0 * u, y, 22.0 * u, pal.primary);
+                            text_left(mode, x + 860.0 * u, y, 22.0 * u, pal.secondary);
+                            text_left(&format!("{}", v.0), x + 1060.0 * u, y, 26.0 * u, pal.accent);
+                            if mode != "HIGHWAY" {
+                                text_left(&format!("depth {}", v.1), x + 1240.0 * u, y, 20.0 * u, soft);
+                            }
+                        }
+                    }
+                }
+                text_shadow("LEFT / RIGHT  change page        ESC  back", x, sh - 60.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.7), -1);
+                if is_key_pressed(KeyCode::Escape) {
+                    app.screen = Screen::Menu;
+                    app.menu_sel = M_CODEX;
                 }
             }
             Screen::Lan => app.lan_ui(u, sw, sh),

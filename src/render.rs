@@ -4149,7 +4149,12 @@ impl Renderer {
                 }
             }
 
-            // Heart integrity
+            // Heart integrity (DODGE has no Heart to break: it shows its own line instead)
+            if w.pacifist {
+                vtext("DODGE", sw * 0.5, m + 60.0 * u, 20.0 * u, alpha(pal.accent, 0.9), 0);
+                text_shadow(&format!("{} grazes", w.stats.grazes), sw * 0.5, m + 84.0 * u, 20.0 * u, alpha(WHITE, 0.8), 0);
+            }
+            if !w.pacifist {
             let bw = 520.0 * u;
             let bx = sw * 0.5 - bw * 0.5;
             let by = m + 54.0 * u;
@@ -4188,11 +4193,14 @@ impl Renderer {
                 }
             }
 
+            }
+
             // Section label
             let label = section_label(w.section_kind);
             vtext(label, sw - m, m + 26.0 * u, 26.0 * u, pal.secondary, 1);
             if info.bpm > 1.0 {
-                text_shadow(&format!("{:.0} BPM", info.bpm), sw - m, m + 52.0 * u, 20.0 * u, alpha(WHITE, 0.6), 1);
+                let depth = if w.song_idx > 0 { format!("DEPTH {}   ", w.song_idx + 1) } else { String::new() };
+                text_shadow(&format!("{depth}{:.0} BPM", info.bpm), sw - m, m + 52.0 * u, 20.0 * u, alpha(WHITE, 0.6), 1);
             }
             // Musical layers driving attacks right now: lit = armed.
             if w.armed != 0 {
@@ -4482,7 +4490,7 @@ impl Renderer {
 }
 
 /// Each upgrade's emblem, drawn with lines around `c` at half-size `r`.
-fn upgrade_emblem(up: UpgradeId, c: Vec2, r: f32, th: f32, col: Color, col2: Color, time: f32) {
+pub fn upgrade_emblem(up: UpgradeId, c: Vec2, r: f32, th: f32, col: Color, col2: Color, time: f32) {
     let p = |x: f32, y: f32| c + vec2(x, y) * r;
     let l = |a: Vec2, b: Vec2| line(a, b, th, col);
     match up {
