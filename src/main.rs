@@ -443,6 +443,8 @@ struct App {
     /// Index into `VISUALS`.
     visuals: usize,
     menu_sel: usize,
+    /// Pause menu: QUIT was pressed once and needs a second press.
+    quit_armed: bool,
     /// Run setup: ENDLESS RUN (true) or SINGLE TRACK, and the focused button of the last row.
     /// Index into `SETUP_MODES`.
     setup_mode: usize,
@@ -1189,6 +1191,32 @@ impl App {
                 (0.0, hud, 0.0)
             }
         }
+    }
+
+    /// While live mode is paused: keep the analyser's clock in step with the capture, but throw
+    /// away everything it hears.
+    fn live_discard(&mut self) {
+        let Some(live) = self.live.as_mut() else { return };
+        live.buf.clear();
+        self.audio.live_take(&mut live.buf);
+        if let Some(an) = live.an.as_mut() {
+            live.out.feats.clear();
+            live.out.onsets.clear();
+            an.push(&live.buf, &mut live.out);
+        }
+        live.pending.clear();
+    }
+
+    /// Leave the live-mode pause: nothing heard during it may fire.
+    fn live_resume(&mut self) {
+        let clock = self.audio.live_time() as f32;
+        let Some(live) = self.live.as_mut() else { return };
+        live.pending.clear();
+        live.feats.clear();
+        live.last_clock = live.last_clock.max(clock);
+        live.last_beat_t = live.last_beat_t.max(clock - live.period);
+        live.silent_for = 0.0;
+        live.gen.resume();
     }
 
     fn step_live(&mut self, dt: f32, input: &Input) -> (f32, HudInfo, f32) {
@@ -2468,6 +2496,7 @@ async fn run(args: Args) {
         fullscreen: false,
         visuals: 0,
         menu_sel: 0,
+        quit_armed: false,
         setup_mode: 0,
         base_seed: args.seed,
         setup_col: 0,
@@ -2637,20 +2666,24 @@ async fn run(args: Args) {
                 let pause_key = esc || is_key_pressed(KeyCode::P);
                 if pause_key && app.screen == Screen::Play {
                     app.esc_used = true;
-                    if app.live.is_some() {
-                        if esc {
-                            app.to_menu();
-                        }
-                    } else {
+                    // Live audio cannot be paused at the source: the world freezes and what is
+                    // captured meanwhile is thrown away (`live_discard`).
+                    if app.live.is_none() {
                         app.audio.set_paused(true);
-                        app.screen = Screen::Paused;
-                        app.menu_sel = 0;
-                        app.audio.sfx(Sfx::UiSelect, 0.7, 0.0);
                     }
+                    app.screen = Screen::Paused;
+                    app.menu_sel = 0;
+                    app.quit_armed = false;
+                    app.audio.sfx(Sfx::UiSelect, 0.7, 0.0);
                 }
             }
             Screen::Paused => {
                 idle_target = app.idle;
+                if app.live.is_some() {
+                    app.live_discard();
+                    hud.title = "LIVE AUDIO".into();
+                    hud.show_combat = true;
+                }
                 if let Some(s) = &app.song {
                     hud.title = s.track.name.clone();
                     hud.progress = s.last_t / s.level.duration.max(0.1);
@@ -3128,16 +3161,39 @@ async fn run(args: Args) {
             Screen::Paused => {
                 dim(0.55);
                 render::vtext("PAUSED", sw * 0.5, sh * 0.3, 80.0 * u, WHITE, 0);
-                let items = vec!["RESUME".to_string(), "RESTART RUN".to_string(), "QUIT TO MENU".to_string()];
+                // Quitting throws the run away, so it takes a second press.
+                let live = app.live.is_some();
+                let quit_label = if app.quit_armed { "REALLY QUIT?  THE RUN IS LOST" } else { "QUIT TO MENU" };
+                let items: Vec<String> = if live {
+                    vec!["RESUME".to_string(), quit_label.to_string()]
+                } else {
+                    vec!["RESUME".to_string(), "RESTART RUN".to_string(), quit_label.to_string()]
+                };
+                let quit_row = items.len() - 1;
+                let before = app.menu_sel;
                 let act = menu_list(&items, &mut app.menu_sel, sw * 0.5 - 260.0 * u, sh * 0.42, u, &app.rend, &app.audio);
+                if app.menu_sel != before {
+                    app.quit_armed = false;
+                }
+                if live {
+                    text_center("the music keeps playing; nothing can hurt you while paused", sw * 0.5, sh * 0.42 + 150.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.7));
+                }
                 if ((is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::P)) && !app.esc_used) || act == Some(0) {
-                    app.audio.set_paused(false);
+                    if live {
+                        app.live_resume();
+                    } else {
+                        app.audio.set_paused(false);
+                    }
                     app.screen = Screen::Play;
+                } else if act == Some(quit_row) {
+                    if app.quit_armed {
+                        app.to_menu();
+                    } else {
+                        app.quit_armed = true;
+                    }
                 } else if act == Some(1) {
                     let q = app.queue.clone();
                     app.start_run(q);
-                } else if act == Some(2) {
-                    app.to_menu();
                 }
             }
             Screen::Results => {
