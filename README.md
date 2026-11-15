@@ -10,20 +10,25 @@ Run `heartline.exe`. The menu plays music straight away: your **music library** 
 `.m3u` playlist, shuffled) or, until one is set, three built-in synthwave tracks. `Q` / `E`
 change the track, and the backdrop changes with it. Hover anything for a tooltip.
 
+- **The track corner** (top right, on the title menu and in run setup): what is playing, then
+  buttons for the previous track (Q), the next (E) and the whole list (T, type a letter to
+  jump); play files, play a folder (or drop either on the window) and **live audio** (play
+  against whatever your PC is playing); and a bar for your **music library** with one button
+  to choose a folder and one to choose an `.m3u` playlist.
 - **PLAY** opens the run setup:
-  - **Mode:** ENDLESS (this track, then the library keeps coming), SINGLE, DAILY (today's seed),
-    DROP RUSH (every track cut down to its biggest section) or DODGE (no gun: score by slipping
-    close past bullets and staying alive).
-  - **Starting track:** Q / E step through the library; click the title or press T for the whole
-    list (type a letter to jump).
-  - **REMIX** (R, beside the track): the same song dealt differently. Other patterns, enemies
-    and upgrade offers on the same beats.
+  - **Mode** (the tiles on the left): ENDLESS (this track, then the library keeps coming),
+    SINGLE, DAILY (today's seed), DROP RUSH (every track cut down to its biggest section, one
+    fading into the next) or DODGE (no gun: score by slipping close past bullets and staying
+    alive).
+  - **REMIX** (R): the same song dealt differently. Other patterns, enemies and upgrade offers
+    on the same beats. SCORE and BEST under it show what the run is worth and your best for
+    this track, tier and mode.
+  - **Difficulty** (right): seven tiers from LULLABY (no-fail) to FLATLINE (one life) on a
+    strip that scrolls: LEFT / RIGHT, the mouse wheel or a click.
   - **Mutators:** optional rules (ALLEGRO, FORTE, SWARM, NO MERCY, GLASS). Each one, and each
-    harder tier, multiplies your score. Your best score per track, tier and mode is shown here.
-  - **Difficulty**: seven tiers from LULLABY (no-fail) to FLATLINE (one life). Hover a tile to
-    read what it does before choosing it.
-  - **PLAY FILES / PLAY FOLDER** (or drop files, folders or playlists on the window), and
-    **LIVE AUDIO**: play against whatever your PC is playing.
+    harder tier, multiplies your score.
+- **In a run:** for the first 8 seconds of a song, E skips it for the next one and Q goes back
+  one in your library. A run that was not lost can always carry on into more songs.
 - **HIGHWAY**: a side mode on the track the menu is playing. Race down the grid: switch lanes
   (A / D) around the walls that land on the kicks, jump (SPACE) the bars on the snares, collect
   the gems on the hats.
@@ -31,11 +36,11 @@ change the track, and the backdrop changes with it. Hover anything for a tooltip
   up; the practice bot is as sharp as your difficulty tier.
 - **CODEX**: what every Heart form, enemy and upgrade does, how the music becomes the level,
   your best scores, and twelve milestones to earn.
-- **MUSIC LIBRARY**: ENTER picks a folder, SHIFT+ENTER an `.m3u` playlist.
 - **OPTIONS**: volumes, SYNC OFFSET (raise it if attacks land before you hear the beat), VISUALS
   (FULL / SUBTLE / OFF: how hard the scene pulses with the music), windowed or fullscreen.
 
-Settings are saved in `heartline.cfg` next to the exe.
+Settings are saved in `heartline.cfg` next to the exe. Text is drawn in Windows' Bahnschrift;
+to use another font, put its TTF next to the exe as `heartline-font.ttf`.
 
 | Input | Action |
 |---|---|
@@ -44,7 +49,7 @@ Settings are saved in `heartline.cfg` next to the exe.
 | LMB (or auto-fire, toggle `F`) | fire — the gun plays the song's own rhythm; damage per second is the same on every song |
 | Space / Shift / RMB | dash (invulnerable while dashing) |
 | Esc / P | pause (quitting a run asks twice) |
-| Q / E (menu) | previous / next track |
+| Q / E | previous / next track (menus, and the first 8 seconds of a song in a run) |
 | F11 | fullscreen |
 
 How it plays:

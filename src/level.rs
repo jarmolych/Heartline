@@ -1069,11 +1069,17 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
 // ---------------------------------------------------------------------------------------------
 
 /// Backdrops: 0 sunset (striped sun), 1 moonrise (full moon), 2 ocean dusk (sun in the sea),
-/// 3 wire globe, 4 nebula, 5 ringed planet, 6 black hole, 7 binary sunset, 8 aurora, 9 tide
-/// (ranks of waves over the horizon), 10 prism (a striped triangle with rays).
-pub const N_SCENES: u8 = 11;
-/// Weather: 0 none, 1 rain of lines (pulses with the hats), 2 drifting dust, 3 aurora.
-pub const N_WEATHER: u8 = 4;
+/// 3 crescent (a striped crescent moon with a star), 4 nebula, 5 ringed planet, 6 black hole,
+/// 7 binary sunset, 8 aurora, 9 tide (ranks of waves over the horizon), 10 prism (a striped
+/// triangle with rays), 11 signal (a core sending rings across the sky), 12 gate (a tall striped
+/// arch of light), 13 comet (a striped head with a streaming tail).
+pub const N_SCENES: u8 = 14;
+/// Weather: 0 none, 1 rain of lines (pulses with the hats), 2 rising motes, 3 a veil of aurora,
+/// 4 snow, 5 storm (rain, cloud, a bolt on the kick), 6 mist on the horizon, 7 wind streaks.
+pub const N_WEATHER: u8 = 8;
+/// Foreground of the vista: 0 mountains (spectrum ridges), 1 the sea of sound (waves rolling in
+/// from the horizon), 2 the equaliser skyline (level-meter towers), 3 dunes.
+pub const N_GROUNDS: u8 = 4;
 /// Floor: 0 full grid, 1 open grid (every other line), 2 marks at the intersections.
 pub const N_FLOORS: u8 = 3;
 /// Horizon props: 0 none, 1 palm trees, 2 radio masts, 3 city skyline, 4 meteors.
@@ -1085,6 +1091,7 @@ pub struct Mood {
     pub weather: u8,
     pub floor: u8,
     pub prop: u8,
+    pub ground: u8,
 }
 
 /// Pick a song's look from things that can be measured about it. How busy it is (drum hits per
@@ -1106,18 +1113,25 @@ pub fn mood(an: &Analysis) -> Mood {
     let h = an.seed;
     let pick = |xs: &[u8], shift: u32| xs[((h >> shift) % xs.len() as u64) as usize];
     let tropical = bright && (85.0..=128.0).contains(&an.bpm) && (3.0..=8.0).contains(&density);
-    let (scenes, props, weathers): (&[u8], &[u8], &[u8]) = if tropical {
-        (&[2, 7, 0, 9, 2], &[1, 1, 1, 0], &[0, 0, 1, 2])
+    let (scenes, props, weathers, grounds): (&[u8], &[u8], &[u8], &[u8]) = if tropical {
+        (&[2, 7, 0, 9, 2, 12], &[1, 1, 1, 0], &[0, 0, 1, 2, 7], &[1, 1, 1, 3, 0])
     } else if density > 7.0 && !bright {
-        (&[6, 3, 5, 0, 4, 10], &[3, 3, 0, 2, 4], &[1, 1, 0, 3])
+        (&[6, 11, 5, 0, 4, 10, 13], &[3, 3, 0, 2, 4], &[1, 5, 0, 3, 5, 6], &[2, 2, 0, 1])
     } else if density > 7.0 {
-        (&[3, 0, 7, 6, 8, 10], &[3, 0, 4, 1, 0], &[0, 1, 3, 0])
+        (&[11, 0, 7, 6, 8, 10, 12], &[3, 0, 4, 1, 0], &[0, 1, 3, 0, 7], &[2, 0, 1, 0])
     } else if density < 3.5 {
-        (&[1, 4, 8, 5, 9, 2], &[4, 0, 2, 0, 1], &[2, 3, 0, 2])
+        (&[1, 4, 8, 5, 9, 2, 3, 13], &[4, 0, 2, 0, 1], &[2, 3, 0, 4, 6, 4], &[3, 1, 0, 3, 1])
     } else {
-        (&[0, 1, 2, 4, 5, 6, 7, 8, 9, 10], &[0, 1, 2, 3, 4, 0], &[0, 0, 1, 2, 3])
+        (&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], &[0, 1, 2, 3, 4, 0], &[0, 0, 1, 2, 3, 4, 5, 6, 7], &[0, 1, 2, 3, 1])
     };
-    Mood { scene: pick(scenes, 0), weather: pick(weathers, 8), floor: ((h >> 16) % N_FLOORS as u64) as u8, prop: pick(props, 24) }
+    // towers and a city would fight for the horizon
+    let ground = pick(grounds, 32);
+    let prop = match (pick(props, 24), ground) {
+        (3, 2) => 0,
+        (1, 2) => 4,
+        (p, _) => p,
+    };
+    Mood { scene: pick(scenes, 0), weather: pick(weathers, 8), floor: ((h >> 16) % N_FLOORS as u64) as u8, prop, ground }
 }
 
 // ---------------------------------------------------------------------------------------------

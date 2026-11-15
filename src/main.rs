@@ -55,8 +55,8 @@ pub struct Args {
     live: bool,
     give: u32,
     wall: bool,
-    mood: Option<(u8, u8, u8, u8)>,
-    mood_to: Option<(u8, u8, u8, u8)>,
+    mood: Option<(u8, u8, u8, u8, u8)>,
+    mood_to: Option<(u8, u8, u8, u8, u8)>,
     purgatory: bool,
     mode: usize,
     mutators: u8,
@@ -73,6 +73,8 @@ pub struct Args {
     screen: String,
     /// Debug: use this folder or playlist as the music library for this launch (not saved).
     library: Option<PathBuf>,
+    /// Debug: two seconds into the first song, trade it as if E (1) or Q (-1) was pressed.
+    swap: i32,
     live_in: String,
     live_out: String,
     /// LAN test: host a Rally match with this song.
@@ -106,8 +108,8 @@ fn parse_args() -> Args {
             // Debug: force the look, as "scene,weather,floor,prop" (see `level::Mood`).
             "--mood" => {
                 let v: Vec<u8> = val().split(',').filter_map(|x| x.trim().parse().ok()).collect();
-                if v.len() == 4 {
-                    a.mood = Some((v[0], v[1], v[2], v[3]));
+                if v.len() >= 4 {
+                    a.mood = Some((v[0], v[1], v[2], v[3], v.get(4).copied().unwrap_or(0)));
                 }
             }
             // Debug: hold the Heart in purgatory, to look at it.
@@ -115,8 +117,8 @@ fn parse_args() -> Args {
             // Debug: switch to this look after 3 s, to watch the sky transition.
             "--mood-to" => {
                 let v: Vec<u8> = val().split(',').filter_map(|x| x.trim().parse().ok()).collect();
-                if v.len() == 4 {
-                    a.mood_to = Some((v[0], v[1], v[2], v[3]));
+                if v.len() >= 4 {
+                    a.mood_to = Some((v[0], v[1], v[2], v[3], v.get(4).copied().unwrap_or(0)));
                 }
             }
             "--ss" => a.ss = val().parse().ok(),
@@ -152,6 +154,7 @@ fn parse_args() -> Args {
             }
             "--screen" => a.screen = val(),
             "--library" => a.library = Some(PathBuf::from(val())),
+            "--swap" => a.swap = val().parse().unwrap_or(0),
             "--live" => a.live = true,
             "--lan-host" => a.lan_host = Some(PathBuf::from(val())),
             "--lan-join" => a.lan_join = Some(val()),
@@ -394,6 +397,8 @@ struct LiveRun {
     ibis: VecDeque<f32>,
 }
 
+/// For this long after a song starts in a run, Q / E trade it for another one.
+const SWAP_SECS: f32 = 8.0;
 /// Menu music plays at this fraction of the in-run music volume.
 const MENU_MUSIC_GAIN: f32 = 0.5;
 // Rows of the title menu: (icon, label, tooltip).
@@ -569,6 +574,13 @@ struct App {
     track_sel: usize,
     /// The screen the track list goes back to.
     tracks_back: Screen,
+    /// The song was in a silent stretch last frame (attacks are cleared once when one begins).
+    was_silent: bool,
+    /// Seconds the current song has been playing. For the first `SWAP_SECS` of them Q / E
+    /// trade it for another.
+    song_age: f32,
+    /// The next load happens with the arena on screen (a song was traded mid-run).
+    load_in_arena: bool,
     /// Where the difficulty strip is scrolled to (eases toward `diff`).
     diff_scroll: f32,
     /// Remix number chosen in run setup: added to the seed, so the same song deals a different
@@ -720,6 +732,24 @@ fn music_folder() -> Option<PathBuf> {
 #[cfg(not(windows))]
 fn music_folder() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Music"))
+}
+
+/// A name for the music library that the font can draw. A playlist loses its extension; a name
+/// made only of symbols the font has no shapes for (emoji, say) is described by where it is.
+fn library_label(p: &Path) -> String {
+    let raw = if is_playlist(p) { p.file_stem() } else { p.file_name() };
+    let name: String = raw.and_then(|s| s.to_str()).unwrap_or("").chars().filter(|c| (*c as u32) < 0x2000).collect();
+    let name = name.trim();
+    if !name.is_empty() {
+        return name.to_string();
+    }
+    let parent = p.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("");
+    match (is_playlist(p), parent.is_empty()) {
+        (true, false) => format!("playlist in {parent}"),
+        (true, true) => "playlist".to_string(),
+        (false, false) => format!("folder in {parent}"),
+        (false, true) => "music folder".to_string(),
+    }
 }
 
 fn track_title(p: &Path) -> String {
@@ -992,7 +1022,7 @@ impl App {
         let (title, hint) = self.juke_title();
         self.rend.draw_now_playing(x, y, w, u, &self.world, &title, &hint, progress);
         let busy = self.dialog.is_some();
-        let lib_name = self.music_dir.as_ref().and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("none chosen").to_string();
+        let lib_name = self.music_dir.as_deref().map(library_label).unwrap_or_else(|| "none chosen".to_string());
         let n_lib = self.juke.list.len().saturating_sub(synth::THEME_COUNT);
         let (ts, gap) = (54.0 * u, 10.0 * u);
         let ty = y + 108.0 * u;
@@ -1342,6 +1372,7 @@ impl App {
             self.world.player.ups[up as usize] = (self.world.player.ups[up as usize] + 1).min(up.max());
         }
         self.died = false;
+        self.load_in_arena = false;
         self.loader = Some(spawn_loader(0, self.queue[0].clone(), self.track_seed(0), self.diff()));
         self.screen = Screen::Play;
         self.phase = Phase::Loading;
@@ -1452,6 +1483,56 @@ impl App {
         self.args.seed.wrapping_add(laps.wrapping_mul(0xA24B_AED4_963E_E407))
     }
 
+    /// Trade the song that just started for another: forward (`dir` > 0) skips to what comes
+    /// next, backward goes to the library track before it. The build, the score and the depth
+    /// stay. Returns false when there is nothing to trade it for.
+    fn swap_song(&mut self, dir: i32) -> bool {
+        if self.qi >= self.queue.len() {
+            return false;
+        }
+        let n = self.juke.list.len();
+        if dir > 0 {
+            if self.qi + 1 >= self.queue.len() {
+                match self.next_library_track() {
+                    Some(p) if p != self.queue[self.qi] => self.queue.push(p),
+                    _ => return false,
+                }
+            }
+            self.queue.remove(self.qi);
+        } else {
+            let cur = &self.queue[self.qi];
+            let at = self.juke.list.iter().position(|p| p == cur).unwrap_or(self.juke_seq.min(n.saturating_sub(1)));
+            let mut found = None;
+            let mut k = at;
+            for _ in 0..n {
+                k = (k + n - 1) % n;
+                if !self.queue.contains(&self.juke.list[k]) {
+                    found = Some(self.juke.list[k].clone());
+                    break;
+                }
+            }
+            match found {
+                Some(p) => self.queue[self.qi] = p,
+                None => return false,
+            }
+        }
+        // The track that was warming up as "next" is now the current one; anything else is stale.
+        self.ready = match self.ready.take() {
+            Some((i, l)) if dir > 0 && i == self.qi + 1 => Some((self.qi, l)),
+            _ => None,
+        };
+        self.loader = None;
+        self.song = None;
+        self.world.calm_down();
+        self.load_in_arena = true;
+        self.phase = Phase::Loading;
+        if self.qi == 0 {
+            self.run_key = self.score_key(&track_title(&self.queue[0]));
+        }
+        self.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+        true
+    }
+
     /// Carry on after the last queued track: same build, next track from the library.
     fn continue_run(&mut self) {
         self.endless = true;
@@ -1484,7 +1565,10 @@ impl App {
                 secs.iter().skip(1).max_by(|a, b| a.intensity.partial_cmp(&b.intensity).unwrap_or(std::cmp::Ordering::Equal))
             });
             if let Some(s) = pick {
-                start = (s.t0 - 4.0).max(0.0);
+                // come in on a beat, two bars before the section
+                let beats = &loaded.level.beats;
+                let k = beats.partition_point(|b| *b < s.t0 - 0.05);
+                start = if k >= 8 { beats[k - 8] } else { (s.t0 - 4.0).max(0.0) };
                 end_t = s.t1;
                 active = (end_t - start).max(8.0);
             }
@@ -1517,7 +1601,16 @@ impl App {
             }
         }
         self.audio.set_volume(if self.args.mute { 0.0 } else { self.volume });
-        let fade = if self.audio.has_track() { 0.45 } else { 0.0 };
+        let fade = if !self.audio.has_track() {
+            0.0
+        } else if self.setup_mode == MODE_RUSH && self.qi > 0 {
+            1.3
+        } else {
+            0.45
+        };
+        self.was_silent = false;
+        self.song_age = 0.0;
+        self.load_in_arena = false;
         self.audio.play_ex(song.track.clone(), start as f64, false, fade);
         self.juke.playing = false;
         self.song = Some(song);
@@ -1581,9 +1674,18 @@ impl App {
                 let mut inp = *input;
                 inp.fire = false;
                 self.world.update(dt, t, &inp, idle_beat, &Feat::default(), 0.0, false);
-                (1.0, hud, 0.0)
+                (if self.qi == 0 && !self.load_in_arena { 1.0 } else { 0.0 }, hud, 0.0)
             }
             Phase::Song => {
+                // Not feeling this one? In its first seconds Q / E trade it for another.
+                self.song_age += dt;
+                let debug_swap = if self.args.swap != 0 && self.song_age > 2.0 { std::mem::take(&mut self.args.swap) } else { 0 };
+                if (self.song_age < SWAP_SECS && !self.world.dead && self.args.selftest.is_none()) || debug_swap != 0 {
+                    let dir = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32 + debug_swap;
+                    if dir != 0 && self.swap_song(dir) {
+                        return self.step_files(dt, input);
+                    }
+                }
                 let Some(song) = self.song.as_mut() else {
                     self.phase = Phase::Loading;
                     return (1.0, hud, 0.0);
@@ -1605,12 +1707,21 @@ impl App {
                     }
                 }
                 let silent = drift || (song.an.in_silence(t) && song.an.in_silence(t + 0.7));
+                // A quiet stretch clears the attacks once. The camera does not move: the arena
+                // stays the arena until the run is over.
+                if silent && !self.was_silent && !drift {
+                    self.world.calm_down();
+                }
+                self.was_silent = silent;
                 let feat = feat_at(&song.an, t);
                 let intensity = song.an.intensity_at(t);
                 let bp = beat_pos(&song.level.beats, t);
                 self.world.update(dt, t, input, bp, &feat, intensity, !silent);
                 let dur = song.level.duration.max(0.1);
                 hud.title = song.track.name.clone();
+                if self.song_age < SWAP_SECS && self.args.selftest.is_none() {
+                    hud.status = format!("Q / E   change song   {:.0}", (SWAP_SECS - self.song_age).ceil());
+                }
                 hud.progress = t / dur;
                 hud.time_left = dur - t;
                 hud.bpm = song.level.bpm;
@@ -1624,7 +1735,12 @@ impl App {
                     if !self.world.ended {
                         self.world.apply(&LevelEvent { t, lead: 0.0, ev: Ev::End });
                     }
-                    self.audio.stop();
+                    // DROP RUSH never goes quiet between tracks: this one plays on past its
+                    // section until the next one fades in over it.
+                    let rush_on = self.setup_mode == MODE_RUSH && self.qi + 1 < self.queue.len();
+                    if !rush_on {
+                        self.audio.stop();
+                    }
                     self.world.calm_down();
                     self.qi += 1;
                     self.song = None;
@@ -1635,7 +1751,7 @@ impl App {
                         self.screen = Screen::Results;
                     }
                 }
-                (if silent { 1.0 } else { 0.0 }, hud, hud_progress(t, dur))
+                (if drift { 1.0 } else { 0.0 }, hud, hud_progress(t, dur))
             }
             Phase::Intermission(mut it) => {
                 it += dt;
@@ -1645,7 +1761,8 @@ impl App {
                 inp.fire = false;
                 self.world.update(dt, t, &inp, idle_beat, &Feat::default(), 0.0, false);
                 hud.title = self.queue.get(self.qi).map(|p| format!("NEXT  {}", track_title(p))).unwrap_or_default();
-                hud.banner = "TRACK CLEAR".into();
+                let rush = self.setup_mode == MODE_RUSH;
+                hud.banner = if rush { "DROP CLEAR".into() } else { "TRACK CLEAR".into() };
                 hud.banner_a = (it * 3.0).min(1.0) * ((2.2 - it) * 2.5).clamp(0.0, 1.0);
                 let ready = self.ready.as_ref().map(|r| r.0 == self.qi).unwrap_or(false);
                 hud.status = if !self.world.orbs.is_empty() {
@@ -1657,11 +1774,12 @@ impl App {
                 };
                 // The next track rolls in after a short breath; upgrade orbs stay on the field
                 // through its opening seconds (nothing attacks yet).
-                if ready && it > 2.0 {
+                if ready && it > if rush { 1.1 } else { 2.0 } {
                     let (_, loaded) = self.ready.take().unwrap();
                     self.begin_song(loaded);
                 }
-                (1.0, hud, 0.0)
+                // The view stays on the arena between tracks.
+                (0.0, hud, 0.0)
             }
             Phase::Dying(mut dtm) => {
                 dtm += dt;
@@ -1874,7 +1992,8 @@ impl App {
         if self.world.dead {
             self.phase = Phase::Dying(0.0);
         }
-        (if idle_now { 1.0 } else { 0.0 }, hud, 0.0)
+        // A gap clears the attacks, but the view only drifts off once the music has really stopped.
+        (if live.silent_for > 8.0 { 1.0 } else { 0.0 }, hud, 0.0)
     }
 }
 
@@ -3069,6 +3188,9 @@ async fn run(args: Args) {
         runner: None,
         track_sel: 0,
         tracks_back: Screen::Setup,
+        was_silent: false,
+        song_age: 0.0,
+        load_in_arena: false,
         diff_scroll: diff as f32,
         remix: 0,
         setup_mode: 0,
@@ -3312,15 +3434,15 @@ async fn run(args: Args) {
             app.args.screen.clear();
             app.start_highway();
         }
-        if let Some((scene, weather, floor, prop)) = app.args.mood {
-            app.world.mood = level::Mood { scene, weather, floor, prop };
+        if let Some((scene, weather, floor, prop, ground)) = app.args.mood {
+            app.world.mood = level::Mood { scene, weather, floor, prop, ground };
         }
         if app.args.purgatory && app.screen == Screen::Play {
             app.world.purgatory = true;
             app.world.purg_until = app.world.t + 4.5;
         }
-        if let Some((scene, weather, floor, prop)) = app.args.mood_to.filter(|_| app.wall > 3.0) {
-            app.world.mood = level::Mood { scene, weather, floor, prop };
+        if let Some((scene, weather, floor, prop, ground)) = app.args.mood_to.filter(|_| app.wall > 3.0) {
+            app.world.mood = level::Mood { scene, weather, floor, prop, ground };
         }
         app.rend.set_palette(app.world.palette);
         if lan_match && app.lan.as_ref().is_some_and(|l| l.in_match()) {

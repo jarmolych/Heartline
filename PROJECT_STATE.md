@@ -72,13 +72,22 @@ merging the last one brings everything:
 42. `feat/track-picker` — track list in run setup, depth frames around the arena
 43. `docs/fifth-pass-t9` — plan progress, README, `CLAUDE.md` brief and this file
 44. `feat/thread` — dash through a bullet for a "thread"; builds `Heartline-0.3.0-T10`
+45. `feat/menu-ror2-layout` — run setup rebuilt after Risk of Rain 2's layout, smooth font,
+    rounded widgets, track corner, song swap, no camera change in silence, DROP RUSH
+    cross-fades, crescent / signal / gate / comet skies, four more weathers, sea of sound /
+    equaliser skyline / dunes foregrounds; builds `Heartline-0.3.0-T11`
 
 The third playtest (2026-11-15) and what was done about it are in
 `docs/plans/0.4-playtest-3.md`. The depth pass that followed (every area of the game, planned
 and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "Known weak
-spots" first.
+spots" first. The newest round (menu layout, skies, foregrounds, run flow) is
+`docs/plans/0.6-menu-and-skies.md`.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T10-win-x64` (built from branch 44).
+**Test build:** `#UserTesting\Heartline-0.3.0-T11-win-x64` (built from branch 45).
+
+**Font:** the game loads `heartline-font.ttf` from next to the exe, else Windows' Bahnschrift,
+else the built-in pixel font. No font file is in the repo. The player wants the look of Risk
+of Rain 2's font; a closer free match needs a download they have not yet approved.
 
 **Verified by machine only:** 39 unit tests, `--sim` balance runs, screenshots of the menu
 screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any
@@ -234,6 +243,11 @@ SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia
 tools, balance simulator, bot · `rng.rs` PRNG · `runner.rs` Highway side mode.
 
 ## Session Log
+- 2026-11-15 — Menu and skies round (`docs/plans/0.6-menu-and-skies.md`): run setup in grouped
+  panels with a scrolling difficulty strip, track preview and library bar top right on both
+  menus, smooth font, round corners, icons, results screen, Q / E song swap in a track's first
+  8 s, runs can always carry on, no camera change in silence, DROP RUSH cross-fade, globe sky
+  replaced, three new skies, four new weathers, three new foregrounds. 39 unit tests. T11.
 - 2026-11-15 — Fifth pass of 0.5: Comb and Sweep patterns, track list, depth frames. 39 unit
   tests pass; shipped `Heartline-0.3.0-T9`.
 - 2026-11-15 — Fourth pass of 0.5: carry-a-charge objective, milestones, live pulses announced

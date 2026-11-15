@@ -1158,6 +1158,8 @@ impl World {
         if self.phases.len() % 3 == 0 {
             self.mood.scene = (self.mood.scene + 1 + self.rng.below(3) as u8) % N_SCENES;
             self.mood.prop = self.rng.below(N_PROPS as usize) as u8;
+            self.mood.weather = self.rng.below(crate::level::N_WEATHER as usize) as u8;
+            self.mood.ground = self.rng.below(crate::level::N_GROUNDS as usize) as u8;
         }
     }
 

@@ -548,11 +548,13 @@ pub fn icon_row(x: f32, y: f32, w: f32, h: f32, ic: Icon, label: &str, selected:
     let r = RADIUS * u;
     if selected {
         let pulse = 0.85 + 0.15 * (time * 4.0).sin();
-        rrect(x, y, w, h, r, a(pal.secondary, 0.42));
+        // a dark backing first, so the row reads over a bright sky
+        rrect(x, y, w, h, r, Color::new(0.02, 0.0, 0.07, 0.6));
+        rrect(x, y, w, h, r, a(pal.secondary, 0.5));
         rrect_lines(x, y, w, h, r, 1.5 * u, a(pal.accent, 0.55 + 0.35 * pulse));
     } else {
-        rrect(x, y, w, h, r, Color::new(0.02, 0.0, 0.07, if hv { 0.7 } else { 0.5 }));
-        rrect_lines(x, y, w, h, r, 1.0 * u, Color::new(1.0, 1.0, 1.0, 0.1));
+        rrect(x, y, w, h, r, Color::new(0.02, 0.0, 0.07, if hv { 0.8 } else { 0.66 }));
+        rrect_lines(x, y, w, h, r, 1.0 * u, Color::new(1.0, 1.0, 1.0, 0.12));
     }
     let col = if selected { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.78) };
     // the icon sits in its own cell, like a portrait
