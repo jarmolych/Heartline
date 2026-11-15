@@ -61,4 +61,29 @@ on GitHub, so it always builds and every feature can be reverted with one click.
 ## Project basics
 - Rust is not on PATH: `"$USERPROFILE/.cargo/bin/cargo.exe"`.
 - Keep CRLF line endings, use pure-Rust dependencies, and keep level generation deterministic.
-- Specialist agents live in `.claude/agents/`. Plans live in `docs/plans/`.
+- Plans live in `docs/plans/`.
+
+## Agents: use them rarely
+Almost all progress on this game has come from one session working directly and checking its own
+work with the tools below. Sub-agents start cold, re-read the project, and on 2026-11-14 running
+several at once used up the plan's allowance twice. So:
+- **Do the work inline by default.** Do not spawn an agent unless the user asks for one, and
+  never run more than one at a time.
+- **Three agents remain** in `.claude/agents/`, each for work that is truly separate and large:
+  `planner` (a written plan for a multi-day feature, before any code), `audio-dsp-engineer`
+  (`analysis.rs` signal-processing work) and `graphics-programmer` (`render.rs` shader work).
+- Removed on 2026-11-15 because the lead does these jobs better inline: `playtester` (use the
+  commands below), `code-reviewer` (use `/code-review`), `gameplay-programmer` and
+  `network-programmer`.
+
+## Checking your own work (this replaces a playtester)
+Run these yourself after a change; each takes seconds.
+- Unit tests: `"$USERPROFILE/.cargo/bin/cargo.exe" test --release`
+- Balance: `heartline.exe --sim "E:\Libraries\Music\Straftat" --sample 6 --bot-delay 120`
+  (`--diff N`, `--song-idx N` for a later depth, `--give N` to start with N upgrades). Compare
+  hits per minute with the last numbers in `PROJECT_STATE.md`.
+- What the analysis hears: `heartline.exe --analyze FILE` (sections, phases, layers, ear candy).
+- Screenshots: `heartline.exe FILE --mute --selftest tmp/s --start 40 --shots 45,60 --secs 25
+  --size 1280x720`, then read the PNGs. Menu screens: no file, `--wall --screen setup|options`.
+  Looks: `--mood scene,weather,floor,prop`, `--mood-to ...` (sky transition), `--purgatory`.
+- None of this tells you how the game feels or sounds. Say so when reporting.
