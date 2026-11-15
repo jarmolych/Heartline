@@ -52,15 +52,21 @@ merging the last one brings everything:
 23. `feat/mutators-modes-scores` — mutators, score multipliers, best scores, DROP RUSH, DODGE
 24. `art/chime-stars` — chimes light stars in the sky
 25. `docs/depth-t5` — plan progress, README and this file
+26. `feat/live-phases` — live audio gets Heart phases, the moving Heart, beat-timed pulses
+27. `feat/charge-resonance` — the Heart charges in Overdrive; Resonance meter
+28. `feat/highway-mode` — Highway side mode (`src/runner.rs`)
+29. `feat/rally-heat` — rally speeds up; practice bot follows the tier
+30. `feat/codex-finale` — Codex screen, Finale, HUD fixes
+31. `docs/second-pass-t6` — plan progress, README and this file
 
 The third playtest (2026-11-15) and what was done about it are in
 `docs/plans/0.4-playtest-3.md`. The depth pass that followed (every area of the game, planned
 and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "Known weak
 spots" first.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T5-win-x64` (built from branch 25).
+**Test build:** `#UserTesting\Heartline-0.3.0-T6-win-x64` (built from branch 31).
 
-**Verified by machine only:** 38 unit tests, `--sim` balance runs, screenshots of the menu
+**Verified by machine only:** 39 unit tests, `--sim` balance runs, screenshots of the menu
 screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any
 of it feels or sounds, mouse hover tooltips and slider dragging, the firewall button (it was
 never run), a two-PC Rally match, live-mode pause with real audio.
@@ -71,7 +77,7 @@ Boss rush mode; per-mood rim and Heart shapes; live mode on the new generator an
 capture (`docs/plans/live-audio.md`, needs the player's answers to its section 6).
 
 Balance (`--sim`, 6 Straftat songs, 120 ms bot, hits per minute, LULLABY to FLATLINE):
-about 2.0 / 2.8 / 3.7 / 4.2 / 5.2 / 6.2 / 7.8 (after the 0.5 depth pass).
+about 2.0 / 2.4 / 3.8 / 3.5 / 4.7 / 5.9 / 7.2 (after the second pass of 0.5).
 
 ## What the player said (2026-11-14 playtest of 0.1) — the brief for 0.2
 - Dies within ~30 s on any song; difficulty should NOT depend on the song (slow songs were much
@@ -211,9 +217,12 @@ Build / run / test:
 `StreamAnalyzer`) · `level.rs` events + `generate` + `LiveGen` · `game.rs` simulation ·
 `render.rs` shaders / drawing / HUD / UI widgets · `engine.rs` audio thread (playback, crossfade,
 SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia · `tools.rs` CLI
-tools, balance simulator, bot · `rng.rs` PRNG.
+tools, balance simulator, bot · `rng.rs` PRNG · `runner.rs` Highway side mode.
 
 ## Session Log
+- 2026-11-15 — Second pass of 0.5 (player away, "take the wheel"): live-mode phases, Heart
+  charge, Resonance, Highway mode, rally heat, Codex, Finale. 39 unit tests pass; shipped
+  `Heartline-0.3.0-T6`.
 - 2026-11-15 — Depth pass (`docs/plans/0.5-depth.md`): sky rework, moving Heart, beat-timed
   pulses and graze, two enemies, six upgrades, mutators, best scores, DROP RUSH and DODGE.
   38 unit tests pass; shipped `Heartline-0.3.0-T5`.
