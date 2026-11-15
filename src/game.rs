@@ -43,10 +43,19 @@ pub enum UpgradeId {
     Magnet,
     Echo,
     Encore,
+    /// Rare: shots bounce off the arena walls.
+    Ricochet,
+    /// Rare: the first shot after every downbeat is charged.
+    Downbeat,
+    /// Rare: dashing turns nearby bullets into shootable notes.
+    Transpose,
 }
 
+/// Number of upgrades (`Player::ups` is indexed by `UpgradeId as usize`).
+pub const N_UPGRADES: usize = 13;
+
 impl UpgradeId {
-    pub const ALL: [UpgradeId; 10] = [
+    pub const ALL: [UpgradeId; N_UPGRADES] = [
         UpgradeId::Tempo,
         UpgradeId::Chord,
         UpgradeId::Gain,
@@ -57,7 +66,14 @@ impl UpgradeId {
         UpgradeId::Magnet,
         UpgradeId::Echo,
         UpgradeId::Encore,
+        UpgradeId::Ricochet,
+        UpgradeId::Downbeat,
+        UpgradeId::Transpose,
     ];
+    /// Rare upgrades are only offered for an A or S grade (`World::spawn_reward`).
+    pub fn rare(self) -> bool {
+        matches!(self, UpgradeId::Ricochet | UpgradeId::Downbeat | UpgradeId::Transpose)
+    }
     pub fn name(self) -> &'static str {
         match self {
             UpgradeId::Tempo => "TEMPO",
@@ -70,6 +86,9 @@ impl UpgradeId {
             UpgradeId::Magnet => "MAGNET",
             UpgradeId::Echo => "ECHO",
             UpgradeId::Encore => "ENCORE",
+            UpgradeId::Ricochet => "RICOCHET",
+            UpgradeId::Downbeat => "DOWNBEAT",
+            UpgradeId::Transpose => "TRANSPOSE",
         }
     }
     pub fn desc(self) -> &'static str {
@@ -84,6 +103,9 @@ impl UpgradeId {
             UpgradeId::Magnet => "bigger pickup range",
             UpgradeId::Echo => "drone that fires on the beat",
             UpgradeId::Encore => "shield, recharges each section",
+            UpgradeId::Ricochet => "shots bounce off the walls",
+            UpgradeId::Downbeat => "first shot of every bar is charged",
+            UpgradeId::Transpose => "dash turns nearby bullets to notes",
         }
     }
     pub fn max(self) -> u8 {
@@ -98,6 +120,9 @@ impl UpgradeId {
             UpgradeId::Magnet => 3,
             UpgradeId::Echo => 3,
             UpgradeId::Encore => 1,
+            UpgradeId::Ricochet => 2,
+            UpgradeId::Downbeat => 3,
+            UpgradeId::Transpose => 1,
         }
     }
 }
@@ -179,7 +204,7 @@ pub struct Player {
     pub dash_cd_max: f32,
     pub dash_dir: Vec2,
     pub shield: bool,
-    pub ups: [u8; 10],
+    pub ups: [u8; N_UPGRADES],
     pub xp: u32,
     pub xp_next: u32,
     pub level: u32,
@@ -202,7 +227,7 @@ impl Player {
             dash_cd_max: 1.1,
             dash_dir: vec2(0.0, -1.0),
             shield: false,
-            ups: [0; 10],
+            ups: [0; N_UPGRADES],
             xp: 0,
             xp_next: 14,
             level: 0,
@@ -262,7 +287,32 @@ pub struct PendingPulse {
     pub aim: f32,
 }
 
+/// Performance since the last graded reward.
+#[derive(Clone, Copy, Default)]
+pub struct GradeWindow {
+    pub hits: u32,
+    pub broke_phase: bool,
+    pub peak_mult: f32,
+}
+
+/// Grades, worst to best, and what each one offers.
+pub const GRADES: [&str; 4] = ["C", "B", "A", "S"];
+
+/// Run modifiers: one more is switched on with every depth (song) of a run.
+pub const MODS: [(&str, &str); 4] = [
+    ("ALLEGRO", "bullets fly 15% faster"),
+    ("FORTE", "pulses carry 20% more bullets"),
+    ("SWARM", "more enemies at once"),
+    ("NO MERCY", "no breather after a hit"),
+];
+pub const MOD_ALLEGRO: u8 = 1;
+pub const MOD_FORTE: u8 = 2;
+pub const MOD_SWARM: u8 = 4;
+pub const MOD_NO_MERCY: u8 = 8;
+
 pub struct Shot {
+    /// Wall bounces left (RICOCHET).
+    pub bounce: u8,
     pub pos: Vec2,
     pub vel: Vec2,
     pub dmg: f32,
@@ -351,6 +401,7 @@ pub struct Shard {
 pub struct Orb {
     pub pos: Vec2,
     pub up: UpgradeId,
+    pub rare: bool,
     pub life: f32,
     pub age: f32,
 }
@@ -578,7 +629,17 @@ pub struct World {
     pub ended: bool,
     pub dead: bool,
     pub song_idx: u32,
-    pending_orbs: u32,
+    /// Offers waiting for the current one to be taken: (choices, rare).
+    pending_orbs: Vec<(usize, bool)>,
+    /// Performance since the last graded reward.
+    pub window: GradeWindow,
+    /// Grade of the last graded reward (index into `GRADES`) and a 0..1 envelope for the HUD.
+    pub last_grade: usize,
+    pub grade_banner: f32,
+    /// Run modifiers in force (`MOD_*` bits), and which one this run starts with.
+    pub mods: u8,
+    mod_offset: u8,
+    downbeat_ready: bool,
     /// Seconds of actual play (music audible) in the current song.
     pub active_t: f32,
     /// Sound effects requested this frame: (which, gain 0..1, pan -1..1). Drained by the app.
@@ -680,7 +741,13 @@ impl World {
             ended: false,
             dead: false,
             song_idx: 0,
-            pending_orbs: 0,
+            pending_orbs: Vec::new(),
+            window: GradeWindow::default(),
+            last_grade: 1,
+            grade_banner: 0.0,
+            mods: 0,
+            mod_offset: 0,
+            downbeat_ready: false,
             active_t: 0.0,
             sounds: Vec::with_capacity(16),
             shard_snd_cd: 0.0,
@@ -820,15 +887,17 @@ impl World {
         self.burst(Vec2::ZERO, 60, 700.0, C_PRIMARY, 7.0);
         self.text(vec2(0.0, -120.0), "PURGATORY", C_ACCENT, 54.0, 2.6);
         self.text(vec2(0.0, -78.0), "phase broken early - everything is shootable", C_WHITE, 22.0, 2.6);
+        self.window.broke_phase = true;
         let left = self.phase_left();
         if left > 5.0 {
-            self.spawn_orbs(left.min(14.0));
+            self.spawn_reward(left.min(14.0));
         }
     }
 
     fn break_heart(&mut self) {
         self.heart.hp = 0.0;
         self.heart.broken = true;
+        self.window.broke_phase = true;
         self.heart.nodes.clear();
         self.stats.hearts_broken += 1;
         self.snd(Sfx::HeartBreak, 1.0, 0.0);
@@ -876,6 +945,14 @@ impl World {
         self.rng = Rng::new(seed ^ 0xA5A5_5A5A);
         let hp = active_secs * 2.6 * (1.0 + 0.3 * song_idx as f32) * (0.75 + 0.25 * self.diff);
         self.heart = Heart::new(hp, 1.0);
+        // Depth: every song after the first switches one more modifier on.
+        if song_idx == 0 {
+            self.mod_offset = (seed % MODS.len() as u64) as u8;
+        }
+        self.mods = 0;
+        for k in 0..(song_idx as usize).min(MODS.len()) {
+            self.mods |= 1 << ((self.mod_offset as usize + k) % MODS.len());
+        }
         self.phases.clear();
         self.phase_i = 0;
         self.purgatory = false;
@@ -969,8 +1046,10 @@ impl World {
             Ev::Pulse { pattern, count, speed, rot, soft } => {
                 let soft = soft || self.purgatory;
                 // Scale the planned pulse by the current pressure.
-                let count = if count == 0 { 0 } else { ((count as f32 * p).round() as u16).clamp(3, 64) };
-                let speed = speed * (0.82 + 0.18 * p.min(1.25));
+                let forte = if self.mods & MOD_FORTE != 0 { 1.2 } else { 1.0 };
+                let allegro = if self.mods & MOD_ALLEGRO != 0 { 1.15 } else { 1.0 };
+                let count = if count == 0 { 0 } else { ((count as f32 * p * forte).round() as u16).clamp(3, 64) };
+                let speed = speed * (0.82 + 0.18 * p.min(1.25)) * allegro;
                 if e.lead > 0.02 && self.t < e.t - 0.01 {
                     if self.pulses.len() < 24 {
                         let aim = self.player.pos.y.atan2(self.player.pos.x);
@@ -987,7 +1066,7 @@ impl World {
                 }
             }
             Ev::Spawn { kind, x, y } => {
-                let cap = (2.0 + 5.0 * p * self.diff).round() as usize;
+                let cap = (2.0 + 5.0 * p * self.diff).round() as usize + if self.mods & MOD_SWARM != 0 { 3 } else { 0 };
                 if p >= self.gate(P_SPAWN) && self.enemies.len() + self.portals.len() < cap.min(MAX_ENEMIES) {
                     // Tougher kinds only appear once the run has warmed up.
                     let kind = match kind {
@@ -1067,7 +1146,7 @@ impl World {
                 let (x, y) = chime_point(pitch);
                 self.burst(vec2(x, y), 3, 120.0, C_ACCENT, 3.0);
             }
-            Ev::Orbs => self.spawn_orbs(14.0),
+            Ev::Orbs => self.spawn_reward(14.0),
             Ev::Heal { x, y } => {
                 self.shards.push(Shard { pos: vec2(x, y), vel: Vec2::ZERO, life: 12.0, value: 2, heal: true, age: 0.0 });
             }
@@ -1086,6 +1165,9 @@ impl World {
     fn on_beat(&mut self, down: bool) {
         self.beat_pulse = 1.0;
         self.bar_beat = if down { 0 } else { self.bar_beat + 1 };
+        if down && self.player.up(UpgradeId::Downbeat) > 0 {
+            self.downbeat_ready = true;
+        }
         if down {
             self.bar_pulse = 1.0;
         }
@@ -1136,7 +1218,7 @@ impl World {
             }
             if let Some(tp) = target {
                 let d = (tp - from).normalize_or_zero();
-                self.shots.push(Shot { pos: from, vel: d * 1150.0, dmg, pierce: 0, life: 0.8, r: 4.0 });
+                self.shots.push(Shot { bounce: 0, pos: from, vel: d * 1150.0, dmg, pierce: 0, life: 0.8, r: 4.0 });
             }
         }
     }
@@ -1245,30 +1327,94 @@ impl World {
         self.bullets.push(Bullet { pos: d * (HEART_R * 0.9) + vel * late, vel, r: 4.5, soft: false, age: 0.0, fade: 1.0, kind: B_TICK, pat: 9 });
     }
 
+    /// The newest modifier of this depth, if the depth added one: (name, what it does).
+    pub fn new_mod(&self) -> Option<(&'static str, &'static str)> {
+        let n = self.song_idx as usize;
+        if n == 0 || n > MODS.len() {
+            return None;
+        }
+        Some(MODS[(self.mod_offset as usize + n - 1) % MODS.len()])
+    }
+
+    /// Announce the depth the run has reached (call after `begin_song`).
+    pub fn announce_depth(&mut self, title: &str) {
+        self.text(vec2(0.0, -170.0), &format!("DEPTH {}", self.song_idx + 1), C_ACCENT, 58.0, 3.2);
+        self.text(vec2(0.0, -126.0), title, C_WHITE, 24.0, 3.2);
+        if let Some((name, what)) = self.new_mod() {
+            self.text(vec2(0.0, 150.0), &format!("+ {name}"), C_DANGER, 30.0, 3.6);
+            self.text(vec2(0.0, 180.0), what, C_WHITE, 20.0, 3.6);
+        }
+    }
+
+    /// A reward the song placed (calm section, purgatory, track clear): the offer depends on
+    /// how the player did since the last one. C = 1 choice, B = 3, A = 3 with a rare, S = rare
+    /// and a heal.
+    pub fn spawn_reward(&mut self, life: f32) {
+        let w = self.window;
+        let mut pts = match w.hits {
+            0 => 2,
+            1 => 1,
+            _ => 0,
+        };
+        pts += w.broke_phase as usize + (w.peak_mult >= 3.0) as usize;
+        let grade = match pts {
+            0 => 0,
+            1 | 2 => 1,
+            3 => 2,
+            _ => 3,
+        };
+        self.window = GradeWindow::default();
+        self.last_grade = grade;
+        self.grade_banner = 1.0;
+        let why = format!(
+            "{}{}{}",
+            match w.hits {
+                0 => "no hits".to_string(),
+                1 => "1 hit".to_string(),
+                n => format!("{n} hits"),
+            },
+            if w.broke_phase { "  +  phase broken" } else { "" },
+            if w.peak_mult >= 3.0 { "  +  combo" } else { "" }
+        );
+        self.text(vec2(0.0, 96.0), &format!("GRADE {}", GRADES[grade]), if grade >= 2 { C_ACCENT } else { C_WHITE }, 40.0, 2.6);
+        self.text(vec2(0.0, 126.0), &why, C_WHITE, 18.0, 2.6);
+        if grade == 3 {
+            self.drop_shards(vec2(0.0, 200.0), 1, true);
+        }
+        self.spawn_offer(life, if grade == 0 { 1 } else { 3 }, grade >= 2);
+    }
+
+    /// An ungraded offer of three common upgrades (level-ups).
     pub fn spawn_orbs(&mut self, life: f32) {
+        self.spawn_offer(life, 3, false);
+    }
+
+    fn spawn_offer(&mut self, life: f32, choices: usize, rare: bool) {
         if !self.orbs.is_empty() {
-            self.pending_orbs += 1;
+            self.pending_orbs.push((choices, rare));
             return;
         }
-        let mut pool: Vec<UpgradeId> = UpgradeId::ALL
-            .iter()
-            .copied()
-            .filter(|u| self.player.up(*u) < u.max())
-            .collect();
-        if pool.is_empty() {
+        let open = |u: &UpgradeId| self.player.up(*u) < u.max();
+        let mut pool: Vec<UpgradeId> = UpgradeId::ALL.iter().copied().filter(|u| !u.rare() && open(u)).collect();
+        let rares: Vec<UpgradeId> = UpgradeId::ALL.iter().copied().filter(|u| u.rare() && open(u)).collect();
+        let mut picks: Vec<(UpgradeId, bool)> = Vec::new();
+        if rare && !rares.is_empty() {
+            picks.push((rares[self.rng.below(rares.len())], true));
+        }
+        while picks.len() < choices && !pool.is_empty() {
+            let i = self.rng.below(pool.len());
+            picks.push((pool.swap_remove(i), false));
+        }
+        if picks.is_empty() {
             self.drop_shards(vec2(0.0, 250.0), 10, true);
             return;
         }
         let base = self.rng.angle();
-        for k in 0..3 {
-            if pool.is_empty() {
-                break;
-            }
-            let i = self.rng.below(pool.len());
-            let up = pool.swap_remove(i);
-            let a = base + k as f32 * TAU / 3.0;
+        let n = picks.len();
+        for (k, (up, rare)) in picks.into_iter().enumerate() {
+            let a = base + k as f32 * TAU / n as f32;
             let pos = vec2(a.cos() * 430.0, a.sin() * 270.0);
-            self.orbs.push(Orb { pos, up, life, age: 0.0 });
+            self.orbs.push(Orb { pos, up, rare, life, age: 0.0 });
         }
         let p = self.player.pos + vec2(0.0, -60.0);
         self.text(p, "UPGRADE READY", C_ACCENT, 26.0, 1.6);
@@ -1315,7 +1461,8 @@ impl World {
         }
         p.hp -= 1;
         // The breather after a hit shrinks with the tier; the hardest has no mercy window.
-        let h = hardness(self.diff);
+        let h = if self.mods & MOD_NO_MERCY != 0 { 1.0 } else { hardness(self.diff) };
+        self.window.hits += 1;
         p.invuln = HIT_INVULN * (1.0 - 0.4 * h);
         let pos = p.pos;
         self.stats.hits += 1;
@@ -1476,6 +1623,8 @@ impl World {
             n.flash = (n.flash - dt * 7.0).max(0.0);
         }
         self.purg += ((self.purgatory as u8 as f32) - self.purg) * (dt * 3.0).min(1.0);
+        self.window.peak_mult = self.window.peak_mult.max(self.mult());
+        self.grade_banner = (self.grade_banner - dt / 3.0).max(0.0);
         self.form_banner = (self.form_banner - dt / 3.5).max(0.0);
         self.combo_idle += dt;
         if self.combo_idle > 3.0 {
@@ -1492,6 +1641,18 @@ impl World {
             let s = &mut self.shots[i];
             s.pos += s.vel * dt;
             s.life -= dt;
+            if s.bounce > 0 && (s.pos.x.abs() > HALF_W || s.pos.y.abs() > HALF_H) {
+                if s.pos.x.abs() > HALF_W {
+                    s.vel.x = -s.vel.x;
+                }
+                if s.pos.y.abs() > HALF_H {
+                    s.vel.y = -s.vel.y;
+                }
+                s.pos.x = s.pos.x.clamp(-HALF_W, HALF_W);
+                s.pos.y = s.pos.y.clamp(-HALF_H, HALF_H);
+                s.bounce -= 1;
+                s.life += 0.5;
+            }
             let out = s.pos.x.abs() > HALF_W + 60.0 || s.pos.y.abs() > HALF_H + 60.0;
             if s.life <= 0.0 || out {
                 self.shots.swap_remove(i);
@@ -1552,8 +1713,23 @@ impl World {
             dashed = true;
         }
         if dashed {
-            let x = p.pos.x;
-            self.snd(Sfx::Dash, 0.5, x);
+            let pos = p.pos;
+            self.snd(Sfx::Dash, 0.5, pos.x);
+            // TRANSPOSE: the dash rewrites nearby bullets into shootable notes.
+            if self.player.up(UpgradeId::Transpose) > 0 {
+                let mut n = 0;
+                for b in self.bullets.iter_mut() {
+                    if !b.soft && b.pos.distance(pos) < 240.0 {
+                        b.soft = true;
+                        b.kind = B_NOTE;
+                        b.r = 8.0;
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    self.burst(pos, 14, 520.0, C_ACCENT, 4.0);
+                }
+            }
         }
         let p = &mut self.player;
         let mut spawn_after = false;
@@ -1633,7 +1809,11 @@ impl World {
     /// Fire the gun. `scale` is the shot's damage multiplier (`gun_damage`): heavier shots are
     /// drawn larger and get a soft tick.
     fn fire(&mut self, scale: f32) {
+        // DOWNBEAT: the first shot after each downbeat is charged.
+        let charged = std::mem::take(&mut self.downbeat_ready);
+        let scale = if charged { scale * (1.0 + 1.5 * self.player.up(UpgradeId::Downbeat) as f32) } else { scale };
         let p = &mut self.player;
+        let bounce = p.ups[UpgradeId::Ricochet as usize];
         let n = 1 + p.ups[UpgradeId::Chord as usize] as usize;
         let dmg = (1.0 + 0.5 * p.ups[UpgradeId::Gain as usize] as f32) * scale;
         let pierce = p.ups[UpgradeId::Pierce as usize];
@@ -1644,7 +1824,7 @@ impl World {
         for k in 0..n {
             let off = (k as f32 - (n as f32 - 1.0) * 0.5) * 0.11;
             let d = dir(base + off);
-            self.shots.push(Shot { pos: p.pos + d * 15.0, vel: d * 1250.0, dmg, pierce, life: 0.85, r });
+            self.shots.push(Shot { bounce, pos: p.pos + d * 15.0, vel: d * 1250.0, dmg, pierce, life: 0.85, r });
         }
         self.stats.gun_dmg += scale;
         if scale >= GUN_TICK_FROM {
@@ -2035,9 +2215,9 @@ impl World {
             self.apply_upgrade(up);
         }
         self.orbs.retain(|o| o.life > 0.0);
-        if self.orbs.is_empty() && self.pending_orbs > 0 {
-            self.pending_orbs -= 1;
-            self.spawn_orbs(14.0);
+        if self.orbs.is_empty() && !self.pending_orbs.is_empty() {
+            let (choices, rare) = self.pending_orbs.remove(0);
+            self.spawn_offer(14.0, choices, rare);
         }
     }
 
