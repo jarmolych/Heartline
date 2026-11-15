@@ -970,6 +970,11 @@ impl World {
         self.purgatory = false;
     }
 
+    /// The Heart is in the last phase of a song that is known ahead of time.
+    pub fn in_finale(&self) -> bool {
+        !self.live_phases && self.phases.len() > 2 && self.phase_i + 1 == self.phases.len() && !self.purgatory && !self.heart.broken
+    }
+
     /// Heart health at which the current phase is beaten.
     pub fn phase_floor(&self) -> f32 {
         self.phases.get(self.phase_i).map_or(0.0, |p| p.floor)
@@ -1099,6 +1104,11 @@ impl World {
         self.phase_i = idx;
         self.purgatory = false;
         self.heart.form = form;
+        if !self.live_phases && self.phases.len() > 2 && idx + 1 == self.phases.len() {
+            self.text(vec2(0.0, -170.0), "FINALE", C_DANGER, 58.0, 2.8);
+            self.text(vec2(0.0, -128.0), "every pulse has an echo", C_WHITE, 22.0, 2.8);
+            self.flash = self.flash.max(0.25);
+        }
         self.heart.phase_max = (self.heart.hp - self.phases[idx].floor).max(1.0);
         self.heart.nodes.clear();
         if form.has_nodes() {
@@ -1413,6 +1423,14 @@ impl World {
                         let to_p = self.player.pos - self.heart.pos;
                         let aim = to_p.y.atan2(to_p.x);
                         self.pulses.push(PendingPulse { t: e.t, lead: e.lead, pattern, count, speed, rot, soft, aim });
+                        // Finale: in its last phase every pulse has an echo half a beat later,
+                        // off to one side and made of shootable notes.
+                        if self.in_finale() && count >= 5 && self.pulses.len() < 24 {
+                            let half = 0.5 * self.beat_len.clamp(0.25, 1.0);
+                            let side = if self.beat_count % 2 == 0 { 0.5 } else { -0.5 };
+                            let n = ((count as f32 * 0.6).round() as u16).max(3);
+                            self.pulses.push(PendingPulse { t: e.t + half, lead: e.lead + half, pattern, count: n, speed, rot: rot + 0.3, soft: true, aim: aim + side });
+                        }
                     }
                 } else {
                     let to_p = self.player.pos - self.heart.pos;
