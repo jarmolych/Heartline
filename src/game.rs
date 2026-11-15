@@ -652,6 +652,8 @@ pub struct World {
     /// Shot times of the current song per TEMPO level (`level::gun_track`). Empty when the song
     /// is not known ahead of time (live audio, drift): the gun then locks to a beat subdivision.
     pub gun: Vec<Vec<f32>>,
+    /// The current song's look (set by the app; the renderer reads it).
+    pub mood: Mood,
     /// The Heart's phases for this song (empty when the song is not known ahead of time).
     pub phases: Vec<HeartPhase>,
     pub phase_i: usize,
@@ -754,6 +756,7 @@ impl World {
             last_hit_age: 0.0,
             mercy: 1.0,
             gun: Vec::new(),
+            mood: Mood::default(),
             phases: Vec::new(),
             phase_i: 0,
             purgatory: false,

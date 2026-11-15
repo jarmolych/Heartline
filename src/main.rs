@@ -54,6 +54,7 @@ pub struct Args {
     live: bool,
     give: u32,
     wall: bool,
+    mood: Option<(u8, u8, u8)>,
     mortal: bool,
     /// Debug: keep the drift (idle) scene up while the song plays, with no attacks.
     drift: bool,
@@ -91,6 +92,13 @@ fn parse_args() -> Args {
             "--secs" => a.secs = val().parse().unwrap_or(30.0),
             "--start" => a.start = val().parse().unwrap_or(0.0),
             "--seed" => a.seed = val().parse().unwrap_or(0),
+            // Debug: force the look, as "scene,weather,floor" (see `level::Mood`).
+            "--mood" => {
+                let v: Vec<u8> = val().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if v.len() == 3 {
+                    a.mood = Some((v[0], v[1], v[2]));
+                }
+            }
             "--ss" => a.ss = val().parse().ok(),
             "--give" => a.give = val().parse().unwrap_or(0),
             "--sim" => a.sim = true,
@@ -736,6 +744,7 @@ impl App {
             match res {
                 Ok(loaded) => {
                     if self.juke.list.get(self.juke.idx) == Some(&path) {
+                        self.world.mood = loaded.level.mood;
                         self.juke.loaded = Some((path, loaded));
                         self.juke.playing = false;
                         self.juke.fails = 0;
@@ -996,6 +1005,7 @@ impl App {
         self.world.begin_song(loaded.level.active_secs, self.qi as u32, loaded.level.seed);
         self.world.gun = loaded.level.gun.clone();
         self.world.set_phases(&loaded.level.phases);
+        self.world.mood = loaded.level.mood;
         if self.qi > 0 {
             let title = loaded.track.name.clone();
             self.world.announce_depth(&title);
@@ -2672,6 +2682,9 @@ async fn run(args: Args) {
         }
 
         // ---- draw ----
+        if let Some((scene, weather, floor)) = app.args.mood {
+            app.world.mood = level::Mood { scene, weather, floor };
+        }
         app.rend.set_palette(app.world.palette);
         if lan_match && app.lan.as_ref().is_some_and(|l| l.in_match()) {
             // Rally draws its own field and score HUD over the music-reactive scene.
