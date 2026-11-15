@@ -290,6 +290,8 @@ fn spawn_loader(idx: usize, path: PathBuf, seed: u64, diff: f32) -> Loader {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Menu,
+    /// Settings sub-screen of the menu (volumes, sync offset, visuals, display).
+    Options,
     LiveSetup,
     /// LAN Rally: host/join, lobby, countdown, match and results (`App::lan` holds the stage).
     Lan,
@@ -336,6 +338,25 @@ struct LiveRun {
 
 /// Menu music plays at this fraction of the in-run music volume.
 const MENU_MUSIC_GAIN: f32 = 0.5;
+// Rows of the main menu, and the groups they are drawn in: (first row, heading).
+const M_START: usize = 0;
+const M_SINGLE: usize = 1;
+const M_DIFF: usize = 2;
+const M_LIBRARY: usize = 3;
+const M_FILES: usize = 4;
+const M_FOLDER: usize = 5;
+const M_LIVE: usize = 6;
+const M_LAN: usize = 7;
+const M_OPTIONS: usize = 8;
+const M_QUIT: usize = 9;
+const MENU_GROUPS: [(usize, &str); 4] = [(M_START, "PLAY"), (M_LIBRARY, "MUSIC"), (M_LIVE, "OTHER MODES"), (M_OPTIONS, "")];
+// Rows of the options screen.
+const O_MUSIC: usize = 0;
+const O_SFX: usize = 1;
+const O_SYNC: usize = 2;
+const O_VISUALS: usize = 3;
+const O_DISPLAY: usize = 4;
+const O_BACK: usize = 5;
 /// How long the menu stays on one track before cross-fading to the next.
 const MENU_TRACK_SECS: f32 = 75.0;
 
@@ -852,7 +873,7 @@ impl App {
             }
         }
         // Keep the next track warming up in the background.
-        if self.loader.is_none() && self.screen != Screen::Menu && self.live.is_none() {
+        if self.loader.is_none() && !matches!(self.screen, Screen::Menu | Screen::Options) && self.live.is_none() {
             let want = if self.song.is_some() && self.phase == Phase::Song { self.qi + 1 } else { self.qi };
             let have = self.ready.as_ref().map(|r| r.0);
             if want < self.queue.len() && have != Some(want) {
@@ -2276,6 +2297,12 @@ fn lan_to_lobby(lan: &mut Lan, ready: bool) {
 
 /// Draws a vertical list of buttons. Returns the index that was activated (click / Enter).
 fn menu_list(items: &[String], sel: &mut usize, x: f32, y: f32, u: f32, rend: &Renderer, audio: &Audio) -> Option<usize> {
+    let ys: Vec<f32> = (0..items.len()).map(|i| y + i as f32 * 54.0 * u).collect();
+    menu_list_at(items, &ys, sel, x, u, rend, audio)
+}
+
+/// A vertical list of buttons with the top of every row given in `ys` (lets rows sit in groups).
+fn menu_list_at(items: &[String], ys: &[f32], sel: &mut usize, x: f32, u: f32, rend: &Renderer, audio: &Audio) -> Option<usize> {
     let before = *sel;
     let (mx, my) = mouse_position();
     let h = 46.0 * u;
@@ -2288,7 +2315,7 @@ fn menu_list(items: &[String], sel: &mut usize, x: f32, y: f32, u: f32, rend: &R
         *sel = (*sel + items.len() - 1) % items.len();
     }
     for (i, it) in items.iter().enumerate() {
-        let by = y + i as f32 * (h + 8.0 * u);
+        let by = ys[i];
         let hover = mx >= x && mx <= x + w && my >= by && my <= by + h;
         if hover && mouse_delta_position() != Vec2::ZERO {
             *sel = i;
@@ -2443,8 +2470,8 @@ async fn run(args: Args) {
 
         // ---- dropped files / dialog results ----
         let dropped: Vec<PathBuf> = get_dropped_files().into_iter().filter_map(|f| f.path).collect();
-        if !dropped.is_empty() && matches!(app.screen, Screen::Menu | Screen::Results | Screen::LiveSetup) {
-            let as_library = app.screen == Screen::Menu && app.menu_sel == 4 && dropped.len() == 1 && (dropped[0].is_dir() || is_playlist(&dropped[0]));
+        if !dropped.is_empty() && matches!(app.screen, Screen::Menu | Screen::Options | Screen::Results | Screen::LiveSetup) {
+            let as_library = app.screen == Screen::Menu && app.menu_sel == M_LIBRARY && dropped.len() == 1 && (dropped[0].is_dir() || is_playlist(&dropped[0]));
             if as_library {
                 app.music_dir = Some(dropped[0].clone());
                 app.juke_rescan();
@@ -2585,73 +2612,54 @@ async fn run(args: Args) {
                     .unwrap_or("none")
                     .to_string();
                 let n_lib = app.juke.list.len().saturating_sub(synth::THEME_COUNT);
+                // Indexed by the `M_*` constants.
                 let items = vec![
                     "START RUN   (endless, from this track)".to_string(),
                     "SINGLE TRACK".to_string(),
+                    format!("DIFFICULTY   {}", DIFFS[app.diff].1),
+                    format!("MUSIC LIBRARY   {lib_name}  ({n_lib} tracks)"),
                     "PLAY FILES...".to_string(),
                     "PLAY FOLDER...".to_string(),
-                    format!("MUSIC LIBRARY   {lib_name}  ({n_lib} tracks)"),
                     "LIVE AUDIO   (what your PC is playing)".to_string(),
                     "LAN RALLY   (two PCs, same network)".to_string(),
-                    format!("DIFFICULTY   {}", DIFFS[app.diff].1),
-                    "MUSIC VOLUME".to_string(),
-                    "EFFECTS VOLUME".to_string(),
-                    format!("SYNC OFFSET   {:+.0} ms", app.offset_ms),
-                    format!("VISUALS   {}", VISUALS[app.visuals].1),
-                    format!("DISPLAY   {}", if app.fullscreen { "BORDERLESS FULLSCREEN" } else { "WINDOWED" }),
+                    "OPTIONS...".to_string(),
                     "QUIT".to_string(),
                 ];
-                let act = if app.dialog.is_none() { menu_list(&items, &mut app.menu_sel, 110.0 * u, 256.0 * u, u, &app.rend, &app.audio) } else { None };
-                // Volume rows are sliders: drag with the mouse, or Left / Right.
-                let act = match act {
-                    Some(8) | Some(9) => None,
-                    a => a,
-                };
-                let mut slid = false;
-                for (row, is_sfx) in [(8usize, false), (9usize, true)] {
-                    let by = 256.0 * u + row as f32 * 54.0 * u;
-                    let (tx, tw) = (110.0 * u + 262.0 * u, 176.0 * u);
-                    let ty = by + 23.0 * u;
-                    let v = if is_sfx { app.sfx_volume } else { app.volume };
-                    let on = app.menu_sel == row;
-                    let col = if on { pal.accent } else { pal.primary };
-                    draw_rectangle(tx, ty - 1.5 * u, tw, 3.0 * u, Color::new(1.0, 1.0, 1.0, 0.22));
-                    draw_rectangle(tx, ty - 1.5 * u, tw * v, 3.0 * u, col);
-                    draw_circle(tx + tw * v, ty, if on { 8.0 } else { 6.0 } * u, WHITE);
-                    draw_circle_lines(tx + tw * v, ty, if on { 11.0 } else { 9.0 } * u, 1.5 * u, col);
-                    text_left(&format!("{:.0}%", v * 100.0), tx + tw + 20.0 * u, by + 31.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85));
-                    let (mx, my) = mouse_position();
-                    if app.dialog.is_none() && is_mouse_button_down(MouseButton::Left) && my >= by && my <= by + 46.0 * u && mx >= tx - 14.0 * u && mx <= tx + tw + 14.0 * u {
-                        let nv = (((mx - tx) / tw).clamp(0.0, 1.0) * 20.0).round() / 20.0;
-                        if (nv - v).abs() > 0.001 {
-                            if is_sfx { app.sfx_volume = nv } else { app.volume = nv }
-                            app.menu_sel = row;
-                            slid = true;
-                        }
+                let mx0 = 110.0 * u;
+                let mut ys: Vec<f32> = Vec::with_capacity(items.len());
+                let mut y = 286.0 * u;
+                for i in 0..items.len() {
+                    if i > 0 && MENU_GROUPS.iter().any(|g| g.0 == i) {
+                        y += 34.0 * u;
+                    }
+                    ys.push(y);
+                    y += 54.0 * u;
+                }
+                for (row, name) in MENU_GROUPS {
+                    if !name.is_empty() {
+                        text_left(&render::spaced(name), mx0 + 2.0 * u, ys[row] - 9.0 * u, 19.0 * u, Color::new(pal.primary.r, pal.primary.g, pal.primary.b, 0.95));
                     }
                 }
-                // left/right adjusts the selected row; on the play rows it changes the track
+                let act = if app.dialog.is_none() { menu_list_at(&items, &ys, &mut app.menu_sel, mx0, u, &app.rend, &app.audio) } else { None };
+                // left/right changes the track on the play rows and the tier on DIFFICULTY
                 let dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
-                let track_dirk = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32 + if app.menu_sel <= 1 { dirk } else { 0 };
+                let track_dirk = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32 + if app.menu_sel <= M_SINGLE { dirk } else { 0 };
                 if track_dirk != 0 && app.dialog.is_none() {
                     app.juke_next(track_dirk);
                 }
-                let mut changed = slid;
-                if dirk != 0 {
+                let mut changed = false;
+                if dirk != 0 && app.menu_sel == M_DIFF {
+                    app.diff = ((app.diff as i32 + dirk).rem_euclid(DIFFS.len() as i32)) as usize;
                     changed = true;
-                    match app.menu_sel {
-                        7 => app.diff = ((app.diff as i32 + dirk).rem_euclid(DIFFS.len() as i32)) as usize,
-                        8 => app.volume = (app.volume + 0.1 * dirk as f32).clamp(0.0, 1.0),
-                        9 => app.sfx_volume = (app.sfx_volume + 0.1 * dirk as f32).clamp(0.0, 1.0),
-                        10 => app.offset_ms = (app.offset_ms + 10.0 * dirk as f32).clamp(-100.0, 300.0),
-                        11 => app.visuals = ((app.visuals as i32 + dirk).rem_euclid(VISUALS.len() as i32)) as usize,
-                        _ => changed = false,
-                    }
                 }
                 match act {
-                    Some(0) => app.start_from_juke(0, true),
-                    Some(1) => app.start_from_juke(0, false),
-                    Some(2) => {
+                    Some(M_START) => app.start_from_juke(0, true),
+                    Some(M_SINGLE) => app.start_from_juke(0, false),
+                    Some(M_DIFF) => {
+                        app.diff = (app.diff + 1) % DIFFS.len();
+                        changed = true;
+                    }
+                    Some(M_FILES) => {
                         let (tx, rx) = channel();
                         std::thread::spawn(move || {
                             let exts: Vec<&str> = decode::AUDIO_EXTS.to_vec();
@@ -2663,8 +2671,8 @@ async fn run(args: Args) {
                         app.dialog = Some(rx);
                         app.dialog_library = false;
                     }
-                    Some(3) | Some(4) => {
-                        let library = act == Some(4);
+                    Some(M_FOLDER) | Some(M_LIBRARY) => {
+                        let library = act == Some(M_LIBRARY);
                         // SHIFT + ENTER on MUSIC LIBRARY picks an .m3u playlist instead of a folder.
                         let playlist = library && (is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift));
                         let (tx, rx) = channel();
@@ -2680,46 +2688,20 @@ async fn run(args: Args) {
                         app.dialog = Some(rx);
                         app.dialog_library = library;
                     }
-                    Some(5) => {
+                    Some(M_LIVE) => {
                         app.audio.refresh_devices();
                         app.screen = Screen::LiveSetup;
                         app.menu_sel = 0;
                     }
-                    Some(6) => app.lan_open(),
-                    Some(7) => {
-                        app.diff = (app.diff + 1) % DIFFS.len();
-                        changed = true;
+                    Some(M_LAN) => app.lan_open(),
+                    Some(M_OPTIONS) => {
+                        app.screen = Screen::Options;
+                        app.menu_sel = 0;
                     }
-                    Some(8) => {
-                        app.volume = if app.volume >= 0.99 { 0.0 } else { (app.volume + 0.1).min(1.0) };
-                        changed = true;
-                    }
-                    Some(9) => {
-                        app.sfx_volume = if app.sfx_volume >= 0.99 { 0.0 } else { (app.sfx_volume + 0.1).min(1.0) };
-                        changed = true;
-                    }
-                    Some(10) => {
-                        app.offset_ms = if app.offset_ms >= 295.0 { -100.0 } else { app.offset_ms + 10.0 };
-                        changed = true;
-                    }
-                    Some(11) => {
-                        app.visuals = (app.visuals + 1) % VISUALS.len();
-                        changed = true;
-                    }
-                    Some(12) => {
-                        app.fullscreen = !app.fullscreen;
-                        display::set_borderless(app.fullscreen);
-                        changed = true;
-                    }
-                    Some(13) => break,
+                    Some(M_QUIT) => break,
                     _ => {}
                 }
                 if changed {
-                    let mute = app.args.mute;
-                    app.audio.set_sfx_volume(if mute { 0.0 } else { app.sfx_volume });
-                    if app.menu_sel == 9 && !is_mouse_button_down(MouseButton::Left) || (slid && is_mouse_button_pressed(MouseButton::Left)) {
-                        app.audio.sfx(Sfx::Shard, 1.0, 0.0);
-                    }
                     app.save_settings();
                 }
                 // Now-playing card
@@ -2732,19 +2714,113 @@ async fn run(args: Args) {
                 app.rend.draw_now_playing(sw - 700.0 * u, 110.0 * u, 590.0 * u, u, &app.world, &title, &hint, progress);
                 let hy = sh - 60.0 * u;
                 let help = match app.menu_sel {
-                    7 => DIFFS[app.diff].2,
-                    11 => "VISUALS: how hard the scene pulses with the music (zoom punches, flashes, rings). SUBTLE or OFF for comfort",
-                    6 => "LAN RALLY: a beat-locked paddle duel against a second PC on your network; the host picks the song",
-                    10 => "SYNC OFFSET: raise it if attacks land before you hear the beat (soundbar / Bluetooth lag), lower it if they land late",
-                    4 => "MUSIC LIBRARY: ENTER picks a folder, SHIFT+ENTER an .m3u playlist (or drop either here). Runs and the menu draw from it",
-                    0 => "START RUN: this track, then the library keeps coming. HP, upgrades and score carry over until you fall",
-                    1 => "SINGLE TRACK: just this song; you can still carry on into more songs from the results screen",
+                    M_DIFF => DIFFS[app.diff].2,
+                    M_LAN => "LAN RALLY: a beat-locked paddle duel against a second PC on your network; the host picks the song",
+                    M_LIBRARY => "MUSIC LIBRARY: ENTER picks a folder, SHIFT+ENTER an .m3u playlist (or drop either here). Runs and the menu draw from it",
+                    M_START => "START RUN: this track, then the library keeps coming. HP, upgrades and score carry over until you fall",
+                    M_SINGLE => "SINGLE TRACK: just this song; you can still carry on into more songs from the results screen",
+                    M_OPTIONS => "OPTIONS: volumes, sync offset, visual intensity, display",
                     _ => "drop audio files or folders on the window to play them",
                 };
                 text_shadow(help, 110.0 * u, hy, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.8), -1);
                 text_shadow("WASD move   mouse aim   SPACE dash   F auto-fire   ESC / P pause   F11 fullscreen", 110.0 * u, hy + 28.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.55), -1);
                 if app.dialog.is_some() {
                     text_shadow("waiting for the file dialog...", sw * 0.5, sh * 0.5, 28.0 * u, pal.accent, 0);
+                }
+            }
+            Screen::Options => {
+                dim(0.5);
+                let x = 110.0 * u;
+                let y0 = 256.0 * u;
+                render::vtext("OPTIONS", x, 130.0 * u, 64.0 * u, WHITE, -1);
+                // Indexed by the `O_*` constants.
+                let items = vec![
+                    "MUSIC VOLUME".to_string(),
+                    "EFFECTS VOLUME".to_string(),
+                    format!("SYNC OFFSET   {:+.0} ms", app.offset_ms),
+                    format!("VISUALS   {}", VISUALS[app.visuals].1),
+                    format!("DISPLAY   {}", if app.fullscreen { "BORDERLESS FULLSCREEN" } else { "WINDOWED" }),
+                    "BACK".to_string(),
+                ];
+                let act = menu_list(&items, &mut app.menu_sel, x, y0, u, &app.rend, &app.audio);
+                // Volume rows are sliders: drag with the mouse, or Left / Right.
+                let act = match act {
+                    Some(O_MUSIC) | Some(O_SFX) => None,
+                    a => a,
+                };
+                let mut slid = false;
+                for (row, is_sfx) in [(O_MUSIC, false), (O_SFX, true)] {
+                    let by = y0 + row as f32 * 54.0 * u;
+                    let (tx, tw) = (x + 262.0 * u, 176.0 * u);
+                    let ty = by + 23.0 * u;
+                    let v = if is_sfx { app.sfx_volume } else { app.volume };
+                    let on = app.menu_sel == row;
+                    let col = if on { pal.accent } else { pal.primary };
+                    draw_rectangle(tx, ty - 1.5 * u, tw, 3.0 * u, Color::new(1.0, 1.0, 1.0, 0.22));
+                    draw_rectangle(tx, ty - 1.5 * u, tw * v, 3.0 * u, col);
+                    draw_circle(tx + tw * v, ty, if on { 8.0 } else { 6.0 } * u, WHITE);
+                    draw_circle_lines(tx + tw * v, ty, if on { 11.0 } else { 9.0 } * u, 1.5 * u, col);
+                    text_left(&format!("{:.0}%", v * 100.0), tx + tw + 20.0 * u, by + 31.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85));
+                    let (mx, my) = mouse_position();
+                    if is_mouse_button_down(MouseButton::Left) && my >= by && my <= by + 46.0 * u && mx >= tx - 14.0 * u && mx <= tx + tw + 14.0 * u {
+                        let nv = (((mx - tx) / tw).clamp(0.0, 1.0) * 20.0).round() / 20.0;
+                        if (nv - v).abs() > 0.001 {
+                            if is_sfx { app.sfx_volume = nv } else { app.volume = nv }
+                            app.menu_sel = row;
+                            slid = true;
+                        }
+                    }
+                }
+                let dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
+                let mut changed = slid;
+                if dirk != 0 {
+                    changed = true;
+                    match app.menu_sel {
+                        O_MUSIC => app.volume = (app.volume + 0.1 * dirk as f32).clamp(0.0, 1.0),
+                        O_SFX => app.sfx_volume = (app.sfx_volume + 0.1 * dirk as f32).clamp(0.0, 1.0),
+                        O_SYNC => app.offset_ms = (app.offset_ms + 10.0 * dirk as f32).clamp(-100.0, 300.0),
+                        O_VISUALS => app.visuals = ((app.visuals as i32 + dirk).rem_euclid(VISUALS.len() as i32)) as usize,
+                        _ => changed = false,
+                    }
+                }
+                let mut back = is_key_pressed(KeyCode::Escape);
+                match act {
+                    Some(O_SYNC) => {
+                        app.offset_ms = if app.offset_ms >= 295.0 { -100.0 } else { app.offset_ms + 10.0 };
+                        changed = true;
+                    }
+                    Some(O_VISUALS) => {
+                        app.visuals = (app.visuals + 1) % VISUALS.len();
+                        changed = true;
+                    }
+                    Some(O_DISPLAY) => {
+                        app.fullscreen = !app.fullscreen;
+                        display::set_borderless(app.fullscreen);
+                        changed = true;
+                    }
+                    Some(O_BACK) => back = true,
+                    _ => {}
+                }
+                if changed {
+                    let mute = app.args.mute;
+                    app.audio.set_sfx_volume(if mute { 0.0 } else { app.sfx_volume });
+                    if app.menu_sel == O_SFX && !is_mouse_button_down(MouseButton::Left) || (slid && is_mouse_button_pressed(MouseButton::Left)) {
+                        app.audio.sfx(Sfx::Shard, 1.0, 0.0);
+                    }
+                    app.save_settings();
+                }
+                let help = match app.menu_sel {
+                    O_MUSIC => "MUSIC VOLUME: drag the slider or use LEFT / RIGHT. The menu plays quieter than a run",
+                    O_SFX => "EFFECTS VOLUME: drag the slider or use LEFT / RIGHT",
+                    O_SYNC => "SYNC OFFSET: raise it if attacks land before you hear the beat (soundbar / Bluetooth lag), lower it if they land late",
+                    O_VISUALS => "VISUALS: how hard the scene pulses with the music (zoom punches, flashes, rings). SUBTLE or OFF for comfort",
+                    O_DISPLAY => "DISPLAY: windowed or borderless fullscreen (F11 anywhere)",
+                    _ => "ESC  back to the menu",
+                };
+                text_shadow(help, x, sh - 60.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.8), -1);
+                if back {
+                    app.screen = Screen::Menu;
+                    app.menu_sel = M_OPTIONS;
                 }
             }
             Screen::LiveSetup => {
@@ -2837,7 +2913,7 @@ async fn run(args: Args) {
                 }
                 if is_key_pressed(KeyCode::Escape) {
                     app.screen = Screen::Menu;
-                    app.menu_sel = 2;
+                    app.menu_sel = M_LIVE;
                 }
             }
             Screen::Paused => {
