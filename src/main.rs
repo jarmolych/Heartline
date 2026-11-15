@@ -361,9 +361,10 @@ const S_DIFF: usize = 1;
 const S_TRACK: usize = 2;
 const S_START: usize = 3;
 const S_OTHER: usize = 4;
-const SETUP_MODES: [(Icon, &str, &str); 2] = [
+const SETUP_MODES: [(Icon, &str, &str); 3] = [
     (Icon::Endless, "ENDLESS RUN", "This track, then the library keeps coming. HP, upgrades and score carry over until you fall."),
     (Icon::Single, "SINGLE TRACK", "Just this song. You can still carry on into more songs from the results screen."),
+    (Icon::Sync, "DAILY SEED", "An endless run on today's seed: the same songs give everyone the same levels and upgrade offers today."),
 ];
 const SETUP_OTHER: [(Icon, &str, &str); 3] = [
     (Icon::Files, "PLAY FILES...", "Pick audio files or an .m3u playlist and play them in order. Dropping files on the window does the same."),
@@ -435,7 +436,10 @@ struct App {
     visuals: usize,
     menu_sel: usize,
     /// Run setup: ENDLESS RUN (true) or SINGLE TRACK, and the focused button of the last row.
-    setup_endless: bool,
+    /// Index into `SETUP_MODES`.
+    setup_mode: usize,
+    /// The seed from the command line (DAILY SEED replaces `args.seed` for one run).
+    base_seed: u64,
     setup_col: usize,
     dialog: Option<Receiver<Vec<PathBuf>>>,
     /// True when the open folder dialog is choosing the music library (not starting a run).
@@ -975,7 +979,7 @@ impl App {
             self.qi = self.queue.len() - 1;
             self.juke.playing = false;
             self.audio.stop();
-            self.world.spawn_orbs(22.0);
+            self.world.spawn_reward(22.0);
             self.screen = Screen::Play;
             self.phase = Phase::Intermission(0.0);
         }
@@ -992,6 +996,10 @@ impl App {
         self.world.begin_song(loaded.level.active_secs, self.qi as u32, loaded.level.seed);
         self.world.gun = loaded.level.gun.clone();
         self.world.set_phases(&loaded.level.phases);
+        if self.qi > 0 {
+            let title = loaded.track.name.clone();
+            self.world.announce_depth(&title);
+        }
         self.world.beat_len = if loaded.level.bpm > 1.0 { 60.0 / loaded.level.bpm } else { 0.5 };
         let timeline = Arc::new(Timeline::from_analysis(&loaded.an));
         let mut song = Song { track: loaded.track, an: loaded.an, level: loaded.level, timeline, cursor: 0, last_t: start };
@@ -1122,7 +1130,7 @@ impl App {
                     self.qi += 1;
                     self.song = None;
                     if self.qi < self.queue.len() {
-                        self.world.spawn_orbs(22.0);
+                        self.world.spawn_reward(22.0);
                         self.phase = Phase::Intermission(0.0);
                     } else {
                         self.screen = Screen::Results;
@@ -2450,7 +2458,8 @@ async fn run(args: Args) {
         fullscreen: false,
         visuals: 0,
         menu_sel: 0,
-        setup_endless: true,
+        setup_mode: 0,
+        base_seed: args.seed,
         setup_col: 0,
         dialog: None,
         dialog_library: false,
@@ -2766,7 +2775,7 @@ async fn run(args: Args) {
                 // ---- mode: both choices stay visible ----
                 ui::heading("RUN", x, 212.0 * u, u, &pal);
                 let modes: Vec<(Option<Icon>, &str)> = SETUP_MODES.iter().map(|m| (Some(m.0), m.1)).collect();
-                let cur = if app.setup_endless { 0 } else { 1 };
+                let cur = app.setup_mode.min(SETUP_MODES.len() - 1);
                 let (click, hov) = ui::segments(x, 224.0 * u, w, 62.0 * u, &modes, cur, row == S_MODE, u, &pal);
                 if let Some(i) = hov {
                     tip.set(SETUP_MODES[i].1, SETUP_MODES[i].2, true);
@@ -2774,12 +2783,12 @@ async fn run(args: Args) {
                     tip.set(SETUP_MODES[cur].1, SETUP_MODES[cur].2, false);
                 }
                 if let Some(i) = click.filter(|_| !busy) {
-                    app.setup_endless = i == 0;
+                    app.setup_mode = i;
                     app.menu_sel = S_MODE;
                     pick = true;
                 }
                 if row == S_MODE && dirk != 0 {
-                    app.setup_endless = !app.setup_endless;
+                    app.setup_mode = (cur as i32 + dirk).rem_euclid(SETUP_MODES.len() as i32) as usize;
                     pick = true;
                 }
 
@@ -2849,7 +2858,7 @@ async fn run(args: Args) {
                 // ---- start ----
                 let (hs, cs) = ui::button(x, 690.0 * u, 320.0 * u, 68.0 * u, Some(Icon::Play), "START", row == S_START, true, u, &pal);
                 if hs || row == S_START {
-                    tip.set("START", if app.setup_endless { SETUP_MODES[0].2 } else { SETUP_MODES[1].2 }, hs);
+                    tip.set("START", SETUP_MODES[cur].2, hs);
                 }
                 text_left("ENTER  start        ESC  back", x + 350.0 * u, 732.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
 
@@ -2884,7 +2893,13 @@ async fn run(args: Args) {
                 }
                 if start {
                     app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
-                    let endless = app.setup_endless;
+                    let endless = app.setup_mode != 1;
+                    // DAILY SEED: days since 1970-01-01 (UTC) seeds the levels and the offers.
+                    app.args.seed = if app.setup_mode == 2 {
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 86_400).unwrap_or(0)
+                    } else {
+                        app.base_seed
+                    };
                     app.start_from_juke(0, endless);
                 } else if let Some(i) = other {
                     app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);

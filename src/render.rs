@@ -2629,7 +2629,12 @@ impl Renderer {
                 self.edge3(o.pos, 18.0, m * (ed[0] * sc), m * (ed[1] * sc), 2.0, pal.accent, fade, sc);
             }
             arc(o.pos, 48.0, -PI * 0.5, -PI * 0.5 + TAU * (o.life / 14.0).clamp(0.0, 1.0), 2.0, alpha(WHITE, 0.5 * fade));
-            wtext(o.up.name(), o.pos + vec2(0.0, -66.0), 28.0, alpha(pal.accent, fade), tscale);
+            if o.rare {
+                poly_lines(o.pos, 3, 52.0 * pulse, self.time * 0.9, 2.5, alpha(pal.danger, fade));
+                poly_lines(o.pos, 3, 52.0 * pulse, self.time * 0.9 + PI, 2.5, alpha(pal.danger, fade * 0.7));
+                wtext("RARE", o.pos + vec2(0.0, -92.0), 16.0, alpha(pal.danger, fade), tscale);
+            }
+            wtext(o.up.name(), o.pos + vec2(0.0, -66.0), 28.0, alpha(if o.rare { WHITE } else { pal.accent }, fade), tscale);
             wtext(o.up.desc(), o.pos + vec2(0.0, 72.0), 18.0, alpha(WHITE, fade * 0.9), tscale);
             let lvl = w.player.up(o.up);
             if lvl > 0 {
@@ -3135,6 +3140,14 @@ impl Renderer {
                 if lvl > 0 {
                     text_shadow(&format!("{} {}", up.name(), roman(lvl)), sw - m, uy, 20.0 * u, alpha(pal.accent, 0.85), 1);
                     uy -= 22.0 * u;
+                }
+            }
+
+            // Run modifiers of this depth, above the upgrades
+            for (k, md) in MODS.iter().enumerate() {
+                if w.mods >> k & 1 == 1 {
+                    text_shadow(md.0, sw - m, uy, 18.0 * u, alpha(pal.danger, 0.9), 1);
+                    uy -= 20.0 * u;
                 }
             }
 
