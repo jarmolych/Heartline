@@ -221,6 +221,8 @@ pub struct Level {
     pub active_secs: f32,
     /// The player's gun track: shot times per TEMPO level (see `gun_track`).
     pub gun: Vec<Vec<f32>>,
+    /// The song's sections as (start, end, kind): one Heart phase each (`World::set_phases`).
+    pub phases: Vec<(f32, f32, SectionKind)>,
 }
 
 /// Whole-song overview for the HUD: the "heartline" of the track.
@@ -1006,6 +1008,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         seed,
         active_secs: (an.duration - silent).max(1.0),
         gun: gun_track(&an.beats, &an.onsets, an.duration),
+        phases: an.sections.iter().map(|s| (s.t0, s.t1, s.kind)).collect(),
     }
 }
 

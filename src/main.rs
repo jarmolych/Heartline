@@ -991,6 +991,7 @@ impl App {
         let start = if self.qi == 0 { self.args.start.max(0.0) } else { 0.0 };
         self.world.begin_song(loaded.level.active_secs, self.qi as u32, loaded.level.seed);
         self.world.gun = loaded.level.gun.clone();
+        self.world.set_phases(&loaded.level.phases);
         self.world.beat_len = if loaded.level.bpm > 1.0 { 60.0 / loaded.level.bpm } else { 0.5 };
         let timeline = Arc::new(Timeline::from_analysis(&loaded.an));
         let mut song = Song { track: loaded.track, an: loaded.an, level: loaded.level, timeline, cursor: 0, last_t: start };

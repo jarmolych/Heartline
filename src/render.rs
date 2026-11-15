@@ -2548,8 +2548,53 @@ impl Renderer {
         arc(Vec2::ZERO, 132.0, 0.0, TAU, 1.5, alpha(WHITE, 0.12 * lv));
         arc(Vec2::ZERO, 132.0, -PI * 0.5, -PI * 0.5 + TAU * progress.clamp(0.0, 1.0), 3.0, alpha(pal.accent, 0.9 * lv));
         if !h.broken {
-            let frac = (h.hp / h.max_hp.max(1.0)).clamp(0.0, 1.0);
+            // The arc under the Heart is the current phase (the whole Heart when there are none).
+            let frac = if w.phases.is_empty() { (h.hp / h.max_hp.max(1.0)).clamp(0.0, 1.0) } else { w.phase_frac() };
             arc(Vec2::ZERO, 144.0, PI * 0.5 - PI * frac, PI * 0.5 + PI * frac, 4.0, alpha(mixc(pal.danger, WHITE, h.flash), 0.85 * lv));
+            // Shell: a ring that closes over the Heart; it parts into four plates as it opens.
+            let shut = (1.0 - h.open) * lv * (1.0 - w.purg);
+            if shut > 0.02 {
+                let r = HEART_R + 12.0;
+                let gap = 0.35 * h.open;
+                for q in 0..4 {
+                    let a0 = self.time * 0.3 + q as f32 * TAU / 4.0 + gap;
+                    arc(Vec2::ZERO, r, a0, a0 + TAU / 4.0 - 2.0 * gap - 0.04, 5.0, alpha(pal.secondary, 0.9 * shut));
+                }
+                disc2(Vec2::ZERO, r, 24, alpha(pal.secondary, 0.16 * shut), alpha(pal.secondary, 0.05 * shut));
+            } else if h.form == HeartForm::Valve || h.form == HeartForm::Overdrive {
+                let k = 0.5 + 0.5 * (self.time * 8.0).sin();
+                arc(Vec2::ZERO, HEART_R + 12.0, 0.0, TAU, 2.0, alpha(pal.accent, (0.35 + 0.3 * k) * lv * h.open));
+            }
+            // Nodes: shield nodes (Shell) or linked cores (Split).
+            let lit = h.lit_node();
+            let n = h.nodes.len();
+            for k in 0..n {
+                let nd = &h.nodes[k];
+                if nd.hp <= 0.0 {
+                    continue;
+                }
+                let p = h.node_pos(k);
+                let live = h.form == HeartForm::Shell || lit == Some(k);
+                let col = mixc(if live { pal.accent } else { alpha(WHITE, 0.45) }, WHITE, nd.flash);
+                // tether to the Heart
+                let d = p.normalize_or_zero();
+                seg(d * (HEART_R + 14.0), p - d * NODE_R, if live { 2.0 } else { 1.0 }, alpha(col, 0.1 * lv), alpha(col, if live { 0.55 } else { 0.25 } * lv));
+                if h.form == HeartForm::Split {
+                    let q = h.node_pos((k + 1) % n);
+                    if h.nodes[(k + 1) % n].hp > 0.0 {
+                        line(p, q, 1.0, alpha(WHITE, 0.18 * lv));
+                    }
+                }
+                disc2(p, NODE_R * 1.3, 16, alpha(pal.bg0, 0.6 * lv), alpha(pal.bg0, 0.0));
+                arc(p, NODE_R, 0.0, TAU, if live { 2.5 } else { 1.5 }, alpha(col, 0.85 * lv));
+                let spin = self.time * if live { 2.2 } else { 0.6 } + k as f32;
+                poly_lines(p, 4, NODE_R * 0.72 * (1.0 + 0.2 * nd.flash), spin, 2.5, alpha(col, lv));
+                if live {
+                    poly_lines(p, 4, NODE_R * 0.36, -spin, 2.0, alpha(WHITE, 0.9 * lv));
+                    let f = (nd.hp / nd.max_hp.max(1e-3)).clamp(0.0, 1.0);
+                    arc(p, NODE_R + 7.0, -PI * 0.5, -PI * 0.5 + TAU * f, 3.0, alpha(pal.danger, 0.9 * lv));
+                }
+            }
         }
     }
 
@@ -3033,6 +3078,16 @@ impl Renderer {
         let u = sh / 1080.0;
         let m = 34.0 * u;
         let hud_a = if info.show_combat { 1.0 } else { 0.0 };
+        // Purgatory washes the whole scene in the accent colour, strongest at the edges.
+        if w.purg > 0.01 && info.show_combat {
+            let c = alpha(pal.accent, 0.07 * w.purg);
+            draw_rectangle(0.0, 0.0, sw, sh, c);
+            let e = alpha(pal.accent, 0.22 * w.purg);
+            let z = alpha(pal.accent, 0.0);
+            let band = sh * 0.16;
+            quad4([vec2(0.0, 0.0), vec2(sw, 0.0), vec2(sw, band), vec2(0.0, band)], [e, e, z, z]);
+            quad4([vec2(0.0, sh - band), vec2(sw, sh - band), vec2(sw, sh), vec2(0.0, sh)], [z, z, e, e]);
+        }
 
         if info.show_combat {
             // Score + multiplier + combo
@@ -3098,6 +3153,24 @@ impl Renderer {
                 line(vec2(bx, by), vec2(bx + bw * frac, by), 4.0 * u, hc);
                 diamond_fill(vec2(bx + bw * frac, by), 5.0 * u, WHITE);
                 vtext("HEART", bx - 12.0 * u, by + 7.0 * u, 16.0 * u, alpha(pal.danger, 0.9), 1);
+                // One notch per phase still ahead: the bar stops at the next one until the song moves on.
+                for (i, ph) in w.phases.iter().enumerate() {
+                    if i + 1 < w.phases.len() && ph.floor > 0.0 {
+                        let fx = bx + bw * (ph.floor / w.heart.max_hp.max(1.0)).clamp(0.0, 1.0);
+                        let next = i == w.phase_i;
+                        line(vec2(fx, by - 6.0 * u), vec2(fx, by + 6.0 * u), if next { 2.5 } else { 1.0 } * u, alpha(if next { pal.accent } else { WHITE }, if next { 0.95 } else { 0.4 }));
+                    }
+                }
+                if w.purgatory {
+                    let pulse = 0.75 + 0.25 * (self.time * 5.0).sin();
+                    vtext(&format!("PURGATORY  {:.0}", w.phase_left().ceil()), sw * 0.5, by + 28.0 * u, 20.0 * u, alpha(pal.accent, pulse), 0);
+                } else if w.heart.form != HeartForm::Core {
+                    vtext(w.heart.form.name(), bx + bw + 12.0 * u, by + 7.0 * u, 16.0 * u, alpha(pal.accent, 0.9), -1);
+                    if w.form_banner > 0.0 {
+                        let a = (w.form_banner * 5.0).min(1.0);
+                        text_shadow(w.heart.form.hint(), sw * 0.5, by + 26.0 * u, 20.0 * u, alpha(WHITE, 0.9 * a), 0);
+                    }
+                }
             }
 
             // Section label
