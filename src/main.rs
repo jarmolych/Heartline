@@ -415,7 +415,7 @@ const CODEX_ENEMIES: [(&str, &str); 9] = [
     ("METRONOME", "Plants itself and fires a three-shot fan on every downbeat. Its ring fills through the bar."),
     ("CYMBAL", "Drifts in, arms when close, and bursts into a ring two beats later. Kill it first."),
     ("WISP", "Appears on the song's chimes, where the note sits in pitch. Light, weaving, fades if ignored."),
-    ("ELITE", "Arrives with a drop. A lot of health and a ring of shots, half of them shootable."),
+    ("ELITE", "Arrives with a drop, with a lot of health. Gunners (red) fire rings; from depth 2 Summoners (pink) call minis; from depth 3 Leapers (gold) blink at you on the downbeat."),
     ("SPRITE", "Ear candy made visible. Harmless and golden: catch it for a heal."),
 ];
 const CODEX_MUSIC: [(&str, &str); 10] = [

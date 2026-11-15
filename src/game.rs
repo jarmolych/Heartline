@@ -350,6 +350,13 @@ const SYNCOPE_WINDOW: f32 = 0.09;
 const BOMBER_ARM_R: f32 = 175.0;
 const BOMBER_RING: usize = 10;
 
+/// Elite kinds, kept in `Enemy::state`: the Gunner fires a ring every couple of beats, the
+/// Summoner calls two minis on every other downbeat, the Leaper blinks toward the player on
+/// every downbeat.
+pub const ELITE_GUNNER: f32 = 0.0;
+pub const ELITE_SUMMONER: f32 = 1.0;
+pub const ELITE_LEAPER: f32 = 2.0;
+
 /// Slipping past a hostile bullet this close (without being hit) is a graze.
 const GRAZE_R: f32 = 34.0;
 const GRAZE_SCORE: f32 = 30.0;
@@ -1601,6 +1608,7 @@ impl World {
         let speed = 210.0 + 90.0 * self.intensity;
         let mut new_bullets: Vec<Bullet> = Vec::new();
         let mut blasts: Vec<Vec2> = Vec::new();
+        let mut calls: Vec<Vec2> = Vec::new();
         for en in self.enemies.iter_mut() {
             match en.kind {
                 // Metronome: a three-shot fan at the player on every downbeat.
@@ -1631,6 +1639,29 @@ impl World {
                     new_bullets.push(Bullet { pos: en.pos + d * en.r, vel: d * speed, r: 7.0, soft: false, age: 0.0, fade: 1.0, kind: B_ORB, pat: 10, grazed: false });
                     en.flash = 0.6;
                 }
+                EnemyKind::Elite if en.state == ELITE_SUMMONER => {
+                    if down && self.beat_count % 8 < 4 && en.age > 1.0 {
+                        calls.push(en.pos);
+                        en.flash = 1.0;
+                    }
+                }
+                EnemyKind::Elite if en.state == ELITE_LEAPER => {
+                    if down && en.age > 1.0 {
+                        let to = ppos - en.pos;
+                        let dist = to.length();
+                        if dist > 200.0 {
+                            blasts.push(en.pos);
+                            en.pos += to / dist * (dist - 170.0).min(190.0);
+                            en.flash = 1.0;
+                        }
+                        // it lands with a short fan
+                        let a0 = to.y.atan2(to.x);
+                        for off in [-0.3f32, 0.0, 0.3] {
+                            let v = dir(a0 + off);
+                            new_bullets.push(Bullet { pos: en.pos + v * en.r, vel: v * speed * 0.9, r: 7.0, soft: off == 0.0, age: 0.0, fade: 1.0, kind: if off == 0.0 { B_NOTE } else { B_ORB }, pat: 11, grazed: false });
+                        }
+                    }
+                }
                 EnemyKind::Elite if elite_fire => {
                     let base = en.age;
                     for k in 0..8 {
@@ -1649,6 +1680,19 @@ impl World {
         for b in blasts {
             self.burst(b, 26, 520.0, C_DANGER, 5.0);
             self.snd(Sfx::Slam, 0.6, b.x);
+        }
+        // Summoners: two minis each, flung out to either side.
+        for c in calls {
+            for side in [-1.0f32, 1.0] {
+                if self.enemies.len() < MAX_ENEMIES + 4 {
+                    let a = self.rng.angle();
+                    self.make_enemy(EnemyKind::Mini, c + dir(a) * 30.0);
+                    if let Some(m) = self.enemies.last_mut() {
+                        m.vel = dir(a + side) * 240.0;
+                    }
+                }
+            }
+            self.burst(c, 14, 320.0, C_SECONDARY, 4.0);
         }
         self.enemies.retain(|e| e.hp > -0.5);
         // Echo drones fire on every beat at the nearest target.
@@ -1998,6 +2042,8 @@ impl World {
             }
             EnemyKind::Orbiter => state = pos.y.atan2(pos.x / 1.1),
             EnemyKind::Wisp | EnemyKind::Sprite => state = self.rng.angle(),
+            // Elites come in three kinds (see `ELITE_*`); the run's depth decides which are in play.
+            EnemyKind::Elite => state = self.rng.below((1 + self.song_idx as usize).min(3)) as f32,
             _ => {}
         }
         self.enemies.push(Enemy { kind, pos, vel, hp, max_hp: hp, r, rot: 0.0, age: 0.0, flash: 0.0, state });

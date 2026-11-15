@@ -3593,7 +3593,8 @@ impl Renderer {
                 EnemyKind::Turret => mixc(pal.danger, pal.accent, 0.35),
                 EnemyKind::Bomber => if e.state > 0.0 { mixc(pal.danger, WHITE, 0.5 + 0.5 * (self.time * 22.0).sin()) } else { pal.accent },
                 EnemyKind::Orbiter => pal.primary,
-                EnemyKind::Elite => pal.danger,
+                // Gunner in the danger colour, Summoner in the secondary, Leaper in the accent
+                EnemyKind::Elite => if e.state == ELITE_SUMMONER { mixc(pal.secondary, pal.danger, 0.3) } else if e.state == ELITE_LEAPER { mixc(pal.accent, pal.danger, 0.3) } else { pal.danger },
             };
             let colw = mixc(col, WHITE, e.flash);
             // ground: shadow + exact hitbox ring
