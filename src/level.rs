@@ -221,6 +221,8 @@ pub struct Level {
     pub active_secs: f32,
     /// The player's gun track: shot times per TEMPO level (see `gun_track`).
     pub gun: Vec<Vec<f32>>,
+    /// The look this song gets (backdrop, weather, floor).
+    pub mood: Mood,
     /// The song's sections as (start, end, kind): one Heart phase each (`World::set_phases`).
     pub phases: Vec<(f32, f32, SectionKind)>,
 }
@@ -1008,8 +1010,58 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         seed,
         active_secs: (an.duration - silent).max(1.0),
         gun: gun_track(&an.beats, &an.onsets, an.duration),
+        mood: mood(an),
         phases: an.sections.iter().map(|s| (s.t0, s.t1, s.kind)).collect(),
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mood: what a song looks like
+// ---------------------------------------------------------------------------------------------
+
+/// Backdrops: 0 sunset (striped sun), 1 night (moon), 2 ocean (sun on the horizon, waves),
+/// 3 vortex (concentric rings), 4 starfield (nebula).
+pub const N_SCENES: u8 = 5;
+/// Weather: 0 none, 1 rain of lines, 2 drifting dust, 3 aurora.
+pub const N_WEATHER: u8 = 4;
+/// Floor: 0 full grid, 1 open grid (every other line), 2 marks at the intersections.
+pub const N_FLOORS: u8 = 3;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mood {
+    pub scene: u8,
+    pub weather: u8,
+    pub floor: u8,
+}
+
+/// Pick a song's look from things that can be measured about it: how busy it is (drum hits per
+/// second) and how bright (high band against low band) choose a family of backdrops, and the
+/// song's own hash picks within the family, so two similar songs still look different and the
+/// same song always looks the same.
+pub fn mood(an: &Analysis) -> Mood {
+    let (mut lo, mut hi) = (0.0f32, 0.0f32);
+    for f in an.feats.iter().step_by(4) {
+        lo += f.low;
+        hi += f.high;
+    }
+    let bright = hi / (lo + hi + 1e-6) > 0.5;
+    let density = an.onsets.len() as f32 / an.duration.max(1.0);
+    let family: &[u8] = if density > 7.0 {
+        if bright { &[3, 0] } else { &[0, 1, 3] }
+    } else if density < 3.5 {
+        if bright { &[4, 2] } else { &[2, 1, 4] }
+    } else {
+        &[0, 1, 4, 2]
+    };
+    let h = an.seed;
+    let weather = match (h >> 8) % 6 {
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        5 if density < 3.5 => 2,
+        _ => 0,
+    };
+    Mood { scene: family[(h % family.len() as u64) as usize], weather, floor: ((h >> 16) % N_FLOORS as u64) as u8 }
 }
 
 // ---------------------------------------------------------------------------------------------

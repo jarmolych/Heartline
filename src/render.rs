@@ -962,6 +962,8 @@ uniform vec3 u_c1;
 uniform vec3 u_grid;
 uniform vec3 u_sunA;
 uniform vec3 u_sunB;
+// x = backdrop (0 sunset, 1 night, 2 ocean, 3 vortex, 4 starfield), y = weather (0 none, 1 rain, 2 dust, 3 aurora)
+uniform vec3 u_mood;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
@@ -987,8 +989,36 @@ vec3 topdown(vec2 q) {
     float yy = sp.y / sr;
     float band = yy < -0.15 ? 1.0 : step(0.08 + 0.42 * (yy + 0.15), fract(yy * 7.0 - u_time * 0.04));
     vec3 scol = mix(u_sunA, u_sunB, clamp(yy * 0.5 + 0.5, 0.0, 1.0));
-    col += scol * band * 0.12 * smoothstep(1.0, 0.985, d);
-    col += u_sunB * 0.05 * exp(-d * d * 1.2) * (1.0 + 0.6 * u_swell);
+    float sc = u_mood.x;
+    if (sc < 0.5) {
+        // sunset: far striped sun
+        col += scol * band * 0.12 * smoothstep(1.0, 0.985, d);
+        col += u_sunB * 0.05 * exp(-d * d * 1.2) * (1.0 + 0.6 * u_swell);
+    } else if (sc < 1.5) {
+        // night: a pale moon with a bitten edge
+        float md = length(sp - vec2(520.0, -260.0)) / (sr * 0.5);
+        float bite = length(sp - vec2(760.0, -380.0)) / (sr * 0.5);
+        col += mix(u_sunB, vec3(1.0), 0.55) * 0.11 * smoothstep(1.0, 0.98, md) * smoothstep(0.86, 0.9, bite);
+        col += u_sunB * 0.04 * exp(-md * md * 0.8);
+    } else if (sc < 2.5) {
+        // ocean: long swells rolling under the platform
+        float wy = sp.y / 150.0;
+        float wv = sin(wy * 6.2832 + sin(sp.x / 420.0 + u_time * 0.25) * 1.4 - u_time * 0.5);
+        col += mix(u_sunB, u_grid, 0.5) * 0.07 * smoothstep(0.86, 1.0, wv) * (1.0 + 0.5 * u_swell);
+        col += u_sunB * 0.04 * exp(-d * d * 0.8);
+    } else if (sc < 3.5) {
+        // vortex: rings falling away under the Heart
+        float rr = length((q - u_cam * 0.72) / 0.28) / 900.0;
+        float ring = smoothstep(0.42, 0.5, abs(fract(rr * 2.2 - u_time * 0.12) - 0.5));
+        col += mix(u_sunA, u_sunB, clamp(rr * 0.4, 0.0, 1.0)) * ring * 0.10 * exp(-rr * 0.55) * (1.0 + 0.6 * u_swell);
+    } else {
+        // starfield: a slow nebula
+        vec2 np = (q - u_cam * 0.8) / 1400.0;
+        float n1 = sin(np.x * 3.1 + sin(np.y * 2.3 + u_time * 0.03) * 2.0) * 0.5 + 0.5;
+        float n2 = sin(np.y * 2.7 - sin(np.x * 1.9 - u_time * 0.02) * 2.0) * 0.5 + 0.5;
+        col += mix(u_sunA, u_sunB, n1) * 0.085 * n1 * n2;
+        col += vec3(0.8, 0.85, 1.0) * stars((q - u_cam * 0.75) / 0.25, 60.0, 0.16) * 0.4;
+    }
     // star layer
     float sT = 0.33;
     vec2 tp = (q - u_cam * (1.0 - sT)) / sT;
@@ -1004,6 +1034,24 @@ vec3 topdown(vec2 q) {
     // kick ripple: a band of brighter grid travelling outward from the Heart
     float rd = (length(q) - u_ripple.x) / u_ripple.z;
     col += u_grid * ln * u_ripple.y * exp(-rd * rd) * fog;
+    // weather, outside and under the platform
+    float we = u_mood.y;
+    if (we > 0.5 && we < 1.5) {
+        vec2 rp = vec2(uv.x * u_res.x / u_res.y + uv.y * 0.22, uv.y);
+        float cid = floor(rp.x * 70.0);
+        float rh = hash(vec2(cid, 3.3));
+        float s = fract(rp.y * 1.3 + u_time * (0.9 + rh) + rh * 9.0);
+        float streak = step(0.7, rh) * smoothstep(0.5, 0.1, abs(fract(rp.x * 70.0) - 0.5)) * smoothstep(0.0, 0.02, s) * smoothstep(0.15, 0.0, s);
+        col += mix(u_grid, vec3(1.0), 0.3) * streak * 0.16;
+    } else if (we > 1.5 && we < 2.5) {
+        vec2 dp = (q - u_cam * 0.4) / 0.6 + vec2(u_time * 22.0, u_time * 9.0);
+        col += mix(u_sunA, vec3(1.0), 0.4) * stars(dp, 130.0, 0.35) * 0.3;
+    } else if (we > 2.5) {
+        float ax = uv.x * 5.0 + u_time * 0.12;
+        float au = sin(ax + sin(ax * 2.3 - u_time * 0.2) * 1.3) * 0.5 + 0.5;
+        float edge = smoothstep(0.55, 1.0, abs(uv.y - 0.5) * 2.0);
+        col += mix(u_grid, u_sunA, au) * 0.10 * edge * (0.4 + 0.6 * au) * (1.0 + 0.5 * u_swell);
+    }
     // platform glass: the arena floor dims what is below it
     vec2 a = abs(q) - u_arena;
     float inside = 1.0 - smoothstep(-1.0, 1.0, max(a.x, a.y));
@@ -1025,14 +1073,50 @@ vec3 vista(vec2 p) {
         float yy = q.y / r;
         float mask = yy < 0.0 ? 1.0 : step(0.1 + 0.5 * yy, fract(yy * 5.0 - u_time * 0.22));
         vec3 suncol = mix(u_sunA, u_sunB, clamp(yy * 0.6 + 0.5, 0.0, 1.0));
-        col = mix(col, suncol * 0.68, smoothstep(r, r - 0.003, dd) * mask);
-        col += u_sunB * 0.16 * exp(-dd * dd * 12.0) * (1.0 + 0.6 * u_bass);
+        float sc = u_mood.x;
+        if (sc < 0.5) {
+            col = mix(col, suncol * 0.68, smoothstep(r, r - 0.003, dd) * mask);
+            col += u_sunB * 0.16 * exp(-dd * dd * 12.0) * (1.0 + 0.6 * u_bass);
+        } else if (sc < 1.5) {
+            // night: crescent moon high on the right, a denser sky
+            vec3 sky = col;
+            vec2 mq = q - vec2(0.36, -0.14);
+            float mr = r * 0.42;
+            col = mix(col, mix(u_sunB, vec3(1.0), 0.6) * 0.8, smoothstep(mr, mr - 0.003, length(mq)));
+            col = mix(col, sky, smoothstep(mr, mr - 0.003, length(mq - vec2(mr * 0.5, -mr * 0.22))) * 0.92);
+            col += u_sunB * 0.10 * exp(-dot(mq, mq) * 30.0);
+            col += vec3(0.8, 0.85, 1.0) * stars(p * u_res + 40.0, 6.0 * u_res.y / 1080.0, 0.07) * (1.0 - t) * 0.7;
+        } else if (sc < 2.5) {
+            // ocean: the sun half under the horizon
+            vec2 oq = (p - vec2(0.5, hz)) * vec2(u_res.x / u_res.y, 1.0);
+            float od = length(oq);
+            float orr = r * 1.15 * (1.0 + 0.03 * u_bass);
+            col = mix(col, mix(u_sunA, u_sunB, clamp(-oq.y / orr, 0.0, 1.0)) * 0.72, smoothstep(orr, orr - 0.003, od));
+            col += u_sunB * 0.22 * exp(-od * od * 7.0) * (1.0 + 0.5 * u_bass);
+        } else if (sc < 3.5) {
+            // vortex: rings opening in the sky
+            float rr = dd / r;
+            float ring = smoothstep(0.34, 0.5, abs(fract(rr * 1.6 - u_time * 0.18) - 0.5));
+            col += suncol * ring * 0.42 * exp(-rr * 0.75) * (1.0 + 0.6 * u_bass);
+            col += u_sunB * 0.2 * exp(-dd * dd * 40.0);
+        } else {
+            // starfield: a nebula band and many more stars
+            float n1 = sin(p.x * 9.0 + sin(p.y * 7.0 + u_time * 0.05) * 2.0) * 0.5 + 0.5;
+            float bandy = (p.y - hz * 0.5) / 0.2;
+            col += mix(u_sunA, u_sunB, n1) * 0.36 * (0.4 + 0.6 * n1) * exp(-bandy * bandy);
+            col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 90.0, 7.0 * u_res.y / 1080.0, 0.3) * (1.0 - t * 0.5) * 1.2;
+        }
         col += u_sunB * 0.35 * exp(-(hz - p.y) * 30.0);
     } else {
         float y = (p.y - hz) / (1.0 - hz);
         col = mix(u_c0 * 0.4, u_c1 * 0.45, y);
         col += u_sunB * 0.22 * exp(-y * 6.0) * exp(-abs(p.x - 0.5) * 3.0);
         col += u_sunB * 0.25 * exp(-y * 40.0);
+        if (u_mood.x > 1.5 && u_mood.x < 2.5) {
+            // ocean: glints running toward the viewer
+            float wv = sin(8.0 / (y + 0.06) + u_time * 1.6 + sin(p.x * 24.0) * 0.7);
+            col += mix(u_sunA, u_sunB, 0.5) * 0.16 * smoothstep(0.9, 1.0, wv) * exp(-abs(p.x - 0.5) * 2.2);
+        }
     }
     return col;
 }
@@ -1309,6 +1393,7 @@ impl Renderer {
                 ("u_grid", UniformType::Float3),
                 ("u_sunA", UniformType::Float3),
                 ("u_sunB", UniformType::Float3),
+                ("u_mood", UniformType::Float3),
             ],
             &[],
             PipelineParams::default(),
@@ -1777,6 +1862,7 @@ impl Renderer {
         m.set_uniform("u_grid", v3(pal.grid));
         m.set_uniform("u_sunA", v3(pal.accent));
         m.set_uniform("u_sunB", v3(pal.secondary));
+        m.set_uniform("u_mood", vec3(world.mood.scene as f32, world.mood.weather as f32, world.mood.floor as f32));
         gl_use_material(m);
         draw_rectangle(0.0, 0.0, 1.0, 1.0, WHITE);
         gl_use_default_material();
@@ -1888,13 +1974,34 @@ impl Renderer {
         let va = VISTA_GRID_A * (1.0 + 0.5 * w.hit[0]) * e;
         let gw = 1.6 + 1.2 * e;
         let vp = self.vs(0.5, HZ);
+        // Floor style (in play only; the vista always shows the full grid):
+        // 1 = open grid, inner lines alternate strong and faint; 2 = faint lines, marks on the crossings.
+        let style = if e < 0.5 { w.mood.floor } else { 0 };
+        let line_k = |i: usize, n: usize| -> f32 {
+            match style {
+                1 if i % 2 == 1 && i != n => 0.3,
+                2 if i != 0 && i != n => 0.35,
+                _ => 1.0,
+            }
+        };
         for i in 0..=COLS {
             let x = -HALF_W + i as f32 * TILE;
             let v1 = self.vs(0.5 + (x / HALF_W) * VISTA_FAN, 1.05);
             let v0 = vp + (v1 - vp) * 0.03;
             let p0 = vec2(x, -HALF_H).lerp(v0, e);
             let p1 = vec2(x, HALF_H).lerp(v1, e);
-            seg(p0, p1, gw, alpha(pal.grid, ga + va * 0.05), alpha(pal.grid, ga + va));
+            let k = line_k(i, COLS);
+            seg(p0, p1, gw, alpha(pal.grid, ga * k + va * 0.05), alpha(pal.grid, ga * k + va));
+        }
+        if style == 2 && lv > 0.5 {
+            let ma = (ga * 2.6).min(0.5);
+            for i in 1..COLS {
+                for j in 1..ROWS {
+                    let c = vec2(-HALF_W + i as f32 * TILE, -HALF_H + j as f32 * TILE);
+                    line(c - vec2(9.0, 0.0), c + vec2(9.0, 0.0), 1.6, alpha(pal.grid, ma));
+                    line(c - vec2(0.0, 9.0), c + vec2(0.0, 9.0), 1.6, alpha(pal.grid, ma));
+                }
+            }
         }
         let phase = self.scroll.fract();
         for j in 0..=ROWS {
@@ -1905,7 +2012,7 @@ impl Renderer {
             let fade = smooth(0.0, 0.12, fy - HZ);
             let p0 = vec2(-HALF_W, y).lerp(self.vs(0.5 - hs, fy), e);
             let p1 = vec2(HALF_W, y).lerp(self.vs(0.5 + hs, fy), e);
-            line(p0, p1, gw, alpha(pal.grid, ga + va * fade));
+            line(p0, p1, gw, alpha(pal.grid, ga * line_k(j, ROWS) + va * fade));
         }
         if lv > 0.01 && self.fx > 0.0 {
             self.draw_floor_pulse(lv);
