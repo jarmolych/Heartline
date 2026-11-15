@@ -448,7 +448,7 @@ const CODEX_MUSIC: [(&str, &str); 10] = [
     ("LEAD", "Sustained notes sweep laser walls across the floor."),
     ("CHIMES", "Pitched hits high in the mix send wisps."),
     ("EAR CANDY", "A flourish the song rarely plays: a comet trailing shards, a keypad of shards, or a sprite."),
-    ("GRAZE", "Slip past a bullet at close range without being hit: score, combo, and it feeds resonance."),
+    ("GRAZE", "Slip past a bullet at close range without being hit: score, combo, and it feeds resonance. Dash straight through one for a THREAD, worth three."),
     ("RESONANCE", "The meter under the combo bar. Full, it rings for eight seconds: more damage, double score."),
     ("GRADES", "Calm sections, purgatory and a cleared track grade you from C to S. Better grades offer more, and rarer, upgrades."),
 ];
@@ -3763,7 +3763,7 @@ async fn run(args: Args) {
                     ("hearts broken", format!("{}", st.hearts_broken)),
                     ("enemies destroyed", format!("{}", st.kills)),
                     ("notes shot down", format!("{}", st.notes_shot)),
-                    ("grazes", format!("{}", st.grazes)),
+                    ("grazes  (threads)", format!("{}  ({})", st.grazes, st.threads)),
                     ("phases broken early", format!("{}", st.phases_broken)),
                     ("shards collected", format!("{}", st.shards)),
                     ("best combo", format!("{:.0}", st.max_combo)),
