@@ -286,7 +286,13 @@ pub struct Bullet {
     pub kind: u8,
     /// What fired it (pattern index, 9 = hi-hat dart, 10 = orbiter, 11 = elite); for balance stats.
     pub pat: u8,
+    /// The player has already been paid for slipping past this one.
+    pub grazed: bool,
 }
+
+/// Slipping past a hostile bullet this close (without being hit) is a graze.
+const GRAZE_R: f32 = 34.0;
+const GRAZE_SCORE: f32 = 30.0;
 
 /// A Heart pulse that has been announced but has not fired yet. It fires at `t`; the announcement
 /// started at `t - lead`. Draw it as an approach ring closing on the Heart.
@@ -614,6 +620,8 @@ pub struct Stats {
     pub notes_shot: u32,
     /// Heart phases beaten before their section ended.
     pub phases_broken: u32,
+    /// Hostile bullets slipped past at close range.
+    pub grazes: u32,
     /// Sum of the damage multipliers of every shot the gun fired (1.0 = one nominal shot).
     pub gun_dmg: f32,
     /// Hits taken per source (`SRC_*`).
@@ -700,6 +708,8 @@ pub struct World {
     /// Shot times of the current song per TEMPO level (`level::gun_track`). Empty when the song
     /// is not known ahead of time (live audio, drift): the gun then locks to a beat subdivision.
     pub gun: Vec<Vec<f32>>,
+    /// DODGE mode: no gun, the Heart cannot be hurt, grazes score triple.
+    pub pacifist: bool,
     /// Ear-candy comets in flight.
     pub painters: Vec<Painter>,
     /// 0..1 envelope kicked by every piece of ear candy (visual flourish).
@@ -815,6 +825,7 @@ impl World {
             last_hit_age: 0.0,
             mercy: 1.0,
             gun: Vec::new(),
+            pacifist: false,
             painters: Vec::new(),
             candy: 0.0,
             mood: Mood::default(),
@@ -1226,7 +1237,9 @@ impl World {
                 let forte = if self.mods & MOD_FORTE != 0 { 1.2 } else { 1.0 };
                 let allegro = if self.mods & MOD_ALLEGRO != 0 { 1.15 } else { 1.0 };
                 let count = if count == 0 { 0 } else { ((count as f32 * p * forte).round() as u16).clamp(3, 64) };
-                let speed = speed * (0.82 + 0.18 * p.min(1.25)) * allegro;
+                // Speed is not scaled by pressure: it was chosen so the pulse crosses the beat
+                // ring on a beat (`level::beat_speed`).
+                let speed = speed * allegro;
                 if e.lead > 0.02 && self.t < e.t - 0.01 {
                     if self.pulses.len() < 24 {
                         let to_p = self.player.pos - self.heart.pos;
@@ -1399,7 +1412,7 @@ impl World {
             match en.kind {
                 EnemyKind::Orbiter if even => {
                     let d = (ppos - en.pos).normalize_or_zero();
-                    new_bullets.push(Bullet { pos: en.pos + d * en.r, vel: d * speed, r: 7.0, soft: false, age: 0.0, fade: 1.0, kind: B_ORB, pat: 10 });
+                    new_bullets.push(Bullet { pos: en.pos + d * en.r, vel: d * speed, r: 7.0, soft: false, age: 0.0, fade: 1.0, kind: B_ORB, pat: 10, grazed: false });
                     en.flash = 0.6;
                 }
                 EnemyKind::Elite if elite_fire => {
@@ -1407,7 +1420,7 @@ impl World {
                     for k in 0..8 {
                         let d = dir(base + k as f32 * TAU / 8.0);
                         let soft = k % 2 == 0;
-                        new_bullets.push(Bullet { pos: en.pos + d * en.r, vel: d * speed * 0.85, r: 7.0, soft, age: 0.0, fade: 1.0, kind: if soft { B_NOTE } else { B_ORB }, pat: 11 });
+                        new_bullets.push(Bullet { pos: en.pos + d * en.r, vel: d * speed * 0.85, r: 7.0, soft, age: 0.0, fade: 1.0, kind: if soft { B_NOTE } else { B_ORB }, pat: 11, grazed: false });
                     }
                     en.flash = 0.6;
                 }
@@ -1457,7 +1470,7 @@ impl World {
         let push = |b: &mut Vec<Bullet>, a: f32, sp: f32| {
             let d = dir(a);
             let vel = d * sp;
-            b.push(Bullet { pos: origin + d * (HEART_R * 0.85) + vel * late, vel, r, soft, age: 0.0, fade: 1.0, kind, pat });
+            b.push(Bullet { pos: origin + d * (HEART_R * 0.85) + vel * late, vel, r, soft, age: 0.0, fade: 1.0, kind, pat, grazed: false });
         };
         let b = &mut self.bullets;
         match pattern {
@@ -1540,7 +1553,7 @@ impl World {
             return;
         }
         let vel = d * speed;
-        self.bullets.push(Bullet { pos: self.heart.pos + d * (HEART_R * 0.9) + vel * late, vel, r: 4.5, soft: false, age: 0.0, fade: 1.0, kind: B_TICK, pat: 9 });
+        self.bullets.push(Bullet { pos: self.heart.pos + d * (HEART_R * 0.9) + vel * late, vel, r: 4.5, soft: false, age: 0.0, fade: 1.0, kind: B_TICK, pat: 9, grazed: false });
     }
 
     /// The newest modifier of this depth, if the depth added one: (name, what it does).
@@ -2321,6 +2334,7 @@ impl World {
         let ppos = self.player.pos;
         let mut hit = false;
         let mut hit_pat = 0u8;
+        let mut grazes = 0u32;
         let vulnerable = self.player.invuln <= 0.0 && self.player.dash_t <= 0.0 && !self.dead;
         let groove = self.groove;
         for b in self.bullets.iter_mut() {
@@ -2339,11 +2353,28 @@ impl World {
                 b.fade = -1.0;
                 continue;
             }
-            if vulnerable && b.pos.distance_squared(ppos) < (b.r + PLAYER_HIT_R) * (b.r + PLAYER_HIT_R) {
+            let d2 = b.pos.distance_squared(ppos);
+            if vulnerable && d2 < (b.r + PLAYER_HIT_R) * (b.r + PLAYER_HIT_R) {
                 hit = true;
                 hit_pat = b.pat;
                 self.last_hit_age = b.age;
                 b.fade = -1.0;
+            } else if !b.grazed && !b.soft && !self.dead && d2 < (b.r + GRAZE_R) * (b.r + GRAZE_R) {
+                b.grazed = true;
+                grazes += 1;
+            }
+        }
+        if grazes > 0 && !hit {
+            self.stats.grazes += grazes;
+            let k = grazes as f32 * if self.pacifist { 3.0 } else { 1.0 };
+            self.add_score(GRAZE_SCORE * k);
+            self.add_combo(0.25 * grazes as f32);
+            if self.parts.len() < MAX_PARTS {
+                self.burst(ppos, 3, 220.0, C_WHITE, 2.5);
+            }
+            if self.shard_snd_cd <= 0.0 {
+                self.shard_snd_cd = 0.06;
+                self.snd(Sfx::NoteShot, 0.35, ppos.x);
             }
         }
         self.bullets.retain(|b| b.fade > 0.0);

@@ -490,6 +490,18 @@ pub fn hardness(diff: f32) -> f32 {
     ((diff - DIFF_MIN) / (DIFF_MAX - DIFF_MIN)).clamp(0.0, 1.0)
 }
 
+/// Radius of the "beat ring" around the Heart: every pulse is timed to cross it on a beat.
+pub const BEAT_RING_R: f32 = 320.0;
+
+/// The speed nearest `speed` at which a bullet leaving the Heart crosses the beat ring a whole
+/// number of half-beats later.
+pub fn beat_speed(speed: f32, beat_len: f32) -> f32 {
+    let dist = BEAT_RING_R - 0.85 * 62.0;
+    let half = (beat_len * 0.5).max(0.08);
+    let n = (dist / speed.max(60.0) / half).round().max(1.0);
+    dist / (n * half)
+}
+
 fn pulse_speed(pattern: Pattern, i: f32, kind: SectionKind, diff: f32) -> f32 {
     (215.0 + 60.0 * i) * (0.9 + 0.1 * diff) * pattern.speed_mul() * if kind == SectionKind::Calm { 0.85 } else { 1.0 }
 }
@@ -833,7 +845,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
             soft_n[ki] += 1;
             soft_n[ki] % deck.soft_every == 0
         };
-        let speed = pulse_speed(pattern, i, kind, diff);
+        let speed = beat_speed(pulse_speed(pattern, i, kind, diff), beat_len);
         ev.push(LevelEvent { t, lead: lead_p, ev: Ev::Pulse { pattern, count, speed, rot, soft } });
     }
 
@@ -1484,6 +1496,19 @@ mod tests {
             }
         }
         (beats, onsets)
+    }
+
+    #[test]
+    fn pulses_cross_the_beat_ring_on_a_half_beat() {
+        for bpm in [70.0f32, 96.0, 128.0, 174.0] {
+            let bl = 60.0 / bpm;
+            for want in [180.0f32, 240.0, 300.0, 380.0] {
+                let v = beat_speed(want, bl);
+                let halves = (BEAT_RING_R - 0.85 * 62.0) / v / (bl * 0.5);
+                assert!((halves - halves.round()).abs() < 1e-3, "{bpm} BPM, {want} px/s: {halves} half-beats");
+                assert!((v / want).ln().abs() < 0.45, "{bpm} BPM: {want} became {v}");
+            }
+        }
     }
 
     #[test]
