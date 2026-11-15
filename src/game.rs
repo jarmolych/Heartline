@@ -388,6 +388,8 @@ impl Laser {
 }
 
 pub struct Wave {
+    /// Where the Heart was when it let the wave go.
+    pub origin: Vec2,
     pub t0: f32,
     pub lead: f32,
     pub gap: f32,
@@ -547,7 +549,22 @@ pub struct HeartPhase {
     pub floor: f32,
 }
 
+/// Places the Heart may stand (the centre first).
+pub const HEART_ANCHORS: [(f32, f32); 7] = [(0.0, 0.0), (-230.0, -110.0), (230.0, -110.0), (-230.0, 110.0), (230.0, 110.0), (-300.0, 0.0), (300.0, 0.0)];
+/// The Heart stays at least this long in one place.
+const HEART_STAY_SECS: f32 = 7.0;
+/// The Heart relocates from this hardness up (PULSE and harder).
+const HEART_MOVES_FROM: f32 = 0.15;
+
 pub struct Heart {
+    /// Where the Heart is. Everything it does starts here.
+    pub pos: Vec2,
+    /// A relocation in progress or announced: it leaves `move_from` at `move_t0` and arrives at
+    /// `move_to` at `move_t1`. Before `move_t0` only the destination is shown.
+    pub move_from: Vec2,
+    pub move_to: Vec2,
+    pub move_t0: f32,
+    pub move_t1: f32,
     pub hp: f32,
     pub max_hp: f32,
     pub form: HeartForm,
@@ -566,15 +583,19 @@ pub struct Heart {
 
 impl Heart {
     fn new(hp: f32, reform: f32) -> Heart {
-        Heart { hp, max_hp: hp, form: HeartForm::Core, phase_max: hp, nodes: Vec::new(), open: 1.0, broken: false, punch: 0.0, flash: 0.0, rot: 0.0, reform, charge: 0.0 }
+        Heart { pos: Vec2::ZERO, move_from: Vec2::ZERO, move_to: Vec2::ZERO, move_t0: -1.0, move_t1: -1.0, hp, max_hp: hp, form: HeartForm::Core, phase_max: hp, nodes: Vec::new(), open: 1.0, broken: false, punch: 0.0, flash: 0.0, rot: 0.0, reform, charge: 0.0 }
     }
     /// Where node `k` is on the play field.
     pub fn node_pos(&self, k: usize) -> Vec2 {
         let a = self.nodes.get(k).map_or(0.0, |n| n.ang);
         match self.form {
             HeartForm::Shell => vec2(a.cos() * HALF_W * 0.72, a.sin() * HALF_H * 0.66),
-            _ => vec2(a.cos(), a.sin()) * 178.0,
+            _ => self.pos + vec2(a.cos(), a.sin()) * 178.0,
         }
+    }
+    /// True from the moment a relocation is announced until the Heart has arrived.
+    pub fn relocating(&self, t: f32) -> bool {
+        t < self.move_t1
     }
     /// Index of the node that can be damaged in Split form: the first one still alive.
     pub fn lit_node(&self) -> Option<usize> {
@@ -872,6 +893,47 @@ impl World {
             * (1.0 + 0.1 * p.up(UpgradeId::Downbeat) as f32)
     }
 
+    /// On a bar line: decide whether the Heart relocates. It goes home for Shell (the shield
+    /// nodes need the centre), otherwise to an anchor away from both itself and the player. The
+    /// destination is shown for one beat, then the Heart glides there over two.
+    fn maybe_move_heart(&mut self) {
+        let t = self.t;
+        if self.phases.is_empty() || self.heart.broken || self.purgatory || self.heart.relocating(t) {
+            return;
+        }
+        // The two gentlest tiers keep the Heart where it is: one thing less to read.
+        if hardness(self.diff) < HEART_MOVES_FROM {
+            return;
+        }
+        let home = self.heart.form == HeartForm::Shell;
+        let stay = HEART_STAY_SECS * (2.2 - 1.5 * hardness(self.diff));
+        let to = if home {
+            if self.heart.pos.length() < 1.0 {
+                return;
+            }
+            Vec2::ZERO
+        } else {
+            if t - self.heart.move_t1 < stay || self.pressure() < 0.5 {
+                return;
+            }
+            let here = self.heart.pos;
+            let ppos = self.player.pos;
+            let ok: Vec<Vec2> = HEART_ANCHORS.iter().map(|a| vec2(a.0, a.1)).filter(|a| a.distance(here) > 180.0 && a.distance(ppos) > 260.0).collect();
+            if ok.is_empty() {
+                return;
+            }
+            ok[self.rng.below(ok.len())]
+        };
+        let bl = self.beat_len.clamp(0.25, 1.0);
+        self.heart.move_from = self.heart.pos;
+        self.heart.move_to = to;
+        // Leave only after every pulse already announced has fired from here.
+        let wait = bl.max(0.7);
+        self.heart.move_t0 = t + wait;
+        self.heart.move_t1 = t + wait + (2.0 * bl).clamp(0.7, 1.4);
+        self.snd(Sfx::Dash, 0.6, to.x);
+    }
+
     /// Purgatory ran out while the section is still playing: the Heart comes back, sized for
     /// the damage the player has just shown they can do.
     fn encore(&mut self) {
@@ -892,7 +954,7 @@ impl World {
         self.form_banner = 1.0;
         self.shake = self.shake.max(0.5);
         self.snd(Sfx::Slam, 0.9, 0.0);
-        self.burst(Vec2::ZERO, 50, 620.0, C_DANGER, 7.0);
+        self.burst(self.heart.pos, 50, 620.0, C_DANGER, 7.0);
         self.text(vec2(0.0, -120.0), "THE HEART RETURNS", C_DANGER, 46.0, 2.4);
         self.text(vec2(0.0, -82.0), &format!("rage {}: it hits harder now", self.rage), C_WHITE, 22.0, 2.4);
     }
@@ -932,7 +994,7 @@ impl World {
                 .map(|k| self.heart.node_pos(k))
                 .min_by(|a, b| a.distance(from).partial_cmp(&b.distance(from)).unwrap_or(std::cmp::Ordering::Equal)),
             HeartForm::Split => self.heart.lit_node().map(|k| self.heart.node_pos(k)),
-            _ => Some(Vec2::ZERO),
+            _ => Some(self.heart.pos),
         }
     }
 
@@ -988,7 +1050,7 @@ impl World {
         self.snd(Sfx::Clear, 0.9, 0.0);
         self.shake = self.shake.max(0.6);
         self.flash = self.flash.max(0.5);
-        self.burst(Vec2::ZERO, 60, 700.0, C_PRIMARY, 7.0);
+        self.burst(self.heart.pos, 60, 700.0, C_PRIMARY, 7.0);
         self.text(vec2(0.0, -120.0), "PURGATORY", C_ACCENT, 54.0, 2.6);
         self.text(vec2(0.0, -78.0), "phase broken early - everything is shootable", C_WHITE, 22.0, 2.6);
         self.window.broke_phase = true;
@@ -1011,8 +1073,8 @@ impl World {
         self.add_score(5000.0);
         self.shake = 1.0;
         self.flash = 0.8;
-        self.burst(Vec2::ZERO, 90, 900.0, C_PRIMARY, 8.0);
-        self.burst(Vec2::ZERO, 50, 600.0, C_WHITE, 6.0);
+        self.burst(self.heart.pos, 90, 900.0, C_PRIMARY, 8.0);
+        self.burst(self.heart.pos, 50, 600.0, C_WHITE, 6.0);
         self.text(vec2(0.0, -120.0), "HEART BROKEN", C_ACCENT, 54.0, 3.0);
         self.text(vec2(0.0, -78.0), "victory lap - everything is shootable", C_WHITE, 22.0, 3.0);
         // Every bullet on the field becomes a reward.
@@ -1155,6 +1217,9 @@ impl World {
                     self.heart.punch = self.heart.punch.max(0.6);
                 }
             }
+            // The Heart holds its fire from the moment it announces a move until it arrives, so
+            // no warning zone ever slides across the floor.
+            Ev::Pulse { .. } if self.heart.relocating(self.t) => {}
             Ev::Pulse { pattern, count, speed, rot, soft } => {
                 let soft = soft || self.purgatory;
                 // Scale the planned pulse by the current pressure.
@@ -1164,11 +1229,13 @@ impl World {
                 let speed = speed * (0.82 + 0.18 * p.min(1.25)) * allegro;
                 if e.lead > 0.02 && self.t < e.t - 0.01 {
                     if self.pulses.len() < 24 {
-                        let aim = self.player.pos.y.atan2(self.player.pos.x);
+                        let to_p = self.player.pos - self.heart.pos;
+                        let aim = to_p.y.atan2(to_p.x);
                         self.pulses.push(PendingPulse { t: e.t, lead: e.lead, pattern, count, speed, rot, soft, aim });
                     }
                 } else {
-                    let aim = self.player.pos.y.atan2(self.player.pos.x);
+                    let to_p = self.player.pos - self.heart.pos;
+                    let aim = to_p.y.atan2(to_p.x);
                     self.emit_pulse(pattern, count as usize, speed, rot, soft, late, aim);
                 }
             }
@@ -1228,7 +1295,7 @@ impl World {
             }
             Ev::Shockwave { gap, gaps } => {
                 if p >= self.gate(P_WAVE) {
-                    self.waves.push(Wave { t0: e.t, lead: e.lead.max(0.3), gap, gaps, speed: 430.0 });
+                    self.waves.push(Wave { origin: self.heart.pos, t0: e.t, lead: e.lead.max(0.3), gap, gaps, speed: 430.0 });
                 }
             }
             Ev::Section { idx, kind, intensity: _, palette } => {
@@ -1310,6 +1377,9 @@ impl World {
     fn on_beat(&mut self, down: bool) {
         self.beat_pulse = 1.0;
         self.bar_beat = if down { 0 } else { self.bar_beat + 1 };
+        if down {
+            self.maybe_move_heart();
+        }
         if down && self.player.up(UpgradeId::Downbeat) > 0 {
             self.downbeat_ready = true;
         }
@@ -1383,10 +1453,11 @@ impl World {
         let r = if soft { 8.0 } else { 7.0 };
         let kind = if soft { B_NOTE } else { B_ORB };
         let pat = pattern as u8;
+        let origin = self.heart.pos;
         let push = |b: &mut Vec<Bullet>, a: f32, sp: f32| {
             let d = dir(a);
             let vel = d * sp;
-            b.push(Bullet { pos: d * (HEART_R * 0.85) + vel * late, vel, r, soft, age: 0.0, fade: 1.0, kind, pat });
+            b.push(Bullet { pos: origin + d * (HEART_R * 0.85) + vel * late, vel, r, soft, age: 0.0, fade: 1.0, kind, pat });
         };
         let b = &mut self.bullets;
         match pattern {
@@ -1464,12 +1535,12 @@ impl World {
         if self.heart.broken || self.bullets.len() >= MAX_BULLETS {
             return;
         }
-        let d = self.player.pos.normalize_or_zero();
+        let d = (self.player.pos - self.heart.pos).normalize_or_zero();
         if d == Vec2::ZERO {
             return;
         }
         let vel = d * speed;
-        self.bullets.push(Bullet { pos: d * (HEART_R * 0.9) + vel * late, vel, r: 4.5, soft: false, age: 0.0, fade: 1.0, kind: B_TICK, pat: 9 });
+        self.bullets.push(Bullet { pos: self.heart.pos + d * (HEART_R * 0.9) + vel * late, vel, r: 4.5, soft: false, age: 0.0, fade: 1.0, kind: B_TICK, pat: 9 });
     }
 
     /// The newest modifier of this depth, if the depth added one: (name, what it does).
@@ -1740,7 +1811,7 @@ impl World {
         }
         self.painters.retain(|p| t < p.t1);
         for d in drops {
-            if d.length() > HEART_R + 30.0 {
+            if (d - self.heart.pos).length() > HEART_R + 30.0 {
                 self.shards.push(Shard { pos: d, vel: Vec2::ZERO, life: 8.0, value: 1, heal: false, age: 0.0 });
             }
             if self.parts.len() < MAX_PARTS {
@@ -1786,6 +1857,10 @@ impl World {
         self.heart.flash = (self.heart.flash - dt * 8.0).max(0.0);
         self.heart.reform = (self.heart.reform - dt * 0.9).max(0.0);
         self.heart.rot += dt * (0.25 + 0.9 * intensity);
+        if t >= self.heart.move_t0 && self.heart.move_t1 > self.heart.move_t0 {
+            let k = ((t - self.heart.move_t0) / (self.heart.move_t1 - self.heart.move_t0)).clamp(0.0, 1.0);
+            self.heart.pos = self.heart.move_from.lerp(self.heart.move_to, smooth01(k));
+        }
         // Valve: open for the first half of every bar. The other forms are simply open or shut.
         let open_to = match self.heart.form {
             HeartForm::Valve => (self.bar_beat < 2) as u8 as f32,
@@ -1927,12 +2002,14 @@ impl World {
         p.pos.x = p.pos.x.clamp(-HALF_W + PLAYER_R, HALF_W - PLAYER_R);
         p.pos.y = p.pos.y.clamp(-HALF_H + PLAYER_R, HALF_H - PLAYER_R);
         // The Heart is solid.
-        let d = p.pos.length();
+        let hpos = self.heart.pos;
+        let rel = p.pos - hpos;
+        let d = rel.length();
         let min_d = HEART_R + PLAYER_R;
         let mut touched = false;
         if d < min_d {
-            let n = if d > 0.01 { p.pos / d } else { vec2(0.0, 1.0) };
-            p.pos = n * min_d;
+            let n = if d > 0.01 { rel / d } else { vec2(0.0, 1.0) };
+            p.pos = hpos + n * min_d;
             touched = true;
         }
         let pos = p.pos;
@@ -2038,7 +2115,7 @@ impl World {
                         continue 'shots;
                     }
                 }
-                if sp.length() < HEART_R + sr {
+                if (sp - self.heart.pos).length() < HEART_R + sr {
                     let mul = match self.heart.form {
                         HeartForm::Core => 1.0,
                         HeartForm::Overdrive => OVERDRIVE_DMG,
@@ -2136,6 +2213,7 @@ impl World {
 
     fn update_enemies(&mut self, dt: f32, active: bool) {
         let ppos = self.player.pos;
+        let hpos = self.heart.pos;
         let slow = if active { self.groove } else { 0.15 };
         let intensity = self.intensity;
         let n = self.enemies.len();
@@ -2176,9 +2254,9 @@ impl World {
                     en.pos += en.vel * dt * slow;
                     en.rot = en.vel.y.atan2(en.vel.x);
                     // Stay off the Heart.
-                    let hd = en.pos.length();
+                    let hd = (en.pos - hpos).length();
                     if hd < HEART_R + en.r + 6.0 && hd > 0.01 {
-                        en.pos = en.pos / hd * (HEART_R + en.r + 6.0);
+                        en.pos = hpos + (en.pos - hpos) / hd * (HEART_R + en.r + 6.0);
                     }
                 }
                 EnemyKind::Darter => {
@@ -2328,8 +2406,9 @@ impl World {
                 self.heart.charge = self.heart.charge.max(((t - (w.t0 - w.lead)) / w.lead).clamp(0.0, 1.0));
             } else if active {
                 let rad = w.radius(t);
-                let d = ppos.length();
-                if (d - rad).abs() < 12.0 + PLAYER_HIT_R && !w.in_gap(ppos.y.atan2(ppos.x)) {
+                let rel = ppos - w.origin;
+                let d = rel.length();
+                if (d - rad).abs() < 12.0 + PLAYER_HIT_R && !w.in_gap(rel.y.atan2(rel.x)) {
                     hurt = Some(SRC_WAVE);
                 }
             }
