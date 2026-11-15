@@ -20,7 +20,13 @@ change the track, and the backdrop changes with it. Hover anything for a tooltip
     read what it does before choosing it.
   - **PLAY FILES / PLAY FOLDER** (or drop files, folders or playlists on the window), and
     **LIVE AUDIO**: play against whatever your PC is playing.
-- **LAN RALLY**: a beat-locked paddle duel for two PCs on the same network.
+- **HIGHWAY**: a side mode on the track the menu is playing. Race down the grid: switch lanes
+  (A / D) around the walls that land on the kicks, jump (SPACE) the bars on the snares, collect
+  the gems on the hats.
+- **LAN RALLY**: a beat-locked paddle duel for two PCs on the same network. Long rallies speed
+  up; the practice bot is as sharp as your difficulty tier.
+- **CODEX**: what every Heart form, enemy and upgrade does, how the music becomes the level, and
+  your best scores.
 - **MUSIC LIBRARY**: ENTER picks a folder, SHIFT+ENTER an `.m3u` playlist.
 - **OPTIONS**: volumes, SYNC OFFSET (raise it if attacks land before you hear the beat), VISUALS
   (FULL / SUBTLE / OFF: how hard the scene pulses with the music), windowed or fullscreen.
@@ -70,6 +76,10 @@ How it plays:
   section ends and you get **purgatory**: a breather with a clock where everything is shootable.
 - **The Heart moves.** From PULSE up it relocates every few bars: its destination is ringed for
   a beat before it glides there, and it holds its fire on the way.
+- **It charges.** In OVERDRIVE the Heart lights a lane through where you stand and crosses it a
+  beat later. The last section of a song is the FINALE: every pulse has a shootable echo.
+- **Resonance.** Grazes, kills, on-beat dashes and hurting the Heart fill the meter under your
+  combo. Full, it rings for eight seconds: more damage, double score.
 - **Bullets arrive on the beat.** Every pulse is timed to cross the ticked ring around the Heart
   on a beat. Passing close to a bullet without being hit is a graze: score and combo.
 - **Rewards are graded.** Calm sections, purgatory and a cleared track grade how you did since
