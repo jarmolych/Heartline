@@ -145,6 +145,34 @@ fn parse_args() -> Args {
 }
 
 /// Expand folders into the audio files they contain (sorted, recursive, capped).
+fn is_playlist(p: &Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("m3u") || e.eq_ignore_ascii_case("m3u8")).unwrap_or(false)
+}
+
+/// Read an .m3u / .m3u8 playlist: one path per line, `#` lines are comments, relative paths are
+/// resolved against the playlist's own folder. Only existing audio files are kept, in order.
+fn read_playlist(p: &Path) -> Vec<PathBuf> {
+    let Ok(bytes) = std::fs::read(p) else { return Vec::new() };
+    let text = String::from_utf8_lossy(&bytes);
+    let base = p.parent().unwrap_or(Path::new("."));
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with('#') || out.len() > 5000 {
+            continue;
+        }
+        let line = line.strip_prefix("file:///").unwrap_or(line);
+        let mut f = PathBuf::from(line);
+        if f.is_relative() {
+            f = base.join(f);
+        }
+        if decode::is_audio_file(&f) && f.is_file() {
+            out.push(f);
+        }
+    }
+    out
+}
+
 fn expand_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
         if depth > 4 || out.len() > 2000 {
@@ -165,6 +193,8 @@ fn expand_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     for p in paths {
         if p.is_dir() {
             walk(p, &mut out, 0);
+        } else if is_playlist(p) {
+            out.extend(read_playlist(p));
         } else if decode::is_audio_file(p) {
             out.push(p.clone());
         }
@@ -306,6 +336,8 @@ struct LiveRun {
 
 /// Menu music plays at this fraction of the in-run music volume.
 const MENU_MUSIC_GAIN: f32 = 0.5;
+/// How long the menu stays on one track before cross-fading to the next.
+const MENU_TRACK_SECS: f32 = 75.0;
 
 /// Difficulty tiers: (budget multiplier, name, what changes). Steps are small on purpose.
 /// Tier 0 is no-fail; the last tier starts with a single life (see `App::apply_diff_rules`).
@@ -329,6 +361,8 @@ struct App {
     screen: Screen,
     phase: Phase,
     queue: Vec<PathBuf>,
+    /// The run keeps drawing tracks from the library after its queue is used up.
+    endless: bool,
     qi: usize,
     loader: Option<Loader>,
     ready: Option<(usize, Loaded)>,
@@ -344,6 +378,8 @@ struct App {
     offset_ms: f32,
     music_dir: Option<PathBuf>,
     juke: Jukebox,
+    /// Where endless runs are up to in the library list.
+    juke_seq: usize,
     autofire: bool,
     fullscreen: bool,
     /// Index into `VISUALS`.
@@ -402,6 +438,8 @@ struct Jukebox {
     last_t: f32,
     playing: bool,
     fails: u32,
+    /// Seconds the current menu track has been playing (the menu moves on by itself).
+    played: f32,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -574,7 +612,7 @@ impl App {
         }
         let first_theme = rng.below(synth::THEME_COUNT);
         lib.extend((0..synth::THEME_COUNT).map(|k| theme_path((first_theme + k) % synth::THEME_COUNT)));
-        self.juke = Jukebox { list: lib, idx: 0, loaded: None, loader: None, cursor: 0, last_t: -1.0, playing: false, fails: 0 };
+        self.juke = Jukebox { list: lib, idx: 0, loaded: None, loader: None, cursor: 0, last_t: -1.0, playing: false, fails: 0, played: 0.0 };
     }
 
     fn juke_next(&mut self, dir: i32) {
@@ -628,9 +666,18 @@ impl App {
                 let start = if theme_index(path).is_some() { 0.0 } else { preview_start(&loaded.an) };
                 self.audio.play_ex(loaded.track.clone(), start as f64, true, 0.9);
                 self.juke.playing = true;
+                self.juke.played = 0.0;
                 self.juke.last_t = -1.0;
                 self.world.warp = 1.0;
                 self.world.beat_len = if loaded.level.bpm > 1.0 { 60.0 / loaded.level.bpm } else { 0.5 };
+            }
+        }
+        // The menu is a radio, not a loop: move to the next track after a while.
+        if self.juke.playing {
+            self.juke.played += dt;
+            if self.juke.played > MENU_TRACK_SECS && self.juke.list.len() > 1 && self.juke.loader.is_none() && self.dialog.is_none() {
+                self.juke.idx = (self.juke.idx + 1) % self.juke.list.len();
+                self.juke.played = 0.0;
             }
         }
         let mut feat = Feat::default();
@@ -669,7 +716,7 @@ impl App {
     }
 
     /// Start a run with the track the menu is playing, plus `extra` more from the playlist.
-    fn start_from_juke(&mut self, extra: usize) {
+    fn start_from_juke(&mut self, extra: usize, endless: bool) {
         let n = self.juke.list.len();
         if n == 0 {
             self.say("no music found - choose a MUSIC LIBRARY folder or drop files on the window");
@@ -684,6 +731,8 @@ impl App {
         }
         // The menu already analysed this track: reuse it so the level starts instantly.
         let reuse = self.juke.loaded.as_ref().filter(|(p, _)| *p == paths[0]).map(|(_, l)| (l.track.clone(), l.an.clone()));
+        self.endless = endless;
+        self.juke_seq = self.juke.idx % n;
         self.start_run(paths);
         if let Some((track, an)) = reuse {
             let level = level::generate(&an, self.args.seed, self.diff());
@@ -812,7 +861,40 @@ impl App {
         }
     }
 
+    /// The next library track that is not already in this run (wraps around when all are used).
+    fn next_library_track(&mut self) -> Option<PathBuf> {
+        let n = self.juke.list.len();
+        for _ in 0..n {
+            self.juke_seq = (self.juke_seq + 1) % n;
+            let p = &self.juke.list[self.juke_seq];
+            if !self.queue.contains(p) {
+                return Some(p.clone());
+            }
+        }
+        self.juke.list.get(self.juke_seq).cloned()
+    }
+
+    /// Carry on after the last queued track: same build, next track from the library.
+    fn continue_run(&mut self) {
+        self.endless = true;
+        if let Some(p) = self.next_library_track() {
+            self.queue.push(p);
+            self.qi = self.queue.len() - 1;
+            self.juke.playing = false;
+            self.audio.stop();
+            self.world.spawn_orbs(22.0);
+            self.screen = Screen::Play;
+            self.phase = Phase::Intermission(0.0);
+        }
+    }
+
     fn begin_song(&mut self, loaded: Loaded) {
+        // Endless runs always have the next track queued, so it is analysed while this one plays.
+        if self.endless && self.qi + 1 >= self.queue.len() {
+            if let Some(p) = self.next_library_track() {
+                self.queue.push(p);
+            }
+        }
         let start = if self.qi == 0 { self.args.start.max(0.0) } else { 0.0 };
         self.world.begin_song(loaded.level.active_secs, self.qi as u32, loaded.level.seed);
         self.world.beat_len = if loaded.level.bpm > 1.0 { 60.0 / loaded.level.bpm } else { 0.5 };
@@ -2248,6 +2330,7 @@ async fn run(args: Args) {
         screen: Screen::Menu,
         phase: Phase::Loading,
         queue: Vec::new(),
+        endless: false,
         qi: 0,
         loader: None,
         ready: None,
@@ -2260,7 +2343,8 @@ async fn run(args: Args) {
         music_gain: MENU_MUSIC_GAIN,
         offset_ms: 0.0,
         music_dir: None,
-        juke: Jukebox { list: Vec::new(), idx: 0, loaded: None, loader: None, cursor: 0, last_t: -1.0, playing: false, fails: 0 },
+        juke_seq: 0,
+        juke: Jukebox { list: Vec::new(), idx: 0, loaded: None, loader: None, cursor: 0, last_t: -1.0, playing: false, fails: 0, played: 0.0 },
         autofire: true,
         fullscreen: false,
         visuals: 0,
@@ -2299,7 +2383,7 @@ async fn run(args: Args) {
         app.fullscreen = true;
         display::set_borderless(true);
     }
-    app.music_dir = cfg.get("music_dir").map(PathBuf::from).filter(|p| p.is_dir()).or_else(|| music_folder().filter(|p| p.is_dir()));
+    app.music_dir = cfg.get("music_dir").map(PathBuf::from).filter(|p| p.is_dir() || is_playlist(p)).or_else(|| music_folder().filter(|p| p.is_dir()));
     app.world = World::new(app.diff(), app.diff == 0);
     app.juke_rescan();
     app.audio.set_volume(if args.mute { 0.0 } else { app.volume });
@@ -2360,8 +2444,16 @@ async fn run(args: Args) {
         // ---- dropped files / dialog results ----
         let dropped: Vec<PathBuf> = get_dropped_files().into_iter().filter_map(|f| f.path).collect();
         if !dropped.is_empty() && matches!(app.screen, Screen::Menu | Screen::Results | Screen::LiveSetup) {
-            let paths = expand_paths(&dropped);
-            app.start_run(paths);
+            let as_library = app.screen == Screen::Menu && app.menu_sel == 4 && dropped.len() == 1 && (dropped[0].is_dir() || is_playlist(&dropped[0]));
+            if as_library {
+                app.music_dir = Some(dropped[0].clone());
+                app.juke_rescan();
+                app.save_settings();
+            } else {
+                let paths = expand_paths(&dropped);
+                app.endless = false;
+                app.start_run(paths);
+            }
         }
         let mut picked: Option<Vec<PathBuf>> = None;
         if let Some(rx) = &app.dialog {
@@ -2381,6 +2473,7 @@ async fn run(args: Args) {
                     app.save_settings();
                 }
             } else if !p.is_empty() {
+                app.endless = false;
                 let paths = expand_paths(&p);
                 app.start_run(paths);
             }
@@ -2493,8 +2586,8 @@ async fn run(args: Args) {
                     .to_string();
                 let n_lib = app.juke.list.len().saturating_sub(synth::THEME_COUNT);
                 let items = vec![
-                    "PLAY THIS TRACK".to_string(),
-                    "SHUFFLE RUN   (5 tracks)".to_string(),
+                    "START RUN   (endless, from this track)".to_string(),
+                    "SINGLE TRACK".to_string(),
                     "PLAY FILES...".to_string(),
                     "PLAY FOLDER...".to_string(),
                     format!("MUSIC LIBRARY   {lib_name}  ({n_lib} tracks)"),
@@ -2556,13 +2649,15 @@ async fn run(args: Args) {
                     }
                 }
                 match act {
-                    Some(0) => app.start_from_juke(0),
-                    Some(1) => app.start_from_juke(4),
+                    Some(0) => app.start_from_juke(0, true),
+                    Some(1) => app.start_from_juke(0, false),
                     Some(2) => {
                         let (tx, rx) = channel();
                         std::thread::spawn(move || {
                             let exts: Vec<&str> = decode::AUDIO_EXTS.to_vec();
-                            let r = rfd::FileDialog::new().set_title("Heartline - choose songs").add_filter("Audio", &exts).pick_files();
+                            let mut exts = exts;
+                            exts.extend(["m3u", "m3u8"]);
+                            let r = rfd::FileDialog::new().set_title("Heartline - choose songs or a playlist").add_filter("Audio and playlists", &exts).pick_files();
                             let _ = tx.send(r.unwrap_or_default());
                         });
                         app.dialog = Some(rx);
@@ -2570,14 +2665,17 @@ async fn run(args: Args) {
                     }
                     Some(3) | Some(4) => {
                         let library = act == Some(4);
+                        // SHIFT + ENTER on MUSIC LIBRARY picks an .m3u playlist instead of a folder.
+                        let playlist = library && (is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift));
                         let (tx, rx) = channel();
-                        let start_dir = app.music_dir.clone();
+                        let start_dir = app.music_dir.clone().map(|d| if d.is_dir() { d } else { d.parent().map(Path::to_path_buf).unwrap_or(d) });
                         std::thread::spawn(move || {
                             let mut d = rfd::FileDialog::new().set_title(if library { "Heartline - choose your music library folder" } else { "Heartline - choose a music folder to play" });
                             if let Some(sd) = start_dir {
                                 d = d.set_directory(sd);
                             }
-                            let _ = tx.send(d.pick_folder().map(|p| vec![p]).unwrap_or_default());
+                            let picked = if playlist { d.add_filter("Playlist", &["m3u", "m3u8"]).pick_file() } else { d.pick_folder() };
+                            let _ = tx.send(picked.map(|p| vec![p]).unwrap_or_default());
                         });
                         app.dialog = Some(rx);
                         app.dialog_library = library;
@@ -2638,8 +2736,9 @@ async fn run(args: Args) {
                     11 => "VISUALS: how hard the scene pulses with the music (zoom punches, flashes, rings). SUBTLE or OFF for comfort",
                     6 => "LAN RALLY: a beat-locked paddle duel against a second PC on your network; the host picks the song",
                     10 => "SYNC OFFSET: raise it if attacks land before you hear the beat (soundbar / Bluetooth lag), lower it if they land late",
-                    4 => "MUSIC LIBRARY: the folder the menu plays from and SHUFFLE RUN draws its tracks from",
-                    1 => "SHUFFLE RUN: this track plus four more; HP, upgrades and score carry over and the Heart gets tougher",
+                    4 => "MUSIC LIBRARY: ENTER picks a folder, SHIFT+ENTER an .m3u playlist (or drop either here). Runs and the menu draw from it",
+                    0 => "START RUN: this track, then the library keeps coming. HP, upgrades and score carry over until you fall",
+                    1 => "SINGLE TRACK: just this song; you can still carry on into more songs from the results screen",
                     _ => "drop audio files or folders on the window to play them",
                 };
                 text_shadow(help, 110.0 * u, hy, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.8), -1);
@@ -2790,10 +2889,17 @@ async fn run(args: Args) {
                     y += 36.0 * u;
                 }
                 let can_retry = !app.queue.is_empty();
-                let hint = if can_retry { "ENTER  play again        ESC  menu" } else { "ESC  menu" };
+                let can_continue = !app.died && !app.juke.list.is_empty();
+                let hint = match (can_continue, can_retry) {
+                    (true, _) => "SPACE  keep going with more songs        ENTER  new run        ESC  menu",
+                    (false, true) => "ENTER  play again        ESC  menu",
+                    _ => "ESC  menu",
+                };
                 text_center(hint, sw * 0.5, sh * 0.82, 28.0 * u, pal.accent);
                 if is_key_pressed(KeyCode::Escape) {
                     app.to_menu();
+                } else if can_continue && is_key_pressed(KeyCode::Space) {
+                    app.continue_run();
                 } else if can_retry && is_key_pressed(KeyCode::Enter) {
                     let q = app.queue.clone();
                     app.start_run(q);
