@@ -378,12 +378,18 @@ pub struct GradeWindow {
 pub const GRADES: [&str; 4] = ["C", "B", "A", "S"];
 
 /// Run modifiers: one more is switched on with every depth (song) of a run.
-pub const MODS: [(&str, &str); 4] = [
+pub const MODS: [(&str, &str); 5] = [
     ("ALLEGRO", "bullets fly 15% faster"),
     ("FORTE", "pulses carry 20% more bullets"),
     ("SWARM", "more enemies at once"),
     ("NO MERCY", "no breather after a hit"),
+    ("GLASS", "two lives, 60% more damage"),
 ];
+/// How many of `MODS` depth hands out by itself (the rest are only chosen in run setup).
+pub const DEPTH_MODS: usize = 4;
+pub const MOD_GLASS: u8 = 16;
+/// Each mutator chosen in run setup multiplies the score by this much more.
+pub const MUTATOR_SCORE: f32 = 0.15;
 pub const MOD_ALLEGRO: u8 = 1;
 pub const MOD_FORTE: u8 = 2;
 pub const MOD_SWARM: u8 = 4;
@@ -767,6 +773,11 @@ pub struct World {
     pub gun: Vec<Vec<f32>>,
     /// DODGE mode: no gun, the Heart cannot be hurt, grazes score triple.
     pub pacifist: bool,
+    /// Mutators chosen in run setup (`MOD_*` bits); depth adds more on top.
+    pub base_mods: u8,
+    /// Score multiplier of the tier and the chosen mutators.
+    pub score_mult: f32,
+    survive_acc: f32,
     /// Ear-candy comets in flight.
     pub painters: Vec<Painter>,
     /// 0..1 envelope kicked by every piece of ear candy (visual flourish).
@@ -883,6 +894,9 @@ impl World {
             mercy: 1.0,
             gun: Vec::new(),
             pacifist: false,
+            base_mods: 0,
+            score_mult: 1.0,
+            survive_acc: 0.0,
             painters: Vec::new(),
             candy: 0.0,
             mood: Mood::default(),
@@ -1055,7 +1069,7 @@ impl World {
 
     /// The point a shot should go to hurt the Heart from `from`, if anything can be hurt now.
     pub fn heart_target(&self, from: Vec2) -> Option<Vec2> {
-        if self.heart.broken || self.purgatory {
+        if self.heart.broken || self.purgatory || self.pacifist {
             return None;
         }
         match self.heart.form {
@@ -1070,7 +1084,7 @@ impl World {
 
     /// Take `dmg` off the Heart, stopping at the current phase's floor.
     fn damage_heart(&mut self, dmg: f32) {
-        if dmg <= 0.0 || self.heart.broken || self.purgatory {
+        if dmg <= 0.0 || self.heart.broken || self.purgatory || self.pacifist {
             return;
         }
         let floor = self.phase_floor();
@@ -1203,11 +1217,11 @@ impl World {
         self.heart = Heart::new(hp, 1.0);
         // Depth: every song after the first switches one more modifier on.
         if song_idx == 0 {
-            self.mod_offset = (seed % MODS.len() as u64) as u8;
+            self.mod_offset = (seed % DEPTH_MODS as u64) as u8;
         }
-        self.mods = 0;
-        for k in 0..(song_idx as usize).min(MODS.len()) {
-            self.mods |= 1 << ((self.mod_offset as usize + k) % MODS.len());
+        self.mods = self.base_mods;
+        for k in 0..(song_idx as usize).min(DEPTH_MODS) {
+            self.mods |= 1 << ((self.mod_offset as usize + k) % DEPTH_MODS);
         }
         self.phases.clear();
         self.phase_i = 0;
@@ -1245,7 +1259,7 @@ impl World {
     }
 
     fn add_score(&mut self, base: f32) {
-        self.score += (base * self.mult()).round().max(0.0) as u64;
+        self.score += (base * self.mult() * self.score_mult).round().max(0.0) as u64;
     }
 
     pub fn burst(&mut self, pos: Vec2, n: usize, speed: f32, col: u8, size: f32) {
@@ -1662,10 +1676,15 @@ impl World {
     /// The newest modifier of this depth, if the depth added one: (name, what it does).
     pub fn new_mod(&self) -> Option<(&'static str, &'static str)> {
         let n = self.song_idx as usize;
-        if n == 0 || n > MODS.len() {
+        if n == 0 || n > DEPTH_MODS {
             return None;
         }
-        Some(MODS[(self.mod_offset as usize + n - 1) % MODS.len()])
+        let m = (self.mod_offset as usize + n - 1) % DEPTH_MODS;
+        // Already switched on in run setup: nothing new to announce.
+        if self.base_mods >> m & 1 == 1 {
+            return None;
+        }
+        Some(MODS[m])
     }
 
     /// Announce the depth the run has reached (call after `begin_song`).
@@ -2016,6 +2035,14 @@ impl World {
             self.encore();
         }
         self.window.peak_mult = self.window.peak_mult.max(self.mult());
+        // DODGE: staying alive is the score.
+        if self.pacifist && active && !self.dead {
+            self.survive_acc += dt * 20.0;
+            if self.survive_acc >= 10.0 {
+                self.survive_acc -= 10.0;
+                self.add_score(10.0);
+            }
+        }
         self.grade_banner = (self.grade_banner - dt / 3.0).max(0.0);
         self.form_banner = (self.form_banner - dt / 3.5).max(0.0);
         self.combo_idle += dt;
@@ -2216,6 +2243,11 @@ impl World {
     /// Fire the gun. `scale` is the shot's damage multiplier (`gun_damage`): heavier shots are
     /// drawn larger and get a soft tick.
     fn fire(&mut self, scale: f32) {
+        if self.pacifist {
+            return;
+        }
+        // GLASS: fragile, but it hits hard.
+        let scale = if self.mods & MOD_GLASS != 0 { scale * 1.6 } else { scale };
         // DOWNBEAT: the first shot after each downbeat is charged.
         let charged = std::mem::take(&mut self.downbeat_ready);
         let scale = if charged { scale * (1.0 + 1.5 * self.player.up(UpgradeId::Downbeat) as f32) } else { scale };
