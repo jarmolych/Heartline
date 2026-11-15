@@ -290,8 +290,13 @@ fn analyze_report(path: &Path, args: &Args) {
     println!("phrases   {}", an.phrases.len());
     println!("sections  {}", an.sections.len());
     for s in &an.sections {
-        println!("   {:7.2} - {:7.2}  {:?}  intensity {:.2}", s.t0, s.t1, s.kind, s.intensity);
+        println!("   {:7.2} - {:7.2}  phase {}  {:?}  intensity {:.2}  layers {}", s.t0, s.t1, (b'A' + s.phase) as char, s.kind, s.intensity, s.layers);
     }
+    for l in &an.layers {
+        let spans: Vec<String> = l.spans.iter().map(|s| format!("{:.0}-{:.0}", s.0, s.1)).collect();
+        println!("layer     {:<7} {}", format!("{:?}", l.kind), spans.join(" "));
+    }
+    println!("chimes    {}  ({:.2}/s)", an.chimes.len(), an.chimes.len() as f32 / an.duration.max(1.0));
     let first_beats: Vec<String> = an.beats.iter().take(10).map(|b| format!("{b:.3}")).collect();
     println!("beats[..10] {}", first_beats.join(" "));
     let lows: Vec<String> = an.onsets.iter().filter(|o| o.band == Band::Low).take(12).map(|o| format!("{:.3}", o.t)).collect();
