@@ -212,6 +212,8 @@ pub struct Level {
     pub beats: Vec<f32>,
     pub seed: u64,
     pub active_secs: f32,
+    /// The player's gun track: shot times per TEMPO level (see `gun_track`).
+    pub gun: Vec<Vec<f32>>,
 }
 
 /// Whole-song overview for the HUD: the "heartline" of the track.
@@ -864,7 +866,150 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         beats: an.beats.clone(),
         seed,
         active_secs: (an.duration - silent).max(1.0),
+        gun: gun_track(&an.beats, &an.onsets, an.duration),
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The player's gun track
+// ---------------------------------------------------------------------------------------------
+
+/// Target seconds between the player's shots per TEMPO upgrade level. A shot's damage is
+/// proportional to the gap before it (`gun_damage`), so the level sets the DPS and the song only
+/// decides where the shots fall.
+pub const GUN_INTERVALS: [f32; 5] = [0.27, 0.21, 0.165, 0.13, 0.105];
+/// Grid step (seconds) the gun's subdivision of the beat is chosen to be nearest to.
+const GUN_GRID_STEP: f32 = 0.095;
+/// A shot may follow the previous one after this many target intervals at the earliest / latest.
+const GUN_GAP_MIN: f32 = 0.55;
+const GUN_GAP_MAX: f32 = 1.6;
+
+/// Damage multiplier of a shot fired `gap` seconds after the previous one at a target interval
+/// of `target` seconds: exactly proportional, so damage per second never depends on the song.
+pub fn gun_damage(gap: f32, target: f32) -> f32 {
+    (gap / target.max(1e-3)).clamp(0.3, 3.0)
+}
+
+/// Time of the continuous beat index `pos` (the inverse of `beat_pos`).
+pub fn beat_time(beats: &[f32], pos: f32) -> f32 {
+    let n = beats.len();
+    if n < 2 {
+        return pos * 0.5;
+    }
+    let last = (n - 1) as f32;
+    if pos <= 0.0 {
+        return beats[0] + pos * (beats[1] - beats[0]).max(0.05);
+    }
+    if pos >= last {
+        return beats[n - 1] + (pos - last) * (beats[n - 1] - beats[n - 2]).max(0.05);
+    }
+    let i = pos.floor() as usize;
+    beats[i] + (pos - i as f32) * (beats[i + 1] - beats[i])
+}
+
+/// Build the gun track: for every TEMPO level, the times the player's gun fires in this song.
+///
+/// The beat is cut into a fine grid (16ths at dance tempos). Slots where a drum was actually
+/// heard take that drum's exact time and a score from its strength; the others get a small
+/// score from their metrical weight (beat > half beat > quarter beat). Each level then walks the
+/// grid, always picking the best-scoring slot about one target interval after the previous
+/// shot, so the gun plays along with the song's rhythm at a steady average rate.
+pub fn gun_track(beats: &[f32], onsets: &[Onset], duration: f32) -> Vec<Vec<f32>> {
+    let mut gaps: Vec<f32> = beats.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.05).collect();
+    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let bl = if gaps.is_empty() { 0.5 } else { gaps[gaps.len() / 2] };
+    let mut div = 4i64;
+    let mut best = f32::MAX;
+    for d in [1i64, 2, 4, 8, 16] {
+        let err = (bl / d as f32 / GUN_GRID_STEP).ln().abs();
+        if err < best {
+            best = err;
+            div = d;
+        }
+    }
+    let step = bl / div as f32;
+    let p0 = (beat_pos(beats, 0.0) * div as f32).ceil() as i64;
+    let p1 = (beat_pos(beats, duration.max(0.0)) * div as f32).floor() as i64;
+    if p1 <= p0 {
+        return vec![Vec::new(); GUN_INTERVALS.len()];
+    }
+    // (time, score) per grid slot.
+    let mut slots: Vec<(f32, f32)> = (p0..=p1)
+        .map(|j| {
+            let k = j.rem_euclid(div);
+            let metric = if k == 0 {
+                0.45
+            } else if (2 * k) % div == 0 {
+                0.3
+            } else if (4 * k) % div == 0 {
+                0.18
+            } else {
+                0.0
+            };
+            (beat_time(beats, j as f32 / div as f32), metric)
+        })
+        .collect();
+    let mut strengths: Vec<f32> = onsets.iter().map(|o| o.strength).collect();
+    strengths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let norm = strengths.get(strengths.len() * 9 / 10).copied().unwrap_or(1.0).max(1e-6);
+    let mut heard = vec![0.0f32; slots.len()];
+    for o in onsets {
+        let j = (beat_pos(beats, o.t) * div as f32).round() as i64 - p0;
+        if j < 0 || j as usize >= slots.len() {
+            continue;
+        }
+        let j = j as usize;
+        let grid_t = beat_time(beats, (j as i64 + p0) as f32 / div as f32);
+        if (o.t - grid_t).abs() > 0.4 * step {
+            continue;
+        }
+        let band = if o.band == Band::Low { 0.6 } else { 1.0 };
+        let w = 0.25 + band * (o.strength / norm).min(1.5);
+        if w > heard[j] {
+            heard[j] = w;
+            slots[j].0 = o.t;
+        }
+    }
+    for (s, h) in slots.iter_mut().zip(&heard) {
+        s.1 += h;
+    }
+
+    GUN_INTERVALS
+        .iter()
+        .map(|&target| {
+            let mut out: Vec<f32> = Vec::with_capacity((duration / target) as usize + 2);
+            let t0 = slots[0].0 - target;
+            let mut last = t0;
+            let mut i = 0usize;
+            while i < slots.len() {
+                // Pull the ideal gap back toward the nominal schedule so the average rate holds.
+                let behind = (t0 + out.len() as f32 * target) - last;
+                let ideal = (target + 0.5 * behind).clamp(0.7 * target, 1.4 * target);
+                let (lo, hi) = (last + GUN_GAP_MIN * target, last + GUN_GAP_MAX * target);
+                while i < slots.len() && slots[i].0 < lo {
+                    i += 1;
+                }
+                if i >= slots.len() {
+                    break;
+                }
+                let mut pick = i;
+                let mut pick_score = f32::MIN;
+                let mut j = i;
+                while j < slots.len() && (slots[j].0 <= hi || j == i) {
+                    let score = slots[j].1 - 1.0 * ((slots[j].0 - last) / ideal).ln().abs();
+                    if score > pick_score {
+                        pick_score = score;
+                        pick = j;
+                    }
+                    j += 1;
+                }
+                last = slots[pick].0;
+                out.push(last);
+                i = pick + 1;
+            }
+            out
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1096,5 +1241,68 @@ impl LiveGen {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn steady(bpm: f32, secs: f32) -> (Vec<f32>, Vec<Onset>) {
+        let bl = 60.0 / bpm;
+        let beats: Vec<f32> = (0..(secs / bl) as usize).map(|i| 0.1 + i as f32 * bl).collect();
+        let mut onsets = Vec::new();
+        for (i, &b) in beats.iter().enumerate() {
+            onsets.push(Onset { t: b + 0.002, band: Band::Low, strength: 0.9 });
+            onsets.push(Onset { t: b + 0.5 * bl - 0.004, band: Band::High, strength: 0.5 });
+            if i % 2 == 1 {
+                onsets.push(Onset { t: b + 0.75 * bl + 0.003, band: Band::Mid, strength: 1.0 });
+            }
+        }
+        (beats, onsets)
+    }
+
+    #[test]
+    fn beat_time_inverts_beat_pos() {
+        let (beats, _) = steady(128.0, 20.0);
+        for k in 0..400 {
+            let t = -1.0 + k as f32 * 0.06;
+            assert!((beat_time(&beats, beat_pos(&beats, t)) - t).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn gun_track_keeps_its_rate_and_gap_bounds() {
+        for bpm in [62.0, 84.0, 110.0, 128.0, 170.0, 196.0] {
+            let (beats, onsets) = steady(bpm, 90.0);
+            let track = gun_track(&beats, &onsets, 90.0);
+            assert_eq!(track.len(), GUN_INTERVALS.len());
+            for (lv, shots) in track.iter().enumerate() {
+                let target = GUN_INTERVALS[lv];
+                let mean = (shots[shots.len() - 1] - shots[0]) / (shots.len() - 1) as f32;
+                assert!((mean / target).ln().abs() < 0.3, "{bpm} BPM level {lv}: mean gap {mean} vs {target}");
+                for w in shots.windows(2) {
+                    let g = (w[1] - w[0]) / target;
+                    assert!(g > 0.45 && g < 1.75, "{bpm} BPM level {lv}: gap {g} of target");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gun_track_fires_on_the_drums() {
+        // At the slowest gun level there are more drum hits than shots, so nearly every shot
+        // should sit exactly on one of them instead of on an empty grid slot.
+        let (beats, onsets) = steady(128.0, 60.0);
+        let track = gun_track(&beats, &onsets, 60.0);
+        let shots = &track[0];
+        let on = shots.iter().filter(|&&t| onsets.iter().any(|o| (o.t - t).abs() < 1e-4)).count();
+        assert!(on * 10 >= shots.len() * 9, "only {on} of {} shots are on a drum hit", shots.len());
+    }
+
+    #[test]
+    fn gun_track_without_beats_is_still_usable() {
+        let track = gun_track(&[], &[], 30.0);
+        assert!(track.iter().all(|v| v.len() > 50));
     }
 }

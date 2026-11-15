@@ -1,6 +1,6 @@
 # Heartline — Project State
 
-_Last updated: 2026-11-14_
+_Last updated: 2026-11-15_
 
 ## Overview
 Heartline is a Rust (macroquad) game that converts music into a top-down synthwave arena fight
@@ -13,6 +13,17 @@ Full plan in `DESIGN.md`, player-facing notes in `README.md`.
 - [ ] **0.2 (in progress, second playtest round):** directed/telegraphed attacks, song-independent
       difficulty, menu music, sound effects, visual overhaul (line art + depth), better beat sync
 - [ ] Later: per-song high scores, gamepad, Heart boss phases, side mode (beat platformer)
+
+## Where the work is now (read this first)
+The sections below describe 0.2 and are kept for background. Current work is **0.3**, driven by
+`docs/plans/0.3-playtest-2.md` (its "Progress" notes say what is done and what is next). The repo
+uses task branches and pull requests (see `CLAUDE.md`); `gh` is not installed here, so PRs are
+opened in the browser. Branches not yet merged into `main` as of 2026-11-15:
+- `docs/director-rethink` — plan change only (slice 11: musical layers + director credits).
+- `feat/playlists-endless-run` — M3U playlists, endless runs, menu track rotation (slices 14, 5, 1).
+- `feat/gun-track` — slice 3: the gun fires on a per-song gun track with exact constant DPS.
+
+Latest test build: `#UserTesting\Heartline-0.3.0-T2-win-x64` (does not include `feat/gun-track`).
 
 ## What the player said (2026-11-14 playtest of 0.1) — the brief for 0.2
 - Dies within ~30 s on any song; difficulty should NOT depend on the song (slow songs were much
@@ -155,6 +166,8 @@ SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia
 tools, balance simulator, bot · `rng.rs` PRNG.
 
 ## Session Log
+- 2026-11-15 — Slice 3 of the 0.3 plan (gun track, exact DPS, shot tick) on `feat/gun-track`;
+  33 unit tests pass.
 - 2026-11-13 — Researched stack, installed Rust, wrote DESIGN.md, built 0.1.0, packaged to
   `#UserTesting/Heartline-0.1.0-win-x64/`.
 - 2026-11-14 — First playtest feedback. 0.2 work: generator rewrite (directed, per-second
