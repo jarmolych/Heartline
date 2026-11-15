@@ -984,6 +984,17 @@ float stars(vec2 p, float cell, float dens) {
     return smoothstep(0.07, 0.0, d) * tw;
 }
 
+// One layer of falling rain. `g` is x across (aspect-corrected) and y down the screen; streaks
+// are brightest at the falling tip and fade up their tail.
+float rainLayer(vec2 g, float cols, float speed, float len, float seed) {
+    g.x += g.y * (0.16 + 0.05 * sin(u_time * 0.31));
+    float cx = g.x * cols;
+    float h = hash(vec2(floor(cx), seed));
+    float fall = fract(g.y * (1.0 + h) - u_time * speed * (0.8 + 0.5 * h) + h * 17.0);
+    float tail = fall < len ? fall / len : 0.0;
+    return step(0.4, h) * smoothstep(0.5, 0.1, abs(fract(cx) - 0.5) * 2.0) * tail * tail;
+}
+
 // In-game: calm deep space under a floating platform. q = world position on the z = 0 plane.
 vec3 topdown(vec2 q) {
     vec3 col = mix(u_c0 * 0.55, u_c1 * 0.42, clamp(uv.y * 0.8 + 0.1, 0.0, 1.0));
@@ -1005,9 +1016,10 @@ vec3 topdown(vec2 q) {
             col += mix(u_sunA, u_sunB, 0.5) * 0.10 * smoothstep(1.0, 0.98, pd);
             col += u_sunA * 0.07 * smoothstep(1.3, 1.36, rl) * smoothstep(2.1, 2.0, rl) * (0.6 + 0.4 * sin(rl * 30.0));
         } else if (sc < 6.5) {
-            // eclipse: a corona ring that breathes with the kick
-            float er = abs(d - 0.7);
-            col += mix(u_sunA, vec3(1.0), 0.4) * 0.16 * exp(-er * (26.0 - 10.0 * u_mood2.z));
+            // black hole: a dark well with a hot ring that breathes with the kick
+            col *= 1.0 - 0.6 * smoothstep(0.62, 0.5, d);
+            float er = abs(d - 0.64);
+            col += mix(vec3(1.0, 0.6, 0.3), vec3(1.0), 0.4) * 0.2 * exp(-er * (30.0 - 10.0 * u_mood2.z));
         } else if (sc < 7.5) {
             // twin suns
             col += scol * band * 0.11 * smoothstep(0.8, 0.79, d);
@@ -1019,12 +1031,10 @@ vec3 topdown(vec2 q) {
             float cur = pow(sin(ax + sin(ax * 0.4 + u_time * 0.1) * 2.0) * 0.5 + 0.5, 3.0);
             col += mix(u_grid, u_sunA, sin(sp.y / 900.0) * 0.5 + 0.5) * cur * 0.09 * (1.0 + 0.6 * u_swell);
         } else {
-            // storm: dark cloud cells that flash on the kick
-            vec2 cp = (q - u_cam * 0.7) / 600.0;
-            float c1 = sin(cp.x * 2.1 + u_time * 0.05 + sin(cp.y * 2.7) * 1.4) * 0.5 + 0.5;
-            float cell = hash(floor(cp * 1.5) + floor(u_time * 1.3));
-            col *= 1.0 - 0.35 * c1;
-            col += mix(u_sunB, vec3(1.0), 0.6) * c1 * u_mood2.z * step(0.7, cell) * 0.16;
+            // tide: crests rolling under the platform, lit on the kick
+            float wy = sp.y / 170.0 + sin(sp.x / 380.0 + u_time * 0.3) * 1.3 - u_time * 0.6;
+            float crest = smoothstep(0.82, 1.0, sin(wy * 6.2832));
+            col += mix(vec3(1.0, 0.35, 0.75), vec3(0.25, 0.85, 1.0), sin(sp.y / 800.0) * 0.5 + 0.5) * crest * (0.07 + 0.10 * u_mood2.z) * (1.0 + 0.5 * u_swell);
         }
     } else if (sc < 0.5) {
         // sunset: far striped sun
@@ -1073,12 +1083,18 @@ vec3 topdown(vec2 q) {
     // weather, outside and under the platform
     float we = u_mood.y;
     if (we > 0.5 && we < 1.5) {
-        vec2 rp = vec2(uv.x * u_res.x / u_res.y + uv.y * 0.22, uv.y);
-        float cid = floor(rp.x * 70.0);
-        float rh = hash(vec2(cid, 3.3));
-        float s = fract(rp.y * 1.3 + u_time * (0.9 + rh) + rh * 9.0);
-        float streak = step(0.7, rh) * smoothstep(0.5, 0.1, abs(fract(rp.x * 70.0) - 0.5)) * smoothstep(0.0, 0.02, s) * smoothstep(0.15, 0.0, s);
-        col += mix(u_grid, vec3(1.0), 0.3) * streak * (0.08 + 0.3 * u_mood2.y);
+        vec2 g = vec2(uv.x * u_res.x / u_res.y, uv.y);
+        float beat = 0.4 + 0.9 * u_mood2.y + 0.3 * u_swell;
+        float rn = rainLayer(g, 120.0, 1.6, 0.10, 5.5) * 0.4 + rainLayer(g, 60.0, 2.5, 0.18, 8.1) * 0.7 + rainLayer(g, 28.0, 3.6, 0.28, 2.7);
+        col += mix(u_grid, vec3(0.85, 0.92, 1.0), 0.45) * rn * 0.2 * beat;
+        // splashes on the floor plane
+        vec2 gp = q / 150.0;
+        vec2 cell = floor(gp);
+        float ph = fract(u_time * 1.2 + hash(cell) * 9.0);
+        vec2 cpos = vec2(hash(cell + 3.1), hash(cell + 7.7)) * 0.5 + 0.25;
+        float rd = length(fract(gp) - cpos);
+        float ring = smoothstep(0.03, 0.0, abs(rd - ph * 0.3)) * (1.0 - ph) * step(0.3, hash(cell + 1.9));
+        col += mix(u_grid, vec3(0.9, 0.95, 1.0), 0.5) * ring * (0.10 + 0.35 * u_mood2.y);
     } else if (we > 1.5 && we < 2.5) {
         vec2 dp = (q - u_cam * 0.4) / 0.6 + vec2(u_time * 22.0, u_time * 9.0);
         col += mix(u_sunA, vec3(1.0), 0.4) * stars(dp, 130.0, 0.35) * 0.3;
@@ -1137,9 +1153,10 @@ vec3 skyBase(float sc, vec2 p) {
         else if (sc < 3.5) { z = u_c0 * 0.35; h = mix(u_c1, u_grid, 0.45); starD = 0.07; }
         else if (sc < 4.5) { z = vec3(0.01, 0.01, 0.045); h = vec3(0.12, 0.06, 0.26); starD = 0.10; haze = 0.2; }
         else if (sc < 5.5) { z = vec3(0.02, 0.012, 0.07); h = vec3(0.34, 0.12, 0.40); starD = 0.09; }
-        else if (sc < 6.5) { z = vec3(0.0, 0.0, 0.02); h = vec3(0.22, 0.07, 0.12); starD = 0.0; }
+        else if (sc < 6.5) { z = vec3(0.0, 0.0, 0.02); h = vec3(0.20, 0.07, 0.10); starD = 0.12; }
         else if (sc < 7.5) { z = vec3(0.13, 0.03, 0.20); h = vec3(0.92, 0.36, 0.46); starD = 0.02; }
-        else { z = vec3(0.0, 0.02, 0.06); h = vec3(0.04, 0.17, 0.22); starD = 0.0; }
+        else if (sc < 8.5) { z = vec3(0.0, 0.02, 0.06); h = vec3(0.04, 0.17, 0.22); starD = 0.0; }
+        else { z = vec3(0.0, 0.02, 0.08); h = vec3(0.06, 0.20, 0.38); starD = 0.10; }
         // keep some of the palette so the sky still belongs to the land in front of it
         z = mix(z, pz, 0.25);
         h = mix(h, ph, 0.3);
@@ -1160,6 +1177,7 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
     float r = u_vista.z * (1.0 + 0.035 * u_bass);
     float dd = length(q);
     float yy = q.y / r;
+    float px = 1.0 / u_res.y;
     vec3 suncol = mix(u_sunA, u_sunB, clamp(yy * 0.6 + 0.5, 0.0, 1.0));
     if (sc < 0.5) {
         // sunset: the striped sun
@@ -1242,49 +1260,60 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
             col += vec3(0.85, 0.92, 1.0) * (fl * 0.8 + exp(-dot(s2, s2) * 4000.0) * 1.5) * tw;
         }
     } else if (sc < 5.5) {
-        // ringed planet: banded, lit from the upper left, an atmosphere on its limb
-        float R = r * 0.98;
-        vec2 n = q / R;
+        // ringed planet: a sunset-coloured giant with three clean rings, lit from the upper left
+        float R = r * 1.0;
+        vec2 c = q - vec2(0.0, -0.02);
+        float d = length(c);
+        vec2 n = c / R;
         float z = sqrt(max(1.0 - dot(n, n), 0.0));
-        float lit = clamp(dot(vec3(n, z), normalize(vec3(-0.55, -0.45, 0.7))), 0.0, 1.0);
-        float warp = fbm(vec2(n.x * 1.5 + u_time * 0.01, n.y * 6.0));
-        float bandv = sin((n.y + 0.16 * warp) * 17.0) * 0.5 + 0.5;
-        vec3 pc = mix(vec3(0.95, 0.72, 0.48), vec3(0.62, 0.30, 0.62), bandv);
-        pc = mix(pc, vec3(1.0, 0.92, 0.75), smoothstep(0.75, 1.0, sin((n.y + 0.1 * warp) * 7.0 + 1.0)));
-        pc *= 0.10 + 0.95 * pow(lit, 0.8);
-        pc += vec3(0.55, 0.45, 1.0) * pow(1.0 - z, 3.0) * 0.55 * (0.3 + 0.7 * lit);
-        vec2 rq = vec2(q.x * 0.95 - q.y * 0.31, (q.y * 0.95 + q.x * 0.31) * 3.6) / R;
+        float lit = smoothstep(-0.2, 0.8, dot(vec3(n, z), normalize(vec3(-0.5, -0.55, 0.65))));
+        float lat = n.y + 0.05 * sin(n.x * 5.0 + u_time * 0.05);
+        float bands = smoothstep(0.2, 0.8, 0.5 + 0.5 * sin(lat * 13.0));
+        vec3 pc = mix(vec3(1.0, 0.80, 0.42), vec3(0.98, 0.36, 0.52), clamp(n.y * 0.6 + 0.5, 0.0, 1.0)) * (0.80 + 0.20 * bands);
+        pc = mix(pc, vec3(0.55, 0.22, 0.60), 0.35 * smoothstep(0.55, 1.0, 0.5 + 0.5 * sin(lat * 5.0 + 2.0)));
+        pc *= 0.05 + 0.95 * lit;
+        pc += vec3(1.0, 0.6, 0.8) * pow(1.0 - z, 2.5) * 0.55 * lit;
+        vec2 rq = vec2(c.x * 0.94 - c.y * 0.34, (c.y * 0.94 + c.x * 0.34) * 3.8) / R;
         float rl = length(rq);
-        float ring = smoothstep(1.30, 1.34, rl) * smoothstep(2.25, 2.2, rl);
-        ring *= 0.35 + 0.65 * (0.5 + 0.5 * sin(rl * 46.0));
-        ring *= 1.0 - 0.85 * smoothstep(1.74, 1.77, rl) * smoothstep(1.84, 1.81, rl);
-        vec3 rc = mix(vec3(1.0, 0.86, 0.66), vec3(0.75, 0.6, 0.95), smoothstep(1.3, 2.2, rl));
-        float disc = smoothstep(R, R - 0.003, dd);
+        float aa = 12.0 * px / R;
+        float b1 = smoothstep(1.32, 1.32 + aa, rl) * smoothstep(1.62, 1.62 - aa, rl);
+        float b2 = smoothstep(1.68, 1.68 + aa, rl) * smoothstep(2.02, 2.02 - aa, rl);
+        float b3 = smoothstep(2.10, 2.10 + aa, rl) * smoothstep(2.24, 2.24 - aa, rl);
+        float ring = b1 * 0.7 + b2 * 1.0 + b3 * 0.45;
+        vec3 rc = mix(vec3(1.0, 0.84, 0.62), vec3(0.85, 0.55, 0.95), smoothstep(1.3, 2.2, rl));
+        float disc = smoothstep(R + px, R - px, d);
         float front = step(0.0, rq.y);
-        float outp = max(dd - R, 0.0);
-        col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 61.0, 6.0 * u_res.y / 1080.0, 0.08) * (1.0 - t) * 0.7 * (1.0 - disc);
-        col += vec3(0.6, 0.4, 1.0) * 0.24 * exp(-outp * 10.0) * (1.0 - disc);
-        col = mix(col, rc * 0.8, ring * (1.0 - front) * (1.0 - disc) * 0.85);
+        // the planet's shadow falls on the far side of the rings, away from the light
+        float shad = (1.0 - front) * smoothstep(0.1, 0.7, rq.x) * smoothstep(1.2, 0.8, abs(c.y) / R);
+        float outp = max(d - R, 0.0);
+        col += vec3(1.0, 0.45, 0.6) * 0.22 * exp(-outp * 9.0) * (1.0 - disc);
+        col = mix(col, rc * (0.85 - 0.7 * shad), ring * (1.0 - front) * (1.0 - disc) * 0.9);
         col = mix(col, pc, disc);
-        col = mix(col, rc * 0.95, ring * front * 0.92);
+        // the near rings cross the face and lay a thin shadow on it
+        col *= 1.0 - 0.45 * disc * smoothstep(0.0, 0.25, rq.y) * (smoothstep(1.3, 1.5, length(rq - vec2(0.0, 0.28))) * smoothstep(2.3, 2.1, length(rq - vec2(0.0, 0.28))));
+        col = mix(col, rc, ring * front * 0.95);
     } else if (sc < 6.5) {
-        // total eclipse: streamers of corona, red prominences, and the diamond ring
-        float R = r * 0.88;
+        // black hole: a clean shadow with a photon ring, lensed light around it and an accretion
+        // disc crossing in front
+        float R = r * 0.62;
         vec2 dn = q / max(dd, 0.0001);
-        float outc = max(dd - R, 0.0);
-        float st = fbm(dn * 2.4 + vec2(dd * 1.5 - u_time * 0.05, 7.0));
-        float st2 = fbm(dn * 6.0 + vec2(3.0, u_time * 0.03));
-        float grow = 1.0 - 0.35 * u_mood2.z;
-        float corona = exp(-outc * 6.0 * grow) * (0.2 + 1.0 * st) + exp(-outc * 30.0) * (0.9 + 0.6 * st2);
-        vec3 cc = mix(vec3(1.0, 0.96, 0.9), vec3(1.0, 0.45, 0.65), smoothstep(0.0, 0.35, outc));
-        col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 23.0, 6.0 * u_res.y / 1080.0, 0.10) * (1.0 - t) * 0.6;
-        col += cc * corona * 0.85;
-        col += vec3(1.0, 0.18, 0.32) * exp(-outc * 90.0) * (0.4 + 0.9 * smoothstep(0.55, 0.8, st2));
-        col = mix(col, vec3(0.0, 0.0, 0.01), smoothstep(R, R - 0.004, dd));
-        vec2 bead = q - R * vec2(0.7317, -0.6816) * 0.995;
-        float bd = dot(bead, bead);
-        col += vec3(1.0, 0.97, 0.92) * (exp(-bd * 2500.0) * 2.2 + exp(-bd * 160.0) * 0.5);
-        col += vec3(1.0, 0.95, 0.9) * (exp(-abs(bead.x) * 300.0) * exp(-abs(bead.y) * 26.0) + exp(-abs(bead.y) * 300.0) * exp(-abs(bead.x) * 26.0)) * 0.7;
+        float outc = dd - R;
+        float streak = 0.7 + 0.3 * fbm(dn * 5.0 + vec2(u_time * 0.08, 3.0) + dd * 3.0);
+        float dop = 0.62 - 0.38 * dn.x;
+        float halo = exp(-max(outc, 0.0) * 9.0) * dop * streak;
+        vec3 hot = mix(vec3(1.0, 0.93, 0.80), vec3(1.0, 0.45, 0.22), smoothstep(0.0, 0.22, outc));
+        col += hot * halo * (0.85 + 0.5 * u_mood2.z);
+        col += vec3(1.0, 0.4, 0.3) * 0.16 * exp(-max(outc, 0.0) * 2.4);
+        col = mix(col, vec3(0.0), smoothstep(R + px, R - px, dd));
+        float ringw = 2.2 * px;
+        col += vec3(1.0, 0.95, 0.85) * exp(-pow((outc - ringw) / ringw, 2.0)) * 1.2;
+        float ax = q.x / R;
+        float ay = (q.y - 0.012 - 0.035 * q.x) / R;
+        float thick = 0.04 + 0.022 * abs(ax);
+        float bandd = exp(-pow(ay / thick, 2.0)) * smoothstep(3.1, 1.3, abs(ax));
+        float flow = 0.62 + 0.38 * vnoise(vec2(ax * 9.0 - u_time * 1.3, 2.0));
+        vec3 dc = mix(vec3(1.0, 0.96, 0.86), vec3(1.0, 0.5, 0.2), smoothstep(0.3, 2.6, abs(ax)));
+        col += dc * bandd * flow * (0.75 - 0.3 * clamp(ax * 0.6, -1.0, 1.0)) * 1.3;
     } else if (sc < 7.5) {
         // binary sunset: the striped sun, and a small white-hot companion over its shoulder
         vec2 q1 = q - vec2(-0.07, 0.02);
@@ -1302,7 +1331,7 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
         vec3 c1 = mix(u_sunA, u_sunB, clamp(y1 * 0.6 + 0.5, 0.0, 1.0));
         col = mix(col, c1 * 0.72, smoothstep(r, r - 0.003, d1) * m1);
         col += u_sunB * 0.18 * exp(-d1 * d1 * 12.0) * (1.0 + 0.6 * u_bass);
-    } else {
+    } else if (sc < 8.5) {
         // aurora: three ribbons, each a wavy hem with rays streaming up from it
         float x = (p.x - 0.5) * asp.x;
         float yv = (hz - p.y) / hz + off; // 0 at the horizon, 1 at the top
@@ -1318,6 +1347,33 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
             col += ac * body * rays * fold * (0.42 - 0.08 * fi) * (1.0 + 0.5 * u_bass);
             col += vec3(0.6, 1.0, 0.8) * smoothstep(0.012, 0.0, abs(up)) * 0.25 * fold;
         }
+    } else {
+        // tide: rank on rank of waves standing up over the horizon under a small moon; they
+        // swell with the bass and their crests light on the kick
+        float x = (p.x - 0.5) * asp.x;
+        float yv = (hz - p.y) / hz + off; // 0 at the horizon, 1 at the top
+        vec2 mq = q - vec2(0.30, -0.17);
+        float mr = r * 0.34;
+        float mdisc = smoothstep(mr + px, mr - px, length(mq));
+        col = mix(col, vec3(0.95, 0.97, 1.0), mdisc * 0.95);
+        col += vec3(0.45, 0.65, 1.0) * 0.25 * exp(-max(length(mq) - mr, 0.0) * 10.0) * (1.0 - mdisc);
+        float found = 0.0;
+        for (int i = 0; i < 9; i++) {
+            float fi = float(i); // 0 = the nearest wave
+            float sp = 0.5 - 0.04 * fi;
+            float amp = (0.050 - 0.0035 * fi) * (1.0 + 0.8 * u_bass);
+            float w = sin(x * (2.6 + fi * 0.55) + u_time * sp + fi * 1.9) + 0.45 * sin(x * (6.1 + fi) - u_time * sp * 1.4 + fi * 0.7);
+            // peaked crests, like waves about to break
+            w = w * 0.6 + 0.8 * (1.0 - abs(sin(x * (1.3 + fi * 0.27) + u_time * sp * 0.5 + fi))) - 0.4;
+            float cy = 0.07 + 0.065 * fi + amp * w;
+            if (found < 0.5 && yv < cy) {
+                found = 1.0;
+                vec3 lc = mix(vec3(1.0, 0.35, 0.75), vec3(0.25, 0.85, 1.0), fi / 8.0);
+                float crest = smoothstep(0.011, 0.0, cy - yv);
+                float body = exp(-(cy - yv) * 16.0);
+                col = mix(u_c0 * 0.3, lc * 0.5, body * 0.55) + lc * crest * (0.85 + 0.7 * u_mood2.z);
+            }
+        }
     }
     return col;
 }
@@ -1325,40 +1381,51 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
 // Horizon props: silhouettes standing on the horizon, in front of the sky.
 vec3 skyProp(float pr, vec2 p, vec3 col, float off) {
     float hz = u_vista.x;
+    float px = 1.0 / u_res.y;
     vec2 asp = vec2(u_res.x / u_res.y, 1.0);
     vec2 q = vec2((p.x - 0.5) * asp.x, hz + off - p.y); // x from the centre, y up from the horizon
     vec3 dark = u_c0 * 0.22;
     if (pr > 0.5 && pr < 1.5) {
-        // palm trees: curved trunks, and broad feathered fronds that arch over and sway
+        // palm trees: slim curved trunks and long feather fronds (a spine with fine leaflets)
         float sil = 0.0;
         for (int i = 0; i < 4; i++) {
             float fi = float(i);
             float side = mod(fi, 2.0) < 0.5 ? -1.0 : 1.0;
             float far = floor(fi * 0.5);
-            vec2 base = vec2(side * (0.50 + 0.21 * far), -0.01);
-            float h = 0.30 - 0.08 * far;
-            float lean = -side * (0.07 + 0.03 * far);
+            vec2 base = vec2(side * (0.52 + 0.20 * far), -0.01);
+            float h = 0.33 - 0.09 * far;
+            float lean = -side * (0.08 + 0.03 * far);
             float sway = sin(u_time * 0.7 + fi * 1.9) * 0.006;
-            vec2 m1 = base + vec2(lean * 0.15, h * 0.35);
-            vec2 m2 = base + vec2(lean * 0.55, h * 0.72);
+            vec2 m1 = base + vec2(lean * 0.12, h * 0.35);
+            vec2 m2 = base + vec2(lean * 0.50, h * 0.72);
             vec2 top = base + vec2(lean + sway, h);
             float td = min(min(sdSeg(q, base, m1), sdSeg(q, m1, m2)), sdSeg(q, m2, top));
-            float tw = mix(0.0085, 0.0045, clamp(q.y / h, 0.0, 1.0));
-            sil = max(sil, smoothstep(tw, tw - 0.002, td));
-            for (int f = 0; f < 7; f++) {
-                float a = -0.35 + float(f) * 0.64 + sway * 4.0;
+            float tw = mix(0.0065, 0.0035, clamp(q.y / h, 0.0, 1.0));
+            sil = max(sil, smoothstep(tw + px, tw - px, td));
+            for (int f = 0; f < 9; f++) {
+                float ff = float(f);
+                float a = -0.55 + ff * 0.53 + sway * 4.0;
                 vec2 dirv = vec2(cos(a), sin(a));
-                float L = h * (0.62 + 0.10 * sin(float(f) * 2.3 + fi));
-                vec2 p1 = top + dirv * L * 0.45;
-                vec2 p2 = p1 + normalize(dirv + vec2(0.0, -0.7)) * L * 0.35;
-                vec2 p3 = p2 + normalize(dirv + vec2(0.0, -1.8)) * L * 0.28;
-                float fd = min(min(sdSeg(q, top, p1), sdSeg(q, p1, p2)), sdSeg(q, p2, p3));
-                float u = clamp(length(q - top) / L, 0.0, 1.0);
-                // a leaf: widest in the middle, notched into leaflets
-                float leaf = (0.003 + 0.014 * sin(3.14159 * pow(u, 0.8))) * (0.55 + 0.45 * step(0.3, fract(u * 12.0)));
-                sil = max(sil, smoothstep(leaf, leaf - 0.002, fd));
+                float L = h * (0.52 + 0.10 * sin(ff * 2.3 + fi));
+                // the frond rises a little, arches over, then hangs
+                vec2 p1 = top + dirv * L * 0.36 + vec2(0.0, L * 0.05);
+                vec2 p2 = p1 + normalize(dirv + vec2(0.0, -0.55)) * L * 0.36;
+                vec2 p3 = p2 + normalize(dirv + vec2(0.0, -1.7)) * L * 0.32;
+                // nearest point on the spine, and how far along it (0 crown .. 1 tip)
+                vec2 ba = p1 - top; float h0 = clamp(dot(q - top, ba) / dot(ba, ba), 0.0, 1.0); float d0 = length(q - top - ba * h0);
+                ba = p2 - p1; float h1 = clamp(dot(q - p1, ba) / dot(ba, ba), 0.0, 1.0); float d1 = length(q - p1 - ba * h1);
+                ba = p3 - p2; float h2 = clamp(dot(q - p2, ba) / dot(ba, ba), 0.0, 1.0); float d2 = length(q - p2 - ba * h2);
+                float fd = d0; float u = h0 / 3.0;
+                if (d1 < fd) { fd = d1; u = (1.0 + h1) / 3.0; }
+                if (d2 < fd) { fd = d2; u = (2.0 + h2) / 3.0; }
+                // leaflets: thin teeth either side of the spine, longest mid-frond
+                float reach = L * 0.11 * sin(3.14159 * pow(u, 0.7)) + 0.0012;
+                float teeth = smoothstep(0.34, 0.26, abs(fract(u * 26.0) - 0.5));
+                float leaf = smoothstep(reach, reach * 0.55, fd) * teeth;
+                float spine = smoothstep(0.0018 + px, 0.0018 - px, fd);
+                sil = max(sil, max(leaf, spine));
             }
-            sil = max(sil, smoothstep(0.013, 0.010, length(q - top + vec2(0.0, 0.004))));
+            sil = max(sil, smoothstep(0.010 + px, 0.010 - px, length(q - top + vec2(0.0, 0.004))));
         }
         col = mix(col, dark, sil * step(0.0, q.y));
     } else if (pr > 1.5 && pr < 2.5) {
@@ -1376,21 +1443,42 @@ vec3 skyProp(float pr, vec2 p, vec3 col, float off) {
             col += u_sunA * edge * 0.35;
         }
     } else if (pr > 2.5 && pr < 3.5) {
-        // city skyline: towers with windows that flicker with the hats
-        float cw = 0.045;
-        float id = floor(q.x / cw);
-        float hh = hash(vec2(id, 9.1));
-        float tall = 0.05 + 0.2 * hh * hh + 0.05 * step(0.8, hash(vec2(id, 2.3)));
-        float fx = fract(q.x / cw);
-        float inside = step(q.y, tall) * step(0.0, q.y) * step(0.06, fx) * step(fx, 0.94);
-        col = mix(col, dark, inside);
-        vec2 wv = vec2(fx * 4.0, q.y / 0.016);
-        float won = step(0.45, hash(vec2(id * 7.0 + floor(wv.x), floor(wv.y)) + floor(u_time * 0.5) * 0.01));
-        float wmask = step(0.25, fract(wv.x)) * step(fract(wv.x), 0.75) * step(0.3, fract(wv.y)) * step(fract(wv.y), 0.75);
-        col += mix(u_sunA, u_grid, hh) * inside * won * wmask * (0.2 + 0.45 * u_mood2.y);
-        // a beacon on the tallest ones, blinking with the kick
-        float tip = smoothstep(0.006, 0.0, length(vec2((fx - 0.5) * cw, q.y - tall - 0.006))) * step(0.22, tall);
-        col += u_sunB * tip * (0.4 + 1.2 * u_mood2.z);
+        // city: a hazy far row and a dark near row of towers. Each tower fills part of its lot,
+        // some have a narrower crown or a mast; windows sit on a regular grid and the near row's
+        // lights swell with the hats, the mast beacons with the kick.
+        for (int layer = 0; layer < 2; layer++) {
+            float fl = float(layer); // 0 = far, 1 = near
+            float cw = mix(0.085, 0.060, fl);
+            float xx = q.x + fl * 0.031;
+            float id = floor(xx / cw);
+            float fx = fract(xx / cw);
+            float h1 = hash(vec2(id, 9.1 + fl * 4.0));
+            float h2 = hash(vec2(id, 2.3 + fl * 7.0));
+            float town = 0.55 + 0.45 * cos(clamp(q.x * 1.4, -3.1, 3.1));
+            float tall = (mix(0.17, 0.10, fl) + mix(0.15, 0.24, fl) * h1 * h1) * town;
+            float wid = 0.55 + 0.4 * h2;
+            float lo = 0.5 - wid * 0.5;
+            float hi = 0.5 + wid * 0.5;
+            float ex = px / cw;
+            float inx = smoothstep(lo - ex, lo + ex, fx) * smoothstep(hi + ex, hi - ex, fx);
+            float body = inx * smoothstep(tall + px, tall - px, q.y);
+            float cl = lo + wid * 0.25;
+            float ch = hi - wid * 0.25;
+            float crown = step(0.55, h2) * smoothstep(cl - ex, cl + ex, fx) * smoothstep(ch + ex, ch - ex, fx) * smoothstep(tall * 1.16 + px, tall * 1.16 - px, q.y);
+            float mast = step(0.8, h1) * smoothstep(0.0016 + px, 0.0016 - px, abs((fx - 0.5) * cw)) * step(q.y, tall * 1.42);
+            float silh = max(max(body, crown), mast) * step(0.0, q.y);
+            vec3 bc = mix(mix(u_c1, u_sunB, 0.3) * 0.5, dark, fl);
+            col = mix(col, bc, silh * mix(0.8, 1.0, fl));
+            float ncol = 3.0 + floor(h2 * 3.0);
+            vec2 wv = vec2((fx - lo) / wid * ncol, q.y / 0.0135);
+            vec2 wf = fract(wv);
+            float wm = smoothstep(0.2, 0.28, wf.x) * smoothstep(0.8, 0.72, wf.x) * smoothstep(0.24, 0.34, wf.y) * smoothstep(0.72, 0.62, wf.y);
+            float won = step(0.5, hash(floor(wv) + vec2(id * 13.0, fl * 50.0)));
+            vec3 wc = mix(vec3(1.0, 0.82, 0.45), vec3(0.45, 0.9, 1.0), step(0.7, h2));
+            col += wc * body * wm * won * mix(0.10, 0.26 + 0.5 * u_mood2.y, fl);
+            float tip = smoothstep(0.005, 0.0015, length(vec2((fx - 0.5) * cw, q.y - tall * 1.42))) * step(0.8, h1) * fl;
+            col += vec3(1.0, 0.2, 0.3) * tip * (0.5 + 1.6 * u_mood2.z);
+        }
     } else if (pr > 3.5) {
         // meteors: a few streaks falling across the sky
         for (int i = 0; i < 3; i++) {
@@ -1431,14 +1519,14 @@ vec3 vista(vec2 p) {
             col += mix(u_sunB, vec3(1.0), 0.5) * sweep * bell * (0.35 + 0.45 * lines * smoothstep(0.0, 1.0, abs(fract(p.x * 3.0 - u_time * 2.0) - 0.5) * 2.0));
             col += u_sunB * bell * 0.5 * exp(-(hz - p.y) * 14.0);
         }
-        // rain over the menu sky, pulsing with the hats
+        // rain: three depths of streaks. It thickens with the song's energy and every hat
+        // brightens it; a little mist hangs on the horizon.
         if (u_mood.y > 0.5 && u_mood.y < 1.5) {
-            vec2 rp = vec2(p.x * u_res.x / u_res.y + p.y * 0.2, p.y);
-            float cid = floor(rp.x * 90.0);
-            float rh = hash(vec2(cid, 5.5));
-            float sdrop = fract(-rp.y * 1.6 + u_time * (1.1 + rh) + rh * 9.0);
-            float streak = step(0.62, rh) * smoothstep(0.5, 0.15, abs(fract(rp.x * 90.0) - 0.5)) * smoothstep(0.0, 0.02, sdrop) * smoothstep(0.2, 0.0, sdrop);
-            col += mix(u_grid, vec3(1.0), 0.4) * streak * (0.10 + 0.35 * u_mood2.y);
+            vec2 g = vec2(p.x * u_res.x / u_res.y, p.y);
+            float beat = 0.45 + 0.9 * u_mood2.y + 0.3 * u_swell;
+            float rn = rainLayer(g, 150.0, 1.5, 0.10, 5.5) * 0.35 + rainLayer(g, 80.0, 2.3, 0.16, 8.1) * 0.6 + rainLayer(g, 34.0, 3.4, 0.26, 2.7) * 1.0;
+            col += mix(u_grid, vec3(0.85, 0.92, 1.0), 0.55) * rn * 0.34 * beat;
+            col = mix(col, u_c1 * 0.6 + vec3(0.05), 0.22 * exp(-(hz - p.y) * 9.0));
         }
         col += u_sunB * 0.35 * exp(-(hz - p.y) * 30.0);
     } else {
@@ -1461,6 +1549,18 @@ vec3 vista(vec2 p) {
             float path = exp(-pow((p.x - 0.5) / wpath, 2.0));
             float dash = smoothstep(0.5, 0.9, sin(26.0 / (y + 0.09) + u_time * 1.8 + sin(p.x * 40.0 + u_time) * 1.2));
             col += hcol * path * (0.08 + 0.5 * dash) * (1.0 - y * 0.7) * sett;
+        }
+        if (u_mood.y > 0.5 && u_mood.y < 1.5) {
+            // splashes: rings opening on the ground, in perspective
+            vec2 gp = vec2((p.x - 0.5) / (y + 0.06) * 2.2, 0.9 / (y + 0.06));
+            vec2 cell = floor(gp);
+            float ph = fract(u_time * 1.3 + hash(cell) * 9.0);
+            vec2 cpos = vec2(hash(cell + 3.1), hash(cell + 7.7)) * 0.5 + 0.25;
+            float rd = length(fract(gp) - cpos);
+            float ring = smoothstep(0.05, 0.0, abs(rd - ph * 0.3)) * (1.0 - ph) * step(0.35, hash(cell + 1.9));
+            col += mix(u_grid, vec3(0.9, 0.95, 1.0), 0.5) * ring * (0.16 + 0.4 * u_mood2.y) * smoothstep(0.0, 0.08, y);
+            vec2 g = vec2(p.x * u_res.x / u_res.y, p.y);
+            col += mix(u_grid, vec3(0.85, 0.92, 1.0), 0.55) * rainLayer(g, 34.0, 3.4, 0.26, 2.7) * 0.2 * (0.45 + 0.9 * u_mood2.y);
         }
         col += u_sunB * sin(u_tr.x * 3.14159) * 0.3 * exp(-y * 9.0) * step(u_tr.x, 0.999);
     }
