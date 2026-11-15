@@ -14,6 +14,8 @@ change the track, and the backdrop changes with it. Hover anything for a tooltip
   - **Mode:** ENDLESS (this track, then the library keeps coming), SINGLE, DAILY (today's seed),
     DROP RUSH (every track cut down to its biggest section) or DODGE (no gun: score by slipping
     close past bullets and staying alive).
+  - **Starting track:** Q / E step through the library; click the title or press T for the whole
+    list (type a letter to jump).
   - **REMIX** (R, beside the track): the same song dealt differently. Other patterns, enemies
     and upgrade offers on the same beats.
   - **Mutators:** optional rules (ALLEGRO, FORTE, SWARM, NO MERCY, GLASS). Each one, and each
