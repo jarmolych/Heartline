@@ -1859,6 +1859,23 @@ impl World {
                     }
                 }
             }
+            Pattern::Comb => {
+                // five teeth around the player; each tooth is a short line of bullets
+                let per = (count / 5).max(1);
+                for tooth in 0..5 {
+                    for j in 0..per {
+                        push(b, aim + (tooth as f32 - 2.0) * COMB_STEP, speed * (1.0 - 0.10 * j as f32).max(0.4));
+                    }
+                }
+            }
+            Pattern::Sweep => {
+                // the far side of the cone leaves slower, so the wall swings across
+                let side = if rot >= 0.0 { 1.0 } else { -1.0 };
+                for k in 0..count {
+                    let f = if count > 1 { k as f32 / (count - 1) as f32 } else { 0.5 };
+                    push(b, aim + side * (f * 2.0 - 1.0) * SWEEP_HALF, speed * (1.0 - 0.38 * f));
+                }
+            }
             Pattern::Flower => {
                 for k in 0..count {
                     let a = k as f32 * TAU / count as f32;

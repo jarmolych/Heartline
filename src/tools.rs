@@ -686,6 +686,8 @@ pub fn bot_input(w: &World) -> Input {
                 Pattern::Pincer => (off.abs() - PINCER_OFFSET).abs() < PINCER_SPREAD * 0.5 + 0.08,
                 Pattern::Wall => off.abs() < WALL_HALF + 0.06 && (off - pp.rot).abs() > WALL_GAP_HALF * 0.55,
                 Pattern::Cross => (wrap(off * 4.0) / 4.0).abs() < 0.1,
+                Pattern::Comb => (-2..=2).any(|k| (off - k as f32 * crate::level::COMB_STEP).abs() < 0.11),
+                Pattern::Sweep => off.abs() < crate::level::SWEEP_HALF + 0.08,
                 _ => false,
             };
             if inside {

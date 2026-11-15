@@ -901,6 +901,18 @@ fn pulse_dirs(pattern: Pattern, aim: f32, rot: f32, count: usize, mut f: impl Fn
                 }
             }
         }
+        Pattern::Comb => {
+            for tooth in 0..5 {
+                f(aim + (tooth as f32 - 2.0) * COMB_STEP, 1.0);
+            }
+        }
+        Pattern::Sweep => {
+            let side = if rot >= 0.0 { 1.0 } else { -1.0 };
+            for k in 0..count {
+                let fr = if count > 1 { k as f32 / (count - 1) as f32 } else { 0.5 };
+                f(aim + side * (fr * 2.0 - 1.0) * SWEEP_HALF, 1.0 - 0.38 * fr);
+            }
+        }
         Pattern::Flower => {
             for k in 0..count {
                 let a = k as f32 * TAU / count as f32;
