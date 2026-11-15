@@ -581,6 +581,8 @@ struct App {
     song_age: f32,
     /// The next load happens with the arena on screen (a song was traded mid-run).
     load_in_arena: bool,
+    /// Files dropped on the title menu: run setup opens and START plays them.
+    staged: Vec<PathBuf>,
     /// Where the difficulty strip is scrolled to (eases toward `diff`).
     diff_scroll: f32,
     /// Remix number chosen in run setup: added to the seed, so the same song deals a different
@@ -856,7 +858,8 @@ impl App {
         let _ = std::fs::write(path, text);
     }
 
-    /// Rebuild the menu playlist: the library (shuffled), then the built-in tracks.
+    /// Rebuild the menu playlist: the library, shuffled. The built-in tracks only stand in
+    /// while the library is empty; they are never mixed in with the player's own music.
     fn juke_rescan(&mut self) {
         let mut lib = self.music_dir.as_ref().map(|d| expand_paths(&[d.clone()])).unwrap_or_default();
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
@@ -864,8 +867,10 @@ impl App {
         for i in (1..lib.len()).rev() {
             lib.swap(i, rng.below(i + 1));
         }
-        let first_theme = rng.below(synth::THEME_COUNT);
-        lib.extend((0..synth::THEME_COUNT).map(|k| theme_path((first_theme + k) % synth::THEME_COUNT)));
+        if lib.is_empty() {
+            let first_theme = rng.below(synth::THEME_COUNT);
+            lib.extend((0..synth::THEME_COUNT).map(|k| theme_path((first_theme + k) % synth::THEME_COUNT)));
+        }
         self.juke = Jukebox { list: lib, idx: 0, loaded: None, loader: None, cursor: 0, last_t: -1.0, playing: false, fails: 0, played: 0.0 };
     }
 
@@ -1016,20 +1021,21 @@ impl App {
     /// The track preview in the top right corner with its buttons and the library bar. It is
     /// the same on the title menu and in run setup, so the song never moves. `focus` is the
     /// button the keyboard is on, `enter` presses it.
-    fn track_corner(&mut self, tip: &mut ui::Tip, progress: f32, focus: Option<usize>, enter: bool, u: f32, sw: f32) {
+    fn track_corner(&mut self, tip: &mut ui::Tip, progress: f32, focus: Option<usize>, enter: bool, full: bool, u: f32, sw: f32) {
         let pal = self.rend.pal;
         let (x, y, w) = (sw - 700.0 * u, 110.0 * u, 590.0 * u);
         let (title, hint) = self.juke_title();
         self.rend.draw_now_playing(x, y, w, u, &self.world, &title, &hint, progress);
         let busy = self.dialog.is_some();
         let lib_name = self.music_dir.as_deref().map(library_label).unwrap_or_else(|| "none chosen".to_string());
-        let n_lib = self.juke.list.len().saturating_sub(synth::THEME_COUNT);
+        let n_lib = self.juke.list.iter().filter(|p| theme_index(p).is_none()).count();
         let (ts, gap) = (54.0 * u, 10.0 * u);
         let ty = y + 108.0 * u;
         let mut act: Option<usize> = None;
         let soft = |a: f32| Color::new(1.0, 1.0, 1.0, a);
         // row one: the track on the left, other things to play on the right
-        for (i, c) in CORNER.iter().enumerate().take(6) {
+        // (files, a folder and live audio are choices for a run, so only run setup shows them)
+        for (i, c) in CORNER.iter().enumerate().take(if full { 6 } else { 3 }) {
             let tx = if i < 3 { x + i as f32 * (ts + gap) } else { x + w - (6 - i) as f32 * (ts + gap) + gap };
             let f = focus == Some(i);
             let (hv, click) = ui::tile(tx, ty, ts, false, f, pal.accent, 1.0, u);
@@ -1041,7 +1047,9 @@ impl App {
                 act = Some(i);
             }
         }
-        render::text_right("or play", x + w - 3.0 * (ts + gap) - 6.0 * u, ty + ts * 0.5 + 6.0 * u, 17.0 * u, soft(0.45));
+        if full {
+            render::text_right("or play", x + w - 3.0 * (ts + gap) - 6.0 * u, ty + ts * 0.5 + 6.0 * u, 17.0 * u, soft(0.45));
+        }
         // row two: the library, with room for a long name
         let (ly, lh) = (ty + ts + 10.0 * u, 48.0 * u);
         ui::rrect(x, ly, w, lh, ui::RADIUS * u, Color::new(0.02, 0.0, 0.07, 0.7));
@@ -3191,6 +3199,7 @@ async fn run(args: Args) {
         was_silent: false,
         song_age: 0.0,
         load_in_arena: false,
+        staged: Vec::new(),
         diff_scroll: diff as f32,
         remix: 0,
         setup_mode: 0,
@@ -3317,8 +3326,17 @@ async fn run(args: Args) {
         let dropped: Vec<PathBuf> = get_dropped_files().into_iter().filter_map(|f| f.path).collect();
         if !dropped.is_empty() && matches!(app.screen, Screen::Menu | Screen::Options | Screen::Setup | Screen::Results | Screen::LiveSetup) {
             let paths = expand_paths(&dropped);
-            app.endless = app.setup_mode != 1;
-            app.start_run(paths);
+            if app.screen == Screen::Menu {
+                // Difficulty, mode and mutators come first: open run setup with these waiting.
+                if !paths.is_empty() {
+                    app.staged = paths;
+                    app.screen = Screen::Setup;
+                    app.menu_sel = S_START;
+                }
+            } else {
+                app.endless = app.setup_mode != 1;
+                app.start_run(paths);
+            }
         }
         let mut picked: Option<Vec<PathBuf>> = None;
         if let Some(rx) = &app.dialog {
@@ -3515,7 +3533,7 @@ async fn run(args: Args) {
                     Some(M_QUIT) => break,
                     _ => {}
                 }
-                app.track_corner(&mut tip, progress, None, false, u, sw);
+                app.track_corner(&mut tip, progress, None, false, false, u, sw);
                 let hy = sh - 62.0 * u;
                 let mut kx = 110.0 * u;
                 for (k, what) in [("WASD", "move"), ("MOUSE", "aim"), ("SPACE", "dash"), ("F", "auto-fire"), ("ESC", "pause"), ("F11", "fullscreen")] {
@@ -3652,7 +3670,7 @@ async fn run(args: Args) {
                     pick = true;
                 }
                 let corner_focus = if row == S_TRACK { Some(app.setup_col.min(CORNER.len() - 1)) } else { None };
-                app.track_corner(&mut tip, progress, corner_focus, enter && row == S_TRACK, u, sw);
+                app.track_corner(&mut tip, progress, corner_focus, enter && row == S_TRACK, true, u, sw);
                 let (rx, rw) = (sw - 700.0 * u, 590.0 * u);
                 let py = (110.0 + CORNER_H) * u;
                 let inset = 14.0 * u;
@@ -3773,6 +3791,22 @@ async fn run(args: Args) {
                 if hs || row == S_START {
                     tip.set(&format!("START  {}", SETUP_MODES[cur].1), SETUP_MODES[cur].2, hs);
                 }
+                if !app.staged.is_empty() {
+                    // dropped files are waiting: say so, and offer to forget them
+                    let n = app.staged.len();
+                    let label = format!("START plays the {n} dropped file{}", if n == 1 { "" } else { "s" });
+                    let lw2 = text_w(&label, 21.0 * u);
+                    text_shadow(&label, sw * 0.5 - 22.0 * u, 862.0 * u, 21.0 * u, pal.accent, 0);
+                    let bx = sw * 0.5 + lw2 * 0.5 - 8.0 * u;
+                    let (hx, cx) = ui::tile(bx, 840.0 * u, 30.0 * u, false, false, pal.danger, 1.0, u);
+                    ui::icon(Icon::Cross, bx + 15.0 * u, 855.0 * u, 6.0 * u, if hx { pal.danger } else { dim_w(0.7) });
+                    if hx {
+                        tip.set("FORGET THEM", "Go back to starting on the track that is playing.", true);
+                    }
+                    if cx && !busy {
+                        app.staged.clear();
+                    }
+                }
                 let (_, cb) = ui::button(sw - 110.0 * u - 190.0 * u, 892.0 * u, 190.0 * u, 58.0 * u, Some(Icon::Back), "BACK", false, false, u, &pal);
                 let start = (cs && !busy) || (enter && matches!(row, S_START | S_MODE | S_DIFF));
                 if pick {
@@ -3790,8 +3824,15 @@ async fn run(args: Args) {
                     } else {
                         app.base_seed.wrapping_add(app.remix.wrapping_mul(0x9E37_79B9))
                     };
-                    app.start_from_juke(0, endless);
+                    if app.staged.is_empty() {
+                        app.start_from_juke(0, endless);
+                    } else {
+                        app.endless = endless;
+                        let paths = std::mem::take(&mut app.staged);
+                        app.start_run(paths);
+                    }
                 } else if (is_key_pressed(KeyCode::Escape) || cb) && !busy && app.screen == Screen::Setup {
+                    app.staged.clear();
                     app.screen = Screen::Menu;
                     app.menu_sel = M_PLAY;
                 }

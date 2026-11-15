@@ -332,6 +332,11 @@ fn rect_lines(x: f32, y: f32, w: f32, h: f32, th: f32, col: Color) {
 }
 
 /// Smoothly interpolated (cosine) value of a spectrum at fraction f in 0..1.
+/// `band` with a little blur across the spectrum, so a shape built from it has no corners.
+fn soft_band(spec: &[f32; N_SPEC], f: f32) -> f32 {
+    0.25 * band(spec, f - 0.06) + 0.5 * band(spec, f) + 0.25 * band(spec, f + 0.06)
+}
+
 fn band(spec: &[f32; N_SPEC], f: f32) -> f32 {
     let x = f.clamp(0.0, 1.0) * (N_SPEC - 1) as f32;
     let i = (x as usize).min(N_SPEC - 2);
@@ -1219,11 +1224,26 @@ vec3 topdown(vec2 q) {
         // mist: slow banks drifting under the platform, thicker with the bass
         float mst = fbm((q - u_cam * 0.5) / 700.0 + vec2(u_time * 0.03, u_time * 0.011));
         col += mix(u_c1, vec3(0.8, 0.85, 1.0), 0.3) * 0.16 * smoothstep(0.38, 0.78, mst) * (0.7 + 0.5 * u_swell);
-    } else if (we > 6.5) {
+    } else if (we > 6.5 && we < 7.5) {
         // wind: long streaks racing across; the hats gust them
         vec2 g2 = vec2(uv.y * 1.8, -uv.x * u_res.x / u_res.y * 0.5);
         float wn = rainLayer(g2, 70.0, 0.5, 0.35, 4.4) * 0.6 + rainLayer(g2 + 0.3, 30.0, 0.8, 0.5, 9.2);
         col += mix(u_grid, vec3(1.0), 0.6) * wn * (0.06 + 0.22 * u_mood2.y);
+    } else if (we > 7.5 && we < 8.5) {
+        // cloud shadows sliding under the platform, their edges lit
+        float cs = fbm((q - u_cam * 0.45) / 620.0 + vec2(u_time * 0.05, u_time * 0.02));
+        col = mix(col, u_c0 * 0.25, 0.45 * smoothstep(0.45, 0.75, cs));
+        col += mix(u_sunB, u_sunA, 0.4) * 0.05 * smoothstep(0.6, 0.85, cs);
+    } else if (we > 8.5 && we < 9.5) {
+        // petals drifting past below
+        vec2 pp = (q - u_cam * 0.4) / 0.6 + vec2(u_time * 26.0, -u_time * 12.0 + sin(u_time * 0.6 + q.x * 0.004) * 30.0);
+        col += mix(vec3(1.0, 0.55, 0.75), u_sunA, 0.35) * stars(pp, 120.0, 0.4) * (0.35 + 0.7 * u_mood2.y);
+    } else if (we > 9.5) {
+        // shafts of light turning slowly under the floor
+        vec2 sq = (q - u_cam * 0.7) / 900.0;
+        float sa = atan(sq.y, sq.x);
+        float rays = pow(0.5 + 0.5 * sin(sa * 7.0 + u_time * 0.1), 3.0);
+        col += mix(u_sunB, u_sunA, 0.5) * rays * exp(-length(sq) * 0.9) * (0.05 + 0.07 * u_swell);
     }
     // platform glass: the arena floor dims what is below it
     vec2 a = abs(q) - u_arena;
@@ -1385,6 +1405,8 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
         // black hole: a clean shadow with a photon ring, lensed light around it and an accretion
         // disc crossing in front
         float R = r * 0.62;
+        q.y += 0.085;
+        dd = length(q);
         vec2 dn = q / max(dd, 0.0001);
         float outc = dd - R;
         float streak = 0.7 + 0.3 * fbm(dn * 5.0 + vec2(u_time * 0.08, 3.0) + dd * 3.0);
@@ -1552,6 +1574,28 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
     return col;
 }
 
+// Paint a silhouette the way the sun is painted. `d` is the distance to its edge (negative
+// inside) and `yb` its height above the horizon: a tinted body that scan bars drift up through
+// (the sky shows between them), a soft edge, and a rim of light that answers the kick.
+vec3 propPaint(vec3 col, float d, float yb, float px) {
+    float soft = 2.2 * px;
+    float vis = step(0.0, yb);
+    float inside = smoothstep(soft, -soft, d) * vis;
+    float bars = 0.74 + 0.26 * step(0.3, fract(yb * 64.0 - u_time * 0.3));
+    vec3 rim = mix(u_sunB, u_sunA, 0.4);
+    vec3 body = mix(u_c0 * 0.10, mix(u_c1 * 0.34, rim, 0.14), clamp(yb * 2.2, 0.0, 1.0));
+    col = mix(col, body, inside * bars);
+    col += rim * (smoothstep(3.5 * px, 0.0, abs(d)) * 0.8 + exp(-max(d, 0.0) * 60.0) * 0.16 * (1.0 + u_mood2.z)) * vis;
+    return col;
+}
+
+// Distance to a stroke from a to b whose half-width runs from ra to rb.
+float sdTaper(vec2 p, vec2 a, vec2 b, float ra, float rb) {
+    vec2 pa = p - a, ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h) - mix(ra, rb, h);
+}
+
 // Horizon props: silhouettes standing on the horizon, in front of the sky.
 vec3 skyProp(float pr, vec2 p, vec3 col, float off) {
     float hz = u_vista.x;
@@ -1560,48 +1604,50 @@ vec3 skyProp(float pr, vec2 p, vec3 col, float off) {
     vec2 q = vec2((p.x - 0.5) * asp.x, hz + off - p.y); // x from the centre, y up from the horizon
     vec3 dark = u_c0 * 0.22;
     if (pr > 0.5 && pr < 1.5) {
-        // palm trees: slim curved trunks and long feather fronds (a spine with fine leaflets)
-        float sil = 0.0;
+        // palms: bowed trunks and broad fronds that arch over and hang, painted like the sun
+        // (striped, soft-edged, rimmed with light). They sway, lean with the bass, and the
+        // hats flick the tips of the fronds.
+        float dmin = 1.0;
         for (int i = 0; i < 4; i++) {
             float fi = float(i);
             float side = mod(fi, 2.0) < 0.5 ? -1.0 : 1.0;
             float far = floor(fi * 0.5);
-            vec2 base = vec2(side * (0.52 + 0.20 * far), -0.01);
-            float h = 0.33 - 0.09 * far;
-            float lean = -side * (0.08 + 0.03 * far);
-            float sway = sin(u_time * 0.7 + fi * 1.9) * 0.006;
-            vec2 m1 = base + vec2(lean * 0.12, h * 0.35);
-            vec2 m2 = base + vec2(lean * 0.50, h * 0.72);
-            vec2 top = base + vec2(lean + sway, h);
-            float td = min(min(sdSeg(q, base, m1), sdSeg(q, m1, m2)), sdSeg(q, m2, top));
-            float tw = mix(0.0065, 0.0035, clamp(q.y / h, 0.0, 1.0));
-            sil = max(sil, smoothstep(tw + px, tw - px, td));
-            for (int f = 0; f < 9; f++) {
-                float ff = float(f);
-                float a = -0.55 + ff * 0.53 + sway * 4.0;
-                vec2 dirv = vec2(cos(a), sin(a));
-                float L = h * (0.52 + 0.10 * sin(ff * 2.3 + fi));
-                // the frond rises a little, arches over, then hangs
-                vec2 p1 = top + dirv * L * 0.36 + vec2(0.0, L * 0.05);
-                vec2 p2 = p1 + normalize(dirv + vec2(0.0, -0.55)) * L * 0.36;
-                vec2 p3 = p2 + normalize(dirv + vec2(0.0, -1.7)) * L * 0.32;
-                // nearest point on the spine, and how far along it (0 crown .. 1 tip)
-                vec2 ba = p1 - top; float h0 = clamp(dot(q - top, ba) / dot(ba, ba), 0.0, 1.0); float d0 = length(q - top - ba * h0);
-                ba = p2 - p1; float h1 = clamp(dot(q - p1, ba) / dot(ba, ba), 0.0, 1.0); float d1 = length(q - p1 - ba * h1);
-                ba = p3 - p2; float h2 = clamp(dot(q - p2, ba) / dot(ba, ba), 0.0, 1.0); float d2 = length(q - p2 - ba * h2);
-                float fd = d0; float u = h0 / 3.0;
-                if (d1 < fd) { fd = d1; u = (1.0 + h1) / 3.0; }
-                if (d2 < fd) { fd = d2; u = (2.0 + h2) / 3.0; }
-                // leaflets: thin teeth either side of the spine, longest mid-frond
-                float reach = L * 0.11 * sin(3.14159 * pow(u, 0.7)) + 0.0012;
-                float teeth = smoothstep(0.34, 0.26, abs(fract(u * 26.0) - 0.5));
-                float leaf = smoothstep(reach, reach * 0.55, fd) * teeth;
-                float spine = smoothstep(0.0018 + px, 0.0018 - px, fd);
-                sil = max(sil, max(leaf, spine));
+            vec2 base = vec2(side * (0.50 + 0.22 * far), -0.01);
+            if (abs(q.x - base.x) > 0.36) continue;
+            float h = 0.34 - 0.10 * far;
+            float sway = sin(u_time * 0.8 + fi * 1.9) * 0.012 + 0.008 * u_bass * side;
+            vec2 top = base + vec2(-side * (0.09 + 0.03 * far) + sway, h);
+            vec2 ctl = base + vec2(side * 0.04, h * 0.6);
+            vec2 pa = base;
+            for (int k = 1; k <= 6; k++) {
+                float tt = float(k) / 6.0;
+                vec2 pb = mix(mix(base, ctl, tt), mix(ctl, top, tt), tt);
+                dmin = min(dmin, sdTaper(q, pa, pb, mix(0.012, 0.0055, tt - 0.1667), mix(0.012, 0.0055, tt)));
+                pa = pb;
             }
-            sil = max(sil, smoothstep(0.010 + px, 0.010 - px, length(q - top + vec2(0.0, 0.004))));
+            for (int f = 0; f < 7; f++) {
+                float ff = float(f);
+                float a = -0.30 + ff * 0.62 + sway * 5.0;
+                vec2 dv = vec2(cos(a), sin(a));
+                float L = h * (0.56 + 0.08 * sin(ff * 2.3 + fi));
+                float flick = 0.05 * u_mood2.y * sin(ff * 1.7 + fi + u_time * 7.0);
+                vec2 c1 = top + dv * L * 0.55 + vec2(0.0, L * 0.24);
+                vec2 tip = top + dv * L * 0.98 - vec2(0.0, L * (0.40 + flick));
+                vec2 fa = top;
+                float wa = 0.002;
+                for (int k = 1; k <= 5; k++) {
+                    float tt = float(k) / 5.0;
+                    vec2 fb = mix(mix(top, c1, tt), mix(c1, tip, tt), tt);
+                    // a leaf: narrow at the crown, broad in the middle, drawn to a point
+                    float wb = L * 0.085 * sin(3.14159 * pow(tt, 0.85)) + 0.0008;
+                    dmin = min(dmin, sdTaper(q, fa, fb, wa, wb));
+                    fa = fb;
+                    wa = wb;
+                }
+            }
+            dmin = min(dmin, length(q - top + vec2(0.0, 0.008)) - 0.013);
         }
-        col = mix(col, dark, sil * step(0.0, q.y));
+        col = propPaint(col, dmin, q.y, px);
     } else if (pr > 1.5 && pr < 2.5) {
         // radio masts: glowing lattice towers; the beacons on top fire on the kick and a ring
         // of signal leaves them
@@ -1683,7 +1729,7 @@ vec3 skyProp(float pr, vec2 p, vec3 col, float off) {
             float tip = smoothstep(0.005, 0.0015, length(vec2((fx - 0.5) * cw, q.y - tall * 1.36))) * step(0.8, h1) * fl;
             col += vec3(1.0, 0.2, 0.3) * tip * (0.5 + 1.6 * u_mood2.z);
         }
-    } else if (pr > 3.5) {
+    } else if (pr > 3.5 && pr < 4.5) {
         // meteors: a few streaks falling across the sky
         for (int i = 0; i < 3; i++) {
             float fi = float(i);
@@ -1695,6 +1741,126 @@ vec3 skyProp(float pr, vec2 p, vec3 col, float off) {
             float d = sdSeg(q, a, bq);
             float fade = smoothstep(0.0, 0.1, ph) * smoothstep(0.7, 0.4, ph) * step(0.35, hs);
             col += mix(u_sunA, vec3(1.0), 0.6) * smoothstep(0.004, 0.0, d) * fade * smoothstep(0.0, 0.16, length(q - bq)) * 0.9;
+        }
+    } else if (pr > 4.5 && pr < 5.5) {
+        // sailboats: three of them crossing the horizon, rocking with the swell. The sails are
+        // lit like the sun (a gradient cut by scan bars) and catch the kick.
+        for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            float sz = 0.088 - 0.018 * fi;
+            float bx = fract(0.21 + fi * 0.37 + u_time * (0.004 + 0.0015 * fi)) * 2.6 - 1.3;
+            float bob = sin(u_time * 1.3 + fi * 2.0) * 0.003 + 0.004 * u_bass;
+            vec2 c = (q - vec2(bx, 0.002 + bob)) / sz;
+            if (abs(c.x) > 1.4 || c.y > 2.3) continue;
+            float rk = sin(u_time * 1.1 + fi * 1.7) * 0.07;
+            c = vec2(c.x * cos(rk) - c.y * sin(rk), c.x * sin(rk) + c.y * cos(rk));
+            float hull = max(abs(c.y - 0.09) - 0.09, abs(c.x) - (0.62 + c.y * 1.6));
+            float mast = max(abs(c.x) - 0.02, abs(c.y - 1.05) - 0.95);
+            float mainS = max(max(0.06 - c.x, 0.26 - c.y), ((c.x - 0.06) / 0.85 + (c.y - 0.26) / 1.70 - 1.0) * 0.76);
+            float jib = max(max(c.x + 0.06, 0.30 - c.y), ((-c.x - 0.06) / 0.66 + (c.y - 0.30) / 1.35 - 1.0) * 0.6);
+            float sail = min(mainS, jib);
+            float e2 = 2.2 * px / sz;
+            vec3 sc2 = mix(mix(u_sunB, vec3(1.0), 0.45), mix(u_sunA, vec3(1.0), 0.7), clamp(c.y / 2.0, 0.0, 1.0)) * (0.8 + 0.4 * u_mood2.z);
+            float bars = c.y > 1.0 ? 1.0 : step(0.14 + 0.36 * (1.0 - c.y), fract(c.y * 5.0 - u_time * 0.2));
+            float vis = step(0.0, q.y);
+            col += sc2 * 0.16 * exp(-max(sail, 0.0) * 5.0) * vis;
+            col = mix(col, u_c0 * 0.12, smoothstep(2.5 * e2, 0.5 * e2, sail) * 0.85 * vis);
+            col = mix(col, sc2, smoothstep(e2, -e2, sail + 1.4 * e2) * bars * vis);
+            col = mix(col, u_c0 * 0.12, smoothstep(e2, -e2, min(hull, mast)) * vis);
+            col += mix(u_sunB, vec3(1.0), 0.3) * smoothstep(1.5 * e2, 0.0, abs(hull)) * 0.5 * vis;
+        }
+    } else if (pr > 5.5 && pr < 6.5) {
+        // lighthouse: a striped tower on a rock. Its lamp swings a beam across the sky and
+        // flares as it passes the viewer and on the kick.
+        vec2 c = q - vec2(0.60, 0.0);
+        float H = 0.26;
+        float rock = length(vec2(c.x * 0.45, c.y + 0.012)) - 0.045;
+        float wdt = mix(0.026, 0.015, clamp(c.y / H, 0.0, 1.0));
+        float tower = max(abs(c.x) - wdt, max(-c.y, c.y - H));
+        float room = max(abs(c.x) - 0.022, abs(c.y - H - 0.016) - 0.016);
+        float cap = max(abs(c.x) - (0.026 - (c.y - H - 0.032) * 1.1), max(H + 0.032 - c.y, c.y - H - 0.055));
+        float d = min(min(rock, tower), cap);
+        vec2 lp = c - vec2(0.0, H + 0.016);
+        float ang = u_time * 0.7;
+        vec2 bd = normalize(vec2(cos(ang), 0.22 * sin(ang) + 0.05));
+        float along = dot(lp, bd);
+        float across = length(lp - bd * along);
+        float facing = abs(cos(ang)); // 1 = swinging sideways, 0 = pointing at the viewer
+        float beam = exp(-across / (0.008 + 0.10 * abs(along))) * exp(-abs(along) * 1.6) * (0.25 + 0.75 * facing);
+        vec3 lc = mix(vec3(1.0, 0.95, 0.75), u_sunA, 0.3);
+        col += lc * beam * (0.5 + 0.5 * u_mood2.z) * step(0.0, q.y);
+        col = propPaint(col, d, q.y, px);
+        float ll = length(lp);
+        col = mix(col, lc, smoothstep(2.0 * px, -2.0 * px, room) * 0.6);
+        col += lc * (smoothstep(0.014, 0.004, ll) * (0.8 + 1.5 * (1.0 - facing)) + exp(-ll * 40.0) * (0.25 + 0.9 * (1.0 - facing) + 0.6 * u_mood2.z));
+    } else if (pr > 6.5 && pr < 7.5) {
+        // big wheel: turning slowly. A light runs round its cabins, the hats flash them all and
+        // the hub glows on the kick.
+        vec2 hub = vec2(0.50, 0.175);
+        float R = 0.14;
+        vec2 c = q - hub;
+        float rl = length(c);
+        float d = abs(rl - R) - 0.004;
+        d = min(d, abs(rl - R * 0.86) - 0.0015);
+        d = min(d, rl - 0.012);
+        float rot = u_time * 0.12;
+        for (int k = 0; k < 6; k++) {
+            float a = rot + float(k) * 0.5236;
+            vec2 dv = vec2(cos(a), sin(a));
+            d = min(d, sdSeg(c, -dv * R, dv * R) - 0.0014);
+        }
+        d = min(d, sdSeg(q, hub, vec2(hub.x - 0.07, 0.0)) - 0.004);
+        d = min(d, sdSeg(q, hub, vec2(hub.x + 0.07, 0.0)) - 0.004);
+        col = propPaint(col, d, q.y, px);
+        for (int k = 0; k < 12; k++) {
+            float a = rot + float(k) * 0.5236;
+            vec2 cp = c - vec2(cos(a), sin(a)) * R + vec2(0.0, 0.012);
+            float cl = length(cp);
+            float on = 0.35 + 0.65 * pow(0.5 + 0.5 * sin(u_time * 2.0 - float(k) * 0.5236), 4.0) + u_mood2.y * 0.6;
+            vec3 cc = mix(u_sunA, u_sunB, mod(float(k), 2.0));
+            col = mix(col, cc * 0.9, smoothstep(0.011, 0.008, cl));
+            col += cc * exp(-cl * 70.0) * 0.35 * on;
+        }
+        col += u_sunA * exp(-rl * 45.0) * (0.2 + 0.8 * u_mood2.z);
+    } else if (pr > 7.5 && pr < 8.5) {
+        // birds: a loose flight crossing the sky, wings beating
+        for (int i = 0; i < 7; i++) {
+            float fi = float(i);
+            vec2 lead = vec2(fract(u_time * 0.018 + 0.13) * 3.0 - 1.5, 0.30 + 0.05 * sin(u_time * 0.3));
+            float row = floor((fi + 1.0) * 0.5);
+            float sgn = mod(fi, 2.0) < 0.5 ? 1.0 : -1.0;
+            vec2 c = q - (lead + vec2(-row * 0.05, sgn * row * 0.022 + 0.006 * sin(u_time * 1.7 + fi)));
+            if (abs(c.x) > 0.05 || abs(c.y) > 0.05) continue;
+            float flap = 0.35 + 0.55 * sin(u_time * 5.0 + fi * 0.9);
+            vec2 wl = vec2(-0.022 * cos(flap), 0.022 * sin(flap));
+            vec2 wr = vec2(0.022 * cos(flap), 0.022 * sin(flap));
+            float d = min(sdSeg(c, vec2(0.0), wl), sdSeg(c, vec2(0.0), wr)) - 0.0022;
+            col = mix(col, u_c0 * 0.12, smoothstep(1.5 * px, -1.5 * px, d));
+            col += mix(u_sunB, vec3(1.0), 0.3) * smoothstep(3.0 * px, 0.0, abs(d)) * 0.3;
+        }
+    } else if (pr > 8.5) {
+        // balloons: striped like the sun, drifting and bobbing. The burner under each one
+        // glows on the kick.
+        for (int i = 0; i < 4; i++) {
+            float fi = float(i);
+            float hsh = hash(vec2(fi, 4.2));
+            float R = 0.055 - 0.008 * fi;
+            vec2 bc = vec2(fract(0.15 + fi * 0.27 + u_time * (0.003 + 0.002 * hsh)) * 2.6 - 1.3, 0.22 + 0.16 * hsh + 0.02 * sin(u_time * 0.5 + fi * 2.0));
+            vec2 c = q - bc;
+            if (abs(c.x) > 0.09 || abs(c.y) > 0.16) continue;
+            // the envelope: a ball drawn in toward its mouth
+            float env = length(vec2(c.x * (1.0 + 0.6 * clamp(-c.y / R, 0.0, 1.3)), c.y * (c.y < 0.0 ? 0.8 : 1.0))) - R;
+            float yn = c.y / R;
+            vec3 col1 = mix(u_sunA, u_sunB, hsh);
+            vec3 bcol = mix(col1, mix(u_grid, vec3(1.0), 0.3), clamp(yn * 0.5 + 0.5, 0.0, 1.0));
+            float bars = yn > 0.2 ? 1.0 : step(0.12 + 0.3 * (0.2 - yn), fract(yn * 3.5 - u_time * 0.15));
+            float e2 = 2.0 * px;
+            col += col1 * 0.14 * exp(-max(env, 0.0) * 40.0);
+            col = mix(col, bcol * 0.8, smoothstep(e2, -e2, env) * bars);
+            vec2 bk = c + vec2(0.0, R * 1.75);
+            float basket = max(abs(bk.x) - R * 0.16, abs(bk.y) - R * 0.12);
+            col = mix(col, u_c0 * 0.15, smoothstep(e2, -e2, basket));
+            col += vec3(1.0, 0.7, 0.3) * exp(-length(c + vec2(0.0, R * 1.35)) * 90.0) * (0.25 + 1.2 * u_mood2.z);
         }
     }
     return col;
@@ -1776,11 +1942,44 @@ vec3 vista(vec2 p) {
             float mst = fbm(vec2(p.x * 2.4 + u_time * 0.03, p.y * 13.0 + u_time * 0.01));
             float lay = smoothstep(0.36, 0.72, mst) * exp(-(hz - p.y) * 4.5);
             col = mix(col, mix(u_c1, vec3(0.8, 0.85, 1.0), 0.35) * 0.6, lay * (0.5 + 0.3 * u_bass));
-        } else if (we > 6.5) {
+        } else if (we > 6.5 && we < 7.5) {
             // wind: long streaks racing across the sky; the hats gust them
             vec2 g2 = vec2(p.y * 1.8, -wg.x * 0.5);
             float wn = rainLayer(g2, 70.0, 0.5, 0.35, 4.4) * 0.6 + rainLayer(g2 + 0.3, 30.0, 0.8, 0.5, 9.2);
             col += mix(u_grid, vec3(1.0), 0.6) * wn * (0.10 + 0.35 * u_mood2.y);
+        } else if (we > 7.5 && we < 8.5) {
+            // cloud: long banks drifting across, lit from below by whatever is in the sky
+            float cl = fbm(vec2(p.x * 2.6 + u_time * 0.025, p.y * 22.0 - u_time * 0.004));
+            float cl2 = fbm(vec2(p.x * 5.0 - u_time * 0.04, p.y * 30.0 + 9.0));
+            float cm = smoothstep(0.50, 0.72, cl * 0.75 + cl2 * 0.25) * smoothstep(0.02, 0.35, t) * smoothstep(1.0, 0.75, t);
+            vec3 under = mix(u_sunB, u_sunA, 0.4) * (0.75 + 0.5 * u_bass);
+            col = mix(col, mix(u_c0 * 0.35, under, smoothstep(0.58, 0.8, cl)), cm * 0.72);
+        } else if (we > 8.5 && we < 9.5) {
+            // petals: soft flecks tumbling across on the wind; the hats make them flash
+            float pt = 0.0;
+            for (int i = 0; i < 2; i++) {
+                float fi = float(i);
+                vec2 pp = wg + vec2(u_time * (0.05 + 0.03 * fi) + 0.03 * sin(u_time * 0.7 + wg.y * 7.0), -u_time * (0.025 + 0.015 * fi) + 0.02 * sin(wg.x * 5.0 + u_time * 0.5)) + fi * 0.41;
+                float cell = 0.05 + 0.03 * fi;
+                vec2 id = floor(pp / cell);
+                vec2 f = fract(pp / cell) - 0.5;
+                float h = hash(id + fi * 7.0);
+                if (h > 0.55) {
+                    float a = u_time * (1.0 + 2.0 * h) + h * 30.0;
+                    vec2 r2 = f - (vec2(hash(id + 1.3), hash(id + 2.7)) - 0.5) * 0.5;
+                    r2 = vec2(r2.x * cos(a) - r2.y * sin(a), r2.x * sin(a) + r2.y * cos(a));
+                    pt += smoothstep(0.10, 0.06, length(r2 * vec2(1.0, 2.6 + 1.5 * sin(a * 1.3)))) * (0.6 + 0.4 * fi);
+                }
+            }
+            col += mix(vec3(1.0, 0.55, 0.75), u_sunA, 0.35) * pt * (0.45 + 0.8 * u_mood2.y);
+        } else if (we > 9.5) {
+            // shafts: rays of light fanning out across the sky from the body, turning slowly
+            // and swelling with the bass
+            vec2 sq = (p - vec2(0.5, u_vista.y)) * vec2(u_res.x / u_res.y, 1.0);
+            float sa = atan(sq.y, sq.x);
+            float sr = length(sq);
+            float rays = pow(0.5 + 0.5 * sin(sa * 9.0 + u_time * 0.12), 3.0) * 0.6 + pow(0.5 + 0.5 * sin(sa * 23.0 - u_time * 0.2 + 1.7), 6.0) * 0.4;
+            col += mix(u_sunB, u_sunA, 0.5) * rays * exp(-sr * 1.6) * smoothstep(u_vista.z * 0.9, u_vista.z * 1.8, sr) * (0.16 + 0.22 * u_bass + 0.12 * u_mood2.z);
         }
         if ((we > 0.5 && we < 1.5) || (we > 4.5 && we < 5.5)) {
             vec2 g = vec2(p.x * u_res.x / u_res.y, p.y);
@@ -1811,8 +2010,7 @@ vec3 vista(vec2 p) {
         if (pathw > 0.0) {
             float wpath = (0.03 + 0.28 * y) * pathw;
             float path = exp(-pow((p.x - 0.5) / wpath, 2.0));
-            float dash = smoothstep(0.5, 0.9, sin(26.0 / (y + 0.09) + u_time * 1.8 + sin(p.x * 40.0 + u_time) * 1.2));
-            col += hcol * path * (0.08 + 0.5 * dash) * (1.0 - y * 0.7) * sett;
+            col += hcol * path * 0.20 * (1.0 - y * 0.7) * (1.0 + 0.5 * u_bass) * sett;
         }
         if ((u_mood.y > 0.5 && u_mood.y < 1.5) || (u_mood.y > 4.5 && u_mood.y < 5.5)) {
             // splashes: rings opening on the ground, in perspective
@@ -2742,7 +2940,7 @@ impl Renderer {
         let weather = if lv > 0.5 {
             match world.section_kind {
                 // snow and mist are already calm; anything else settles to drifting motes
-                SectionKind::Calm if !matches!(self.mood_cur.weather, 4 | 6) => 2,
+                SectionKind::Calm if !matches!(self.mood_cur.weather, 4 | 6 | 8 | 9) => 2,
                 SectionKind::Drop if self.mood_cur.weather == 0 => 1,
                 _ => self.mood_cur.weather,
             }
@@ -2877,7 +3075,7 @@ impl Renderer {
         // the sea has no grid on it, and the dunes only a trace
         let (ground, rise) = self.ground_now();
         let grid_k = match ground {
-            1 => 1.0 - rise,
+            1 | 4 => 1.0 - rise,
             3 => 1.0 - 0.65 * rise,
             _ => 1.0,
         };
@@ -3098,148 +3296,255 @@ impl Renderer {
         self.draw_ridgelines(w, e, 0.0, 1.0);
         if e > 0.02 {
             match ground {
-                1 => self.draw_ocean(w, e, rise),
-                2 => self.draw_towers(w, e, rise),
-                _ => self.draw_dunes(w, e, rise),
+                1 => self.draw_rows(w, e, rise, false),
+                2 => self.draw_mesas(e, rise),
+                3 => self.draw_dunes(e, rise),
+                4 => self.draw_rows(w, e, rise, true),
+                _ => self.draw_hills(e, rise),
             }
         }
     }
 
-    /// The sea of sound: rows of waves rolling in from the horizon. The swell is the sea's own;
-    /// the spectrum rides on it (the newest sound is born at the horizon), the bass lifts the
-    /// whole surface, the kick lights the crests and the body in the sky lays a path of light.
-    fn draw_ocean(&self, w: &World, e: f32, rise: f32) {
-        const NR: usize = 44;
-        const SEG: usize = 80;
-        // each row is this much farther than the one in front of it
-        const STEP: f32 = 0.115;
+    /// The spectrum as it was `age` history steps ago. `age` may be fractional: the two nearest
+    /// snapshots are blended, so anything shaped by it moves smoothly at any frame rate instead
+    /// of stepping each time a snapshot is taken.
+    fn spec_ago(&self, age: f32) -> [f32; N_SPEC] {
+        let off = self.hist_acc / HIST_DT + 0.15; // age of the newest snapshot
+        let (a, b, k) = if age <= off {
+            (0, 1, (age / off).clamp(0.0, 1.0))
+        } else {
+            let x = age - off;
+            let m = (x.floor() as usize).min(HIST - 2);
+            (m + 1, m + 2, (x - m as f32).clamp(0.0, 1.0))
+        };
+        let (sa, _) = self.layer(a);
+        let (sb, _) = self.layer(b);
+        let mut out = [0.0; N_SPEC];
+        for i in 0..N_SPEC {
+            out[i] = sa[i] + (sb[i] - sa[i]) * k;
+        }
+        out
+    }
+
+    /// The sea of sound (or, with `clouds`, a deck of cloud seen from above): rows rolling in
+    /// from the horizon. The swell is the sea's own; the spectrum rides on it (the newest sound
+    /// is born at the horizon), the bass lifts the whole surface, the kick lights the crests and
+    /// the body in the sky lays a path of light. Everything is a function of continuous time.
+    fn draw_rows(&self, w: &World, e: f32, rise: f32, clouds: bool) {
+        const SEG: usize = 120;
         let pal = &self.pal;
         let t = self.time;
-        let flow = t * 1.5;
+        // rows, how much farther each is than the one in front, rows passing per second
+        let (nr, step, speed) = if clouds { (26usize, 0.19f32, 0.32f32) } else { (44, 0.115, 1.5) };
+        let flow = t * speed;
         let (scroll, roll) = (flow.fract(), flow.floor());
-        let deep = mixc(pal.bg0, BLACK, 0.5);
+        let deep = if clouds { mixc(mixc(pal.bg0, pal.bg1, 0.6), BLACK, 0.25) } else { mixc(pal.bg0, BLACK, 0.5) };
         let kick = w.hit[0] * self.fx.min(1.0);
         let lift = 0.45 + 0.9 * self.low_s;
-        for k in (0..NR).rev() {
-            let d = ((k as f32 - scroll) * STEP).exp();
-            let far = ((k as f32 - scroll) / NR as f32).clamp(0.0, 1.0);
+        let px_h = screen_height();
+        // the surface itself: one sheet from the horizon to the viewer, glowing where it is far
+        let hz_col = alpha(mixc(deep, pal.secondary, if clouds { 0.55 } else { 0.34 }), 0.97 * e);
+        let near_col = alpha(deep, 0.97 * e);
+        quad4([self.vs(-0.05, HZ), self.vs(1.05, HZ), self.vs(1.05, 0.80), self.vs(-0.05, 0.80)], [hz_col, hz_col, near_col, near_col]);
+        quad4([self.vs(-0.05, 0.80), self.vs(1.05, 0.80), self.vs(1.05, 1.08), self.vs(-0.05, 1.08)], [near_col; 4]);
+        for k in (0..nr).rev() {
+            let kf = k as f32 - scroll;
+            let d = (kf * step).exp();
+            let far = (kf / nr as f32).clamp(0.0, 1.0);
             let near = 1.0 - far;
             let fy0 = HZ + (1.10 - HZ) / d;
-            let m = ((near * (HIST as f32 - 1.0)).round() as usize).min(HIST - 1);
-            let (spec, _) = self.layer(m);
-            let amp = (0.075 / d) * rise;
-            let id = (k as f32 + roll) * 0.45;
-            let lc = mixc(pal.secondary, pal.grid, near);
-            // far water takes the glow of the horizon
-            let base = mixc(deep, pal.secondary, 0.30 * far * far);
+            // Rows closer together than a few pixels are left to the sheet: lines packed that
+            // tightly can only shimmer. The same factor fades a row in as it arrives.
+            let gap = (1.10 - HZ) * (1.0 - (-step).exp()) / d;
+            let lk = smooth(2.5, 9.0, gap * px_h) * smooth(0.0, 0.1, near);
+            if lk <= 0.001 {
+                continue;
+            }
+            let spec = self.spec_ago(near * 11.0);
+            let amp = if clouds { 0.105 } else { 0.075 } / d * rise * lk;
+            let id = (k as f32 + roll) * if clouds { 1.7 } else { 0.45 };
+            let lc = if clouds { mixc(pal.secondary, WHITE, 0.2 + 0.4 * near) } else { mixc(pal.secondary, pal.grid, near) };
+            let base = mixc(deep, pal.secondary, if clouds { 0.5 } else { 0.30 } * far * far);
             let wline = (1.0 + 2.4 / d).min(3.4);
             let pathw = 0.035 + 0.30 / d;
-            let xs = d.min(16.0) + 1.0;
-            let bottom = alpha(deep, 0.97 * e);
+            let xs = d.min(6.0) + 1.0;
+            let foot = fy0 + gap * 3.2;
+            let bottom = alpha(base, 0.0);
             let mut prev: Option<(Vec2, Vec2, Color, f32)> = None;
             for i in 0..=SEG {
                 let fx = -0.04 + 1.08 * i as f32 / SEG as f32;
                 let xw = (fx - 0.5) * xs * 2.4;
-                // the sea: two swells crossing and a rank of peaked crests
-                let s1 = (xw * 0.9 + id * 0.6 - t * 1.1).sin();
-                let s2 = (xw * 1.9 - id * 0.95 - t * 1.6 + 1.3).sin();
-                let pk = 1.0 - (xw * 0.5 + id * 0.4 - t * 0.7).sin().abs();
-                let sea = 0.42 * s1 + 0.18 * s2 + 0.75 * pk * pk - 0.25;
-                // the sound: the spectrum laid across the water, bass under the sun
+                // the spectrum laid across the surface, bass under the body in the sky
                 let tri = 1.0 - ((xw * 0.07 + 0.5).rem_euclid(1.0) * 2.0 - 1.0).abs();
-                let v = band(spec, 1.0 - tri);
-                let h = sea * lift + v * 1.5 * (0.7 + 0.3 * s2);
+                let v = soft_band(&spec, 1.0 - tri);
+                let h = if clouds {
+                    // billows: scalloped tops in two sizes, drifting past each other
+                    let b1 = (xw * 1.1 + id * 2.3 + t * 0.10).sin().abs().powf(0.6);
+                    let b2 = (xw * 2.3 - id * 1.7 - t * 0.07).sin().abs().powf(0.6);
+                    (0.62 * b1 + 0.38 * b2) * (0.75 + 0.5 * self.low_s) + v * 0.55
+                } else {
+                    // two swells crossing and a rank of crests, rounded so nothing has a corner
+                    let s1 = (xw * 0.9 + id * 0.6 - t * 1.1).sin();
+                    let s2 = (xw * 1.9 - id * 0.95 - t * 1.6 + 1.3).sin();
+                    let pk = (0.5 + 0.5 * (xw + id * 0.8 - t * 1.4).cos()).powf(2.5);
+                    (0.42 * s1 + 0.18 * s2 + 0.75 * pk - 0.25) * lift + v * 1.5 * (0.7 + 0.3 * s2)
+                };
                 let p = self.vs(fx, fy0 - h * amp);
-                let b = self.vs(fx, 1.08);
-                let crest = smooth(0.25, 1.25, h);
-                let top = alpha(mixc(base, lc, (0.10 + 0.16 * near) + 0.30 * crest), 0.97 * e);
+                let b = self.vs(fx, foot);
+                let crest = smooth(0.25, 1.25, h) * lk;
+                let lit = if clouds { 0.30 + 0.45 * crest } else { 0.10 + 0.16 * near + 0.30 * crest };
+                let top = alpha(mixc(base, lc, lit), 0.97 * e * (0.35 + 0.65 * lk));
                 if let Some((pp, pb, ptop, pc)) = prev {
                     quad4([pp, p, b, pb], [ptop, top, bottom, bottom]);
                     let c = 0.5 * (crest + pc);
                     let col = mixc(lc, WHITE, 0.55 * c + 0.45 * kick * c);
-                    line(pp, p, wline, alpha(col, (0.16 + 0.84 * c) * (0.3 + 0.7 * near) * e));
-                    // the path of light: glints that change with the beat
-                    let g = (-((fx - 0.5) / pathw).powi(2)).exp();
-                    if g > 0.06 {
-                        let hs = ((i as f32 * 12.9898 + id * 78.233 + (t * 7.0).floor() * 37.7).sin() * 43758.547).fract().abs();
-                        if hs > 0.5 {
-                            line(pp, p, wline * 1.2, alpha(mixc(pal.accent, WHITE, 0.4), g * (0.35 + 0.5 * kick) * (0.35 + 0.65 * near) * e));
+                    let la = if clouds { 0.30 + 0.5 * c } else { 0.16 + 0.84 * c };
+                    line(pp, p, wline, alpha(col, la * (0.3 + 0.7 * near) * lk * e));
+                    if !clouds {
+                        // the path of light: glints that swell and fade, never flicker
+                        let g = (-((fx - 0.5) / pathw).powi(2)).exp();
+                        if g > 0.06 {
+                            let hs = ((i as f32 * 12.9898 + id * 78.233).sin() * 43758.547).fract().abs();
+                            let tw = (0.5 + 0.5 * (t * (1.5 + 2.0 * hs) + hs * TAU).sin()).powi(3);
+                            line(pp, p, wline * 1.2, alpha(mixc(pal.accent, WHITE, 0.4), g * tw * (0.5 + 0.5 * kick) * (0.35 + 0.65 * near) * lk * e));
                         }
                     }
                 }
                 prev = Some((p, b, top, crest));
             }
         }
-        // the horizon itself: a line of light where the sea meets the sky
-        seg(self.vs(0.0, HZ + 0.001), self.vs(0.5, HZ + 0.001), 2.0, alpha(pal.secondary, 0.1 * e), alpha(mixc(pal.secondary, WHITE, 0.4), 0.75 * e));
-        seg(self.vs(0.5, HZ + 0.001), self.vs(1.0, HZ + 0.001), 2.0, alpha(mixc(pal.secondary, WHITE, 0.4), 0.75 * e), alpha(pal.secondary, 0.1 * e));
+        // the horizon: a line of light where the surface meets the sky
+        let hl = mixc(pal.secondary, WHITE, 0.4);
+        seg(self.vs(0.0, HZ + 0.001), self.vs(0.5, HZ + 0.001), 2.0, alpha(pal.secondary, 0.1 * e), alpha(hl, 0.75 * e));
+        seg(self.vs(0.5, HZ + 0.001), self.vs(1.0, HZ + 0.001), 2.0, alpha(hl, 0.75 * e), alpha(pal.secondary, 0.1 * e));
     }
 
-    /// The equaliser skyline: two rows of towers on the horizon, each a level meter built from
-    /// lit segments, with a dark side wall and an outline. The cap of every tower flares on the kick.
-    fn draw_towers(&self, w: &World, e: f32, rise: f32) {
-        const NT: usize = 46;
-        let pal = &self.pal;
-        let fill = mixc(pal.bg0, BLACK, 0.4);
-        let kick = w.hit[0] * self.fx.min(1.0);
-        for layer in (0..2usize).rev() {
-            let lf = layer as f32; // 1 = the far row
-            let (spec, _) = self.layer(layer * 6);
-            let base = HZ + 0.004 - 0.007 * lf;
-            let n = NT - layer * 8;
-            let cw = 1.04 / n as f32;
-            let segh = 0.0108 * (1.0 - 0.25 * lf);
-            let edge = mixc(pal.secondary, pal.grid, lf * 0.6);
-            let dimk = 1.0 - 0.5 * lf;
-            for j in 0..n {
-                let fc = (j as f32 + 0.5) / n as f32;
-                let x0 = -0.02 + (j as f32 + 0.16 + 0.5 * lf) * cw;
-                let x1 = x0 + cw * 0.62;
-                let f = (fc - 0.5).abs() * 2.0;
-                let jit = ((j as f32 * 7.13 + lf * 3.7).sin() * 0.5 + 0.5) * 0.4;
-                let taper = smooth(0.0, 0.08, fc) * smooth(1.0, 0.92, fc);
-                let v = (band(spec, f * 0.85) * (0.7 + jit)).min(1.3);
-                let hgt = (0.018 + v * MOUNT_H * 1.15 * (1.0 - 0.3 * lf)) * rise * (0.4 + 0.6 * taper);
-                let sw = cw * 0.16;
-                let bot = base + 0.006;
-                // side wall, then the dark body
-                quad4(
-                    [self.vs(x1, base - hgt), self.vs(x1 + sw, base - hgt + 0.007), self.vs(x1 + sw, bot), self.vs(x1, bot)],
-                    [alpha(mixc(fill, BLACK, 0.45), 0.96 * e); 4],
-                );
-                quad4([self.vs(x0, base - hgt), self.vs(x1, base - hgt), self.vs(x1, bot), self.vs(x0, bot)], [alpha(fill, 0.96 * e); 4]);
-                // lit segments, green at the foot through to red at the top of the scale
-                let nseg = (hgt / segh).ceil().max(1.0) as usize;
-                let inset = cw * 0.07;
-                for s in 0..nseg {
-                    let y1 = base - s as f32 * segh;
-                    let y0 = (y1 - segh * 0.66).max(base - hgt);
-                    if y0 >= y1 {
-                        break;
-                    }
-                    let k = s as f32 / 15.0;
-                    let cap = s + 1 == nseg;
-                    let c0 = mixc(mixc(pal.primary, pal.accent, (k * 1.4).min(1.0)), pal.danger, smooth(0.7, 1.1, k));
-                    let c = if cap { mixc(c0, WHITE, 0.45 + 0.55 * kick) } else { c0 };
-                    let aa = if cap { 0.95 } else { 0.42 + 0.2 * k } * dimk * e;
-                    quad4([self.vs(x0 + inset, y0), self.vs(x1 - inset, y0), self.vs(x1 - inset, y1), self.vs(x0 + inset, y1)], [alpha(c, aa); 4]);
+    /// One layer of a silhouette painted the way the sun is: a body that is lit toward its top,
+    /// scan bars drifting up through it, and a rim of light along its edge. `hs` are its heights
+    /// (screen fractions) at evenly spaced points across the screen, standing on `base`.
+    #[allow(clippy::too_many_arguments)]
+    fn striped_layer(&self, hs: &[f32], base: f32, e: f32, body: Color, lit: Color, rim: Color, bar_gap: f32, dim: f32) {
+        let n = hs.len() - 1;
+        let foot = base + 0.05;
+        let fxa = |i: usize| -0.02 + 1.04 * i as f32 / n as f32;
+        let hmax = hs.iter().cloned().fold(0.0f32, f32::max);
+        let low = alpha(body, 0.0);
+        for i in 0..n {
+            let (x0, x1) = (fxa(i), fxa(i + 1));
+            let (h0, h1) = (hs[i], hs[i + 1]);
+            let k0 = (h0 / hmax.max(1e-4)).clamp(0.0, 1.0);
+            let k1 = (h1 / hmax.max(1e-4)).clamp(0.0, 1.0);
+            let c0 = alpha(mixc(body, lit, 0.10 + 0.42 * k0 * dim), 0.97 * e);
+            let c1 = alpha(mixc(body, lit, 0.10 + 0.42 * k1 * dim), 0.97 * e);
+            let mid = alpha(body, 0.97 * e);
+            quad4([self.vs(x0, base - h0), self.vs(x1, base - h1), self.vs(x1, base), self.vs(x0, base)], [c0, c1, mid, mid]);
+            quad4([self.vs(x0, base), self.vs(x1, base), self.vs(x1, foot), self.vs(x0, foot)], [mid, mid, low, low]);
+        }
+        // scan bars: dark lines at fixed heights that climb slowly, cut to the silhouette
+        let cut = alpha(mixc(body, BLACK, 0.6), 0.55 * e);
+        let phase = (self.time * 0.12).fract();
+        let mut lvl = bar_gap * phase;
+        let mut bi = 0;
+        while lvl < hmax && bi < 40 {
+            // bars thin out toward the top, like the sun's
+            let th = (2.6 - 1.6 * lvl / hmax.max(1e-4)).max(0.8);
+            for i in 0..n {
+                let (h0, h1) = (hs[i], hs[i + 1]);
+                if h0 <= lvl && h1 <= lvl {
+                    continue;
                 }
-                // outline
-                let la = 0.75 * dimk * e;
-                let (tl, tr) = (self.vs(x0, base - hgt), self.vs(x1, base - hgt));
-                line(tl, tr, 1.8, alpha(edge, la));
-                line(self.vs(x0, bot), tl, 1.4, alpha(edge, la * 0.7));
-                line(self.vs(x1, bot), tr, 1.4, alpha(edge, la * 0.7));
-                line(tr, self.vs(x1 + sw, base - hgt + 0.007), 1.2, alpha(edge, la * 0.5));
+                let (mut xa, mut xb) = (fxa(i), fxa(i + 1));
+                if h0 < lvl {
+                    xa += (xb - xa) * (lvl - h0) / (h1 - h0);
+                } else if h1 < lvl {
+                    xb = xa + (xb - xa) * (h0 - lvl) / (h0 - h1);
+                }
+                line(self.vs(xa, base - lvl), self.vs(xb, base - lvl), th, cut);
             }
+            lvl += bar_gap;
+            bi += 1;
+        }
+        for i in 0..n {
+            let a = (0.35 + 0.65 * dim) * e;
+            line(self.vs(fxa(i), base - hs[i]), self.vs(fxa(i + 1), base - hs[i + 1]), 1.8, alpha(rim, 0.8 * a));
+            line(self.vs(fxa(i), base - hs[i]), self.vs(fxa(i + 1), base - hs[i + 1]), 6.0, alpha(rim, 0.10 * a));
+        }
+    }
+
+    /// Mesas: flat-topped buttes in three ranks drifting past at different speeds. Their heights
+    /// breathe with the part of the spectrum each one listens to.
+    fn draw_mesas(&self, e: f32, rise: f32) {
+        const SEG: usize = 160;
+        let pal = &self.pal;
+        let t = self.time;
+        let body = mixc(pal.bg0, BLACK, 0.4);
+        let lit = mixc(pal.accent, pal.secondary, 0.45);
+        let rnd = |a: f32| ((a * 12.9898).sin() * 43758.547).fract().abs();
+        let mut hs = [0.0f32; SEG + 1];
+        for layer in (0..3usize).rev() {
+            let lf = layer as f32 / 2.0; // 1 = the farthest rank
+            let spec = self.spec_ago(layer as f32 * 3.0);
+            let drift = t * (0.012 - 0.007 * lf);
+            let nb = 4 + layer;
+            let mut buttes = [(0.0f32, 0.0f32, 0.0f32); 6];
+            for (j, bt) in buttes.iter_mut().enumerate().take(nb) {
+                let s = j as f32 * 7.31 + layer as f32 * 3.77;
+                let c = (rnd(s) * 1.3 + j as f32 * 1.3 / nb as f32 + drift).rem_euclid(1.3) - 0.15;
+                let wd = 0.045 + 0.07 * rnd(s + 1.0) * (1.0 - 0.4 * lf);
+                let v = band(&spec, rnd(s + 2.0));
+                let top = (0.055 + 0.085 * rnd(s + 3.0)) * (1.0 + 0.25 * lf) * (0.8 + 0.45 * v);
+                *bt = (c, wd, top);
+            }
+            for (i, h) in hs.iter_mut().enumerate() {
+                let fx = -0.02 + 1.04 * i as f32 / SEG as f32;
+                // low ground between the buttes
+                let mut y = 0.010 + 0.008 * (fx * 9.0 + layer as f32 * 2.0 + drift * 20.0).sin();
+                for bt in buttes.iter().take(nb) {
+                    let x = (fx - bt.0).abs();
+                    // steep walls with a talus slope at the foot, and a level top
+                    let wall = smooth(bt.1, bt.1 * 0.74, x);
+                    let talus = 0.22 * smooth(bt.1 * 1.9, bt.1, x);
+                    y = y.max(bt.2 * (0.78 * wall + talus));
+                }
+                *h = y * rise;
+            }
+            let rim = mixc(pal.secondary, pal.grid, lf * 0.6);
+            self.striped_layer(&hs, HZ + 0.012 - 0.012 * lf, e, body, lit, rim, 0.013, 1.0 - 0.45 * lf);
+        }
+    }
+
+    /// Striped hills: big soft hills in four ranks, each one the sun's stripes continued on the
+    /// ground. They roll slowly sideways and the sound lifts them.
+    fn draw_hills(&self, e: f32, rise: f32) {
+        const SEG: usize = 120;
+        let pal = &self.pal;
+        let t = self.time;
+        let body = mixc(pal.bg0, BLACK, 0.35);
+        let lit = mixc(pal.secondary, pal.accent, 0.35);
+        let mut hs = [0.0f32; SEG + 1];
+        for layer in (0..4usize).rev() {
+            let lf = layer as f32 / 3.0; // 1 = the farthest rank
+            let spec = self.spec_ago(layer as f32 * 2.5);
+            let drift = t * (0.045 - 0.03 * lf) + layer as f32 * 1.9;
+            let freq = 3.2 + 2.6 * lf;
+            for (i, h) in hs.iter_mut().enumerate() {
+                let fx = -0.02 + 1.04 * i as f32 / SEG as f32;
+                let x = fx * freq + drift;
+                let big = 0.5 + 0.5 * x.sin();
+                let mid = 0.5 + 0.5 * (x * 1.9 + 1.3 + layer as f32).sin();
+                let v = soft_band(&spec, (fx - 0.5).abs() * 1.7);
+                *h = (0.030 + (big * 0.55 + mid * 0.22 + v * 0.5) * MOUNT_H * (0.55 + 0.6 * lf)) * rise;
+            }
+            let rim = mixc(pal.secondary, pal.grid, lf * 0.7);
+            self.striped_layer(&hs, HZ + 0.030 - 0.034 * lf, e, body, lit, rim, 0.011, 1.0 - 0.4 * lf);
         }
     }
 
     /// Dunes: long soft ridges drifting past, lit on the windward side and dark in the lee, with
     /// ripple lines down the lit face. The sound lifts them and the hats make the crests glint.
-    fn draw_dunes(&self, w: &World, e: f32, rise: f32) {
+    fn draw_dunes(&self, e: f32, rise: f32) {
         const NL: usize = 6;
-        const SEG: usize = 96;
+        const SEG: usize = 144;
         let pal = &self.pal;
         let t = self.time;
         let fill = mixc(pal.bg0, BLACK, 0.42);
@@ -3247,7 +3552,7 @@ impl Renderer {
         let glint = self.hat * self.fx.min(1.0);
         for m in (0..NL).rev() {
             let far = m as f32 / (NL - 1) as f32; // 1 = the farthest dune
-            let (spec, _) = self.layer(m * 2);
+            let spec = self.spec_ago(m as f32 * 2.0);
             let base = HZ + 0.034 - far * 0.040;
             let drift = t * (0.06 - 0.04 * far) + m as f32 * 2.1;
             let freq = 4.5 + 4.5 * far;
@@ -3261,7 +3566,7 @@ impl Renderer {
                 let ph = x + 0.55 * x.sin();
                 let dune = 0.5 + 0.5 * ph.sin();
                 let small = 0.5 + 0.5 * (x * 2.3 + 1.0 + m as f32).sin();
-                let v = band(spec, (fx - 0.5).abs() * 1.6);
+                let v = soft_band(&spec, (fx - 0.5).abs() * 1.6);
                 let taper = 0.55 + 0.45 * smooth(0.0, 0.1, fx) * smooth(1.0, 0.9, fx);
                 let h = (dune * 0.5 + small * 0.14 + v * 0.55 * (0.5 + 0.5 * dune)) * hmax * rise * taper;
                 let lit = 0.5 + 0.5 * ph.cos();
@@ -3272,8 +3577,9 @@ impl Renderer {
                 if let Some((pp, pb, ptop, plit, prip)) = prev {
                     quad4([pp, p, b, pb], [ptop, top, bottom, bottom]);
                     let l = 0.5 * (lit + plit);
-                    let hs = ((i as f32 * 12.9898 + m as f32 * 78.233 + self.hat_n as f32 * 3.1).sin() * 43758.547).fract().abs();
-                    let spark = if hs > 0.8 { glint } else { 0.0 };
+                    // a few grains on each crest catch the light when a hat lands
+                    let hs = ((i as f32 * 12.9898 + m as f32 * 78.233).sin() * 43758.547).fract().abs();
+                    let spark = smooth(0.8, 1.0, hs) * glint;
                     line(pp, p, 1.8, alpha(mixc(sand, WHITE, 0.25 * l + 0.7 * spark), (0.85 - 0.45 * far) * (0.45 + 0.55 * l) * e));
                     line(prip[0], rip[0], 1.2, alpha(sand, 0.42 * l * l * (1.0 - 0.5 * far) * e));
                     line(prip[1], rip[1], 1.2, alpha(sand, 0.24 * l * l * (1.0 - 0.5 * far) * e));

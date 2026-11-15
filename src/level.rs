@@ -1075,15 +1075,17 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
 /// arch of light), 13 comet (a striped head with a streaming tail).
 pub const N_SCENES: u8 = 14;
 /// Weather: 0 none, 1 rain of lines (pulses with the hats), 2 rising motes, 3 a veil of aurora,
-/// 4 snow, 5 storm (rain, cloud, a bolt on the kick), 6 mist on the horizon, 7 wind streaks.
-pub const N_WEATHER: u8 = 8;
+/// 4 snow, 5 storm (rain, cloud, a bolt on the kick), 6 mist on the horizon, 7 wind streaks,
+/// 8 drifting cloud banks, 9 petals on the wind, 10 shafts of light from the body in the sky.
+pub const N_WEATHER: u8 = 11;
 /// Foreground of the vista: 0 mountains (spectrum ridges), 1 the sea of sound (waves rolling in
-/// from the horizon), 2 the equaliser skyline (level-meter towers), 3 dunes.
-pub const N_GROUNDS: u8 = 4;
+/// from the horizon), 2 mesas, 3 dunes, 4 a deck of cloud seen from above, 5 striped hills.
+pub const N_GROUNDS: u8 = 6;
 /// Floor: 0 full grid, 1 open grid (every other line), 2 marks at the intersections.
 pub const N_FLOORS: u8 = 3;
-/// Horizon props: 0 none, 1 palm trees, 2 radio masts, 3 city skyline, 4 meteors.
-pub const N_PROPS: u8 = 5;
+/// Horizon props: 0 none, 1 palm trees, 2 radio masts, 3 city skyline, 4 meteors, 5 sailboats,
+/// 6 a lighthouse, 7 a big wheel, 8 a flight of birds, 9 balloons.
+pub const N_PROPS: u8 = 10;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mood {
@@ -1114,24 +1116,42 @@ pub fn mood(an: &Analysis) -> Mood {
     let pick = |xs: &[u8], shift: u32| xs[((h >> shift) % xs.len() as u64) as usize];
     let tropical = bright && (85.0..=128.0).contains(&an.bpm) && (3.0..=8.0).contains(&density);
     let (scenes, props, weathers, grounds): (&[u8], &[u8], &[u8], &[u8]) = if tropical {
-        (&[2, 7, 0, 9, 2, 12], &[1, 1, 1, 0], &[0, 0, 1, 2, 7], &[1, 1, 1, 3, 0])
+        (&[2, 7, 0, 9, 2, 12], &[1, 1, 5, 0, 6, 9, 8], &[0, 0, 1, 2, 7, 8, 9], &[1, 1, 1, 3, 4])
     } else if density > 7.0 && !bright {
-        (&[6, 11, 5, 0, 4, 10, 13], &[3, 3, 0, 2, 4], &[1, 5, 0, 3, 5, 6], &[2, 2, 0, 1])
+        (&[6, 11, 5, 0, 4, 10, 13], &[3, 3, 0, 2, 4, 7], &[1, 5, 0, 3, 5, 6, 10], &[2, 5, 0, 1, 0])
     } else if density > 7.0 {
-        (&[11, 0, 7, 6, 8, 10, 12], &[3, 0, 4, 1, 0], &[0, 1, 3, 0, 7], &[2, 0, 1, 0])
+        (&[11, 0, 7, 6, 8, 10, 12], &[3, 0, 4, 1, 7, 9, 2], &[0, 1, 3, 0, 7, 10, 8], &[5, 0, 1, 0, 2])
     } else if density < 3.5 {
-        (&[1, 4, 8, 5, 9, 2, 3, 13], &[4, 0, 2, 0, 1], &[2, 3, 0, 4, 6, 4], &[3, 1, 0, 3, 1])
+        (&[1, 4, 8, 5, 9, 2, 3, 13], &[4, 0, 2, 0, 1, 8, 6, 5], &[2, 3, 0, 4, 6, 4, 8, 9], &[3, 1, 0, 4, 1, 5])
     } else {
-        (&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], &[0, 1, 2, 3, 4, 0], &[0, 0, 1, 2, 3, 4, 5, 6, 7], &[0, 1, 2, 3, 1])
+        (
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
+            &[0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            &[0, 1, 2, 3, 4, 5, 1],
+        )
     };
-    // towers and a city would fight for the horizon
-    let ground = pick(grounds, 32);
-    let prop = match (pick(props, 24), ground) {
-        (3, 2) => 0,
-        (1, 2) => 4,
-        (p, _) => p,
-    };
-    Mood { scene: pick(scenes, 0), weather: pick(weathers, 8), floor: ((h >> 16) % N_FLOORS as u64) as u8, prop, ground }
+    let scene = pick(scenes, 0);
+    let mut ground = pick(grounds, 32);
+    let mut prop = pick(props, 24);
+    // boats and a lighthouse need water under them
+    if matches!(prop, 5 | 6) {
+        ground = 1;
+    }
+    // a city would fight mesas or hills for the horizon, and has no place on water or cloud
+    if prop == 3 && ground != 0 && ground != 3 {
+        prop = if ground == 1 { 5 } else { 8 };
+    }
+    // nothing tall stands in front of the black hole
+    if scene == 6 {
+        if matches!(prop, 2 | 3 | 7) {
+            prop = 4;
+        }
+        if ground == 2 {
+            ground = 3;
+        }
+    }
+    Mood { scene, weather: pick(weathers, 8), floor: ((h >> 16) % N_FLOORS as u64) as u8, prop, ground }
 }
 
 // ---------------------------------------------------------------------------------------------
