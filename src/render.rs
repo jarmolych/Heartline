@@ -1277,7 +1277,8 @@ vec3 skyBase(float sc, vec2 p) {
         else if (sc < 10.5) { z = vec3(0.05, 0.01, 0.12); h = vec3(0.55, 0.16, 0.50); starD = 0.07; }
         else if (sc < 11.5) { z = vec3(0.0, 0.02, 0.07); h = vec3(0.08, 0.30, 0.42); starD = 0.08; }
         else if (sc < 12.5) { z = vec3(0.07, 0.01, 0.13); h = vec3(0.80, 0.30, 0.42); starD = 0.05; }
-        else { z = vec3(0.004, 0.01, 0.05); h = vec3(0.10, 0.12, 0.36); starD = 0.14; }
+        else if (sc < 13.5) { z = vec3(0.004, 0.01, 0.05); h = vec3(0.10, 0.12, 0.36); starD = 0.14; }
+        else { z = vec3(0.02, 0.0, 0.07); h = vec3(0.30, 0.10, 0.45); starD = 0.13; }
         // keep some of the palette so the sky still belongs to the land in front of it
         z = mix(z, pz, 0.25);
         h = mix(h, ph, 0.3);
@@ -1518,6 +1519,26 @@ vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
         float bars = yo > 0.5 ? 1.0 : step(0.14 + 0.5 * (0.5 - yo), fract(yo * 8.0 + u_time * 0.18));
         col += u_sunB * 0.26 * exp(-max(d - R, 0.0) * 9.0) * (1.0 + 0.6 * u_bass);
         col = mix(col, dc * 0.72, smoothstep(R, R - 0.004, d) * bars);
+    } else if (sc > 13.5) {
+        // pulsar: a small striped star throwing two beams that sweep the sky. Rings leave it
+        // as it turns, and every kick fires a flash down the beams.
+        float R = r * 0.5 * (1.0 + 0.06 * u_bass);
+        float ang = u_time * 0.35;
+        vec2 bdir = normalize(vec2(cos(ang), sin(ang) * 0.55));
+        float along = dot(q, bdir);
+        float across = length(q - bdir * along);
+        float beam = exp(-across / (0.006 + 0.07 * abs(along))) * exp(-abs(along) * 1.3) * step(R * 0.8, abs(along));
+        col += mix(u_sunA, vec3(1.0), 0.4) * beam * (0.45 + 0.9 * u_mood2.z);
+        for (int i = 0; i < 2; i++) {
+            float ph = fract(u_time * 0.4 + float(i) * 0.5);
+            col += u_sunB * smoothstep(0.006, 0.0, abs(dd - R * (1.2 + 2.6 * ph))) * (1.0 - ph) * 0.45;
+        }
+        float ys = q.y / R;
+        vec3 cc = mix(vec3(1.0, 0.98, 0.95), u_sunA, clamp(ys * 0.6 + 0.5, 0.0, 1.0));
+        float cm = ys < 0.0 ? 1.0 : step(0.1 + 0.5 * ys, fract(ys * 4.0 - u_time * 0.25));
+        float outc = max(dd - R, 0.0);
+        col += u_sunA * (0.34 * exp(-outc * 12.0) + 0.12 * exp(-outc * 3.0)) * (1.0 + 0.8 * u_bass + 0.6 * u_mood2.z);
+        col = mix(col, cc * 0.82, smoothstep(R, R - 0.003, dd) * cm);
     } else if (sc > 12.5) {
         // comet: a striped head with a long tail of light streaming back across the sky. Scan
         // bars flow down the tail and the kick brightens it.
@@ -2990,6 +3011,9 @@ impl Renderer {
         gl_use_material(&self.add_mat);
         self.draw_floor(world, e, armed_k);
         self.draw_rim(world, e);
+        if lv > 0.003 && world.candy > 0.02 {
+            self.draw_candy(world, lv);
+        }
         // The Heart's layers are drawn around the origin and shifted to where it stands.
         let hp = world.heart.pos * lv;
         if lv > 0.003 {
@@ -3226,6 +3250,34 @@ impl Renderer {
             let r = SNARE_R0 + age * SNARE_SPEED * (1.0 - 0.35 * k);
             let a = amp * (1.0 - k) * (1.0 - k) * SNARE_A * fx * lv;
             arc(Vec2::ZERO, r, 0.0, TAU, SNARE_W, alpha(col, a));
+        }
+    }
+
+    /// Ear candy, answered by the whole arena: rings and rays leave the spot where it sounded
+    /// and the rim lights up, so nobody can miss that the song just did something special.
+    fn draw_candy(&self, w: &World, lv: f32) {
+        let pal = &self.pal;
+        let k = (1.0 - w.candy).clamp(0.0, 1.0); // 0 as it sounds, 1 when it has faded
+        let a = w.candy * lv;
+        let at = w.candy_at;
+        let hot = mixc(pal.accent, WHITE, 0.5);
+        for i in 0..3 {
+            let kk = (k * 1.25 - i as f32 * 0.14).clamp(0.0, 1.0);
+            if kk > 0.0 {
+                arc(at, 40.0 + 760.0 * ease(kk), 0.0, TAU, 5.0 - 3.0 * kk, alpha(if i == 0 { hot } else { pal.accent }, a * (1.0 - kk)));
+            }
+        }
+        for i in 0..14 {
+            let ang = i as f32 * TAU / 14.0 + self.time * 0.4;
+            let d = dir(ang);
+            let r0 = 30.0 + 420.0 * k;
+            seg(at + d * r0, at + d * (r0 + 150.0 + 180.0 * k), 3.0, alpha(hot, a * 0.9), alpha(pal.accent, 0.0));
+        }
+        disc2(at, 90.0 + 60.0 * k, 20, alpha(hot, 0.35 * a), alpha(pal.accent, 0.0));
+        // the rim of the arena lights with it
+        let c = [vec2(-HALF_W, -HALF_H), vec2(HALF_W, -HALF_H), vec2(HALF_W, HALF_H), vec2(-HALF_W, HALF_H)];
+        for j in 0..4 {
+            line(c[j], c[(j + 1) % 4], 6.0, alpha(pal.accent, 0.5 * a));
         }
     }
 

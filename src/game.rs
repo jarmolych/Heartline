@@ -891,8 +891,9 @@ pub struct World {
     survive_acc: f32,
     /// Ear-candy comets in flight.
     pub painters: Vec<Painter>,
-    /// 0..1 envelope kicked by every piece of ear candy (visual flourish).
+    /// 0..1 envelope kicked by every piece of ear candy (visual flourish), and where it was.
     pub candy: f32,
+    pub candy_at: Vec2,
     /// The current song's look (set by the app; the renderer reads it).
     pub mood: Mood,
     /// The Heart's phases for this song (empty when the song is not known ahead of time).
@@ -1023,6 +1024,7 @@ impl World {
             survive_acc: 0.0,
             painters: Vec::new(),
             candy: 0.0,
+            candy_at: Vec2::ZERO,
             mood: Mood::default(),
             phases: Vec::new(),
             phase_i: 0,
@@ -1816,11 +1818,24 @@ impl World {
             Ev::Candy { kind, pitch, pitch_end, dur } => {
                 let (x, y) = chime_point(pitch);
                 let at = vec2(x, y);
+                // Ear candy has to be impossible to miss: the whole arena answers it (rings and
+                // rays from the spot, a flash, a jolt), it is named, and it says what to do.
                 self.candy = 1.0;
-                self.add_score(250.0);
-                self.snd(Sfx::Shield, 0.5, x);
-                self.burst(at, 18, 300.0, C_ACCENT, 4.0);
-                self.text(at + vec2(0.0, -46.0), "EAR CANDY", C_ACCENT, 22.0, 1.8);
+                self.candy_at = at;
+                self.add_score(500.0);
+                self.resonate(0.15);
+                self.snd(Sfx::Shield, 0.85, x);
+                self.flash = self.flash.max(0.3);
+                self.shake = self.shake.max(0.35);
+                self.burst(at, 44, 520.0, C_ACCENT, 5.0);
+                self.burst(at, 20, 300.0, C_WHITE, 4.0);
+                self.text(vec2(0.0, -200.0), "EAR CANDY", C_ACCENT, 44.0, 2.4);
+                let what = match kind {
+                    0 => "the song did something special: follow the comet",
+                    1 => "the song did something special: collect the keys",
+                    _ => "the song did something special: catch the sprite",
+                };
+                self.text(vec2(0.0, -162.0), what, C_WHITE, 20.0, 2.4);
                 match kind {
                     // A run of notes: a comet crosses the arena and leaves a trail to collect.
                     0 => {
