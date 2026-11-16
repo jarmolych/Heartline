@@ -58,48 +58,7 @@ on GitHub, so it always builds and every feature can be reverted with one click.
 - **Starting new work:** `git switch main && git pull --ff-only` first, so the branch starts from
   the latest `main`.
 
-## What the player wants (standing brief, 2026-11-15)
-- **Take the wheel.** "Improve" does not mean keep the current mechanics: overhaul things where
-  that is the better move, and work on every part of the game, not a few areas. Add creative
-  things the player would not have thought of. Do not stop early.
-- **Art direction, in the player's words:** what makes the original striped sun great is that it
-  has a CRT-style texture and faded edges, so it looks right as a flat 2D image, it is synced
-  to the song, and it is always pulsing or moving. So: flat shapes with scan bars cut through
-  them, soft glowing edges, a bass pulse, constant motion, and something on every element that
-  reacts to the music. No shaded surface textures (the player rejected a textured planet and
-  moon), no thin spiky silhouettes, nothing static, nothing flat and unlit (give objects a lit
-  face, a dark side and an outline). Look at a screenshot next to the sunset before shipping.
-- **Sync matters most.** Attacks, the gun and the visuals must all sit on the music. The player
-  notices at once when something drifts off the beat.
-- The plans in `docs/plans/` hold the history: read the newest one's Progress and open items
-  first (`0.5-depth.md` as of this writing).
-
 ## Project basics
 - Rust is not on PATH: `"$USERPROFILE/.cargo/bin/cargo.exe"`.
 - Keep CRLF line endings, use pure-Rust dependencies, and keep level generation deterministic.
-- Plans live in `docs/plans/`.
-
-## Agents: use them rarely
-Almost all progress on this game has come from one session working directly and checking its own
-work with the tools below. Sub-agents start cold, re-read the project, and on 2026-11-14 running
-several at once used up the plan's allowance twice. So:
-- **Do the work inline by default.** Do not spawn an agent unless the user asks for one, and
-  never run more than one at a time.
-- **Three agents remain** in `.claude/agents/`, each for work that is truly separate and large:
-  `planner` (a written plan for a multi-day feature, before any code), `audio-dsp-engineer`
-  (`analysis.rs` signal-processing work) and `graphics-programmer` (`render.rs` shader work).
-- Removed on 2026-11-15 because the lead does these jobs better inline: `playtester` (use the
-  commands below), `code-reviewer` (use `/code-review`), `gameplay-programmer` and
-  `network-programmer`.
-
-## Checking your own work (this replaces a playtester)
-Run these yourself after a change; each takes seconds.
-- Unit tests: `"$USERPROFILE/.cargo/bin/cargo.exe" test --release`
-- Balance: `heartline.exe --sim "E:\Libraries\Music\Straftat" --sample 6 --bot-delay 120`
-  (`--diff N`, `--song-idx N` for a later depth, `--give N` to start with N upgrades). Compare
-  hits per minute with the last numbers in `PROJECT_STATE.md`.
-- What the analysis hears: `heartline.exe --analyze FILE` (sections, phases, layers, ear candy).
-- Screenshots: `heartline.exe FILE --mute --selftest tmp/s --start 40 --shots 45,60 --secs 25
-  --size 1280x720`, then read the PNGs. Menu screens: no file, `--wall --screen setup|options`.
-  Looks: `--mood scene,weather,floor,prop`, `--mood-to ...` (sky transition), `--purgatory`.
-- None of this tells you how the game feels or sounds. Say so when reporting.
+- Specialist agents live in `.claude/agents/`. Plans live in `docs/plans/`.
