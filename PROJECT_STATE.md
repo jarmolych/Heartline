@@ -42,7 +42,8 @@ merging the last one brings everything:
     encore instead of the purgatory loop, ear candy
 16. `art/playtest-3-visuals` — nine rebuilt skies, horizon props, sky transition, item and
     Heart looks
-17. `chore/trim-agents` — four agents removed, self-check commands in `CLAUDE.md`
+17. `chore/trim-agents` — four agents removed, self-check commands in `CLAUDE.md` (undone when
+    merged into `main`: all seven agents and `main`'s `CLAUDE.md` were kept)
 18. `docs/playtest-3-t4` — `docs/plans/0.4-playtest-3.md` and this file
 
 19. `art/sky-polish` — sky rework in the sun's style, radio masts, city, rain, tide sky
