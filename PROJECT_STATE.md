@@ -86,7 +86,17 @@ and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "
 spots" first. The newest round (menu layout, skies, foregrounds, run flow) is
 `docs/plans/0.6-menu-and-skies.md`.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T13-win-x64` (built from branch 45).
+46. `feat/depth-run` — the run's goal is depth: Hearts on a clock, dives of +1 to +3 by how
+    fast they break, purgatory with rewards, a new Heart at the new depth; rage and phase
+    floors removed; HUD clock and DEPTH, results and records by depth; builds
+    `Heartline-0.3.0-T14`. Plan: `docs/plans/0.7-depth-run.md`.
+
+**Test build:** `#UserTesting\Heartline-0.3.0-T14-win-x64` (built from branch 46).
+
+**The dive, simulated** (8 Straftat songs, plain 120 ms bot, first Heart of a song, LULLABY to
+FLATLINE): escaped / +1 / +2 / +3 = 1/3/3/1, 1/0/4/3, 2/4/2/0, 3/2/1/2, 1/5/1/1, 5/1/1/1,
+4/3/1/0; depths per song 3.4 / 5.5 / 1.6 / 2.5 / 2.3 / 1.9 / 1.8. Runs differ a lot from one
+to the next. Hits per minute: 1.6 / 1.6 / 3.8 / 3.5 / 4.3 / 5.1 / 6.3.
 
 **Font:** Oxanium SemiBold is built into the exe (`assets/fonts/oxanium/`, SIL Open Font
 License 1.1; the player approved the download on 2026-11-15 as the free match for Risk of
@@ -248,6 +258,10 @@ SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia
 tools, balance simulator, bot · `rng.rs` PRNG · `runner.rs` Highway side mode.
 
 ## Session Log
+- 2026-11-15 — The depth run (`docs/plans/0.7-depth-run.md`), from the player's question "what
+  is the point of the game": depth is the goal and the difficulty; a Heart broken early dives
+  further and pays more per depth; purgatory, then a new Heart; a Heart never broken escapes
+  and the run sinks one depth. Rage and phase floors removed. 43 unit tests (4 new). T14.
 - 2026-11-15 — Menu and skies round (`docs/plans/0.6-menu-and-skies.md`): run setup in grouped
   panels with a scrolling difficulty strip, track preview and library bar top right on both
   menus, smooth font, round corners, icons, results screen, Q / E song swap in a track's first

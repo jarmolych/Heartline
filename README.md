@@ -56,6 +56,13 @@ License, see `OFL.txt`); to use another font, put its TTF next to the exe as
 
 How it plays:
 
+- **The goal is depth.** Every song has a Heart, and the song is its clock. Break the Heart and
+  you dive: three depths down if half its clock was left, two if a quarter was, otherwise one.
+  A faster kill also pays more than one reward per depth (five rewards for three depths, three
+  for two, one for one). Then **purgatory**: ten seconds or more where everything hostile is
+  shootable and your rewards are on the field. Then a new Heart rises at the new depth, with
+  the rest of the song as its clock. If a song's Heart is never broken it escapes: you sink one
+  depth with nothing gained. Depth is the difficulty, and how deep you got is your result.
 - **Attacks are aimed and announced.** Before the Heart fires, a ring closes onto it and the
   danger zone is drawn on the floor (a cone, a wall with a gap, a pincer with an open lane, a
   cross). It fires exactly on the beat. Step out of the zone; the rest of the arena is yours.
@@ -81,16 +88,16 @@ How it plays:
 - **The song's layers drive the level.** Beat, bass, snare, hats, lead and chimes are each tied to
   one kind of attack while they play. Which ones are active is lit at the top right; a part of
   the song that returns brings its attacks and its colours back.
-- **The Heart has a phase per section of the song.** SHELL (calm): it is immune, break the three
-  shield nodes. VALVE (groove): it opens for the first half of every bar. SPLIT (surge): break
-  the lit core, then the next. OVERDRIVE (drop): exposed, extra damage. Beat a phase before its
-  section ends and you get **purgatory**: a breather with a clock where everything is shootable.
+- **The Heart takes a form for each section of the song.** SHELL (calm): its body is immune,
+  break the three shield nodes. VALVE (groove): it opens for the first half of every bar. SPLIT
+  (surge): break the lit core, then the next. OVERDRIVE (drop): exposed, extra damage. Take out
+  all of a Shell's nodes or a Split's cores before the section changes and it stands exposed.
 - **The Heart moves.** From PULSE up it relocates every few bars: its destination is ringed for
   a beat before it glides there, and it holds its fire on the way.
 - **It charges.** In OVERDRIVE the Heart lights a lane through where you stand and crosses it a
   beat later. The last section of a song is the FINALE: every pulse has a shootable echo.
 - **Carry the charge.** While the Heart's body can be hurt, a charge appears far from it. Walk
-  it into the ring around the Heart to take a fifth of the phase at once; a hit knocks it loose.
+  it into the ring around the Heart to take a tenth of its health at once; a hit knocks it loose.
 - **Resonance.** Grazes, kills, on-beat dashes and hurting the Heart fill the meter under your
   combo. Full, it rings for eight seconds: more damage, double score.
 - **Bullets arrive on the beat.** Every pulse is timed to cross the ticked ring around the Heart

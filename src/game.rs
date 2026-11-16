@@ -134,7 +134,7 @@ impl UpgradeId {
             UpgradeId::Nova => "being hit clears bullets and hurts enemies",
             UpgradeId::Crescendo => "more damage the higher your multiplier",
             UpgradeId::Accent => "chance for a shot to hit 2.5x as hard",
-            UpgradeId::Coda => "breaking a Heart phase heals you",
+            UpgradeId::Coda => "breaking a Heart heals you",
             UpgradeId::Syncope => "a dash on the beat has no cooldown",
         }
     }
@@ -174,23 +174,37 @@ const GUN_TICK_FROM: f32 = 1.2;
 // the World scales that plan by `pressure()`: a ramp that eases the player into each song,
 // grows a little with every cleared track, and backs off for a few seconds after a hit.
 
-/// (starting pressure, seconds of play until full pressure) for the 1st, 2nd and later songs.
+/// (starting pressure, seconds of play until full pressure) at depth 0-1, 2-3 and deeper.
 const RAMP: [(f32, f32); 3] = [(0.40, 75.0), (0.70, 30.0), (0.85, 15.0)];
-/// Extra pressure per cleared song in a run.
-const RUN_ESCALATION: f32 = 0.14;
+/// The run's goal is depth, and depth is the difficulty. Each depth adds this much pressure,
+/// enemy health and Heart health, and every `DEPTH_PER_MOD` depths switch on another modifier.
+const DEPTH_PRESSURE: f32 = 0.10;
+const DEPTH_ENEMY_HP: f32 = 0.15;
+/// Kept small on purpose: how fast a Heart falls should depend on how well you play under the
+/// pressure of that depth, not on a health bar that outgrows any build.
+const DEPTH_HEART_HP: f32 = 0.04;
+const DEPTH_PER_MOD: u32 = 2;
 /// Extra pressure per player level: the level keeps up with a strong build.
 const LEVEL_PRESSURE: f32 = 0.02;
-/// Extra pressure per rage step (each time a Heart phase is broken early in this song).
-const RAGE_PRESSURE: f32 = 0.10;
-const RAGE_MAX: u32 = 5;
-/// Live audio: seconds of play a phase is sized for, out of a Heart sized for this many.
+/// Live audio: seconds of play a section's share of the Heart is sized for, out of a Heart
+/// whose clock runs this long.
 const LIVE_PHASE_SECS: f32 = 30.0;
 pub const LIVE_HEART_SECS: f32 = 210.0;
-/// Purgatory lasts this long at most; if the section is still going the Heart returns.
-const PURGATORY_SECS: f32 = 9.0;
-/// How much of the player's measured damage rate the Heart's return and its later phases are
-/// sized for (below 1 so a strong player still gets ahead, just not by a whole phase).
-const RAGE_KEEP_UP: f32 = 0.8;
+/// Purgatory after the Heart breaks lasts this long, plus `PURGATORY_PER_DIVE` for each depth
+/// beyond the first that the dive took.
+pub const PURGATORY_SECS: f32 = 10.0;
+const PURGATORY_PER_DIVE: f32 = 2.0;
+/// Heart health per second of the play it is meant to last (before depth, tier and build).
+/// Harder tiers leave less time to shoot, so their Hearts are a little smaller
+/// (`HEART_TIER_EASE` at the hardest).
+const HEART_HP_PER_SEC: f32 = 1.9;
+const HEART_TIER_EASE: f32 = 0.3;
+/// The dive: breaking the Heart with no more than this much of its clock used takes the run
+/// three depths down (`DIVE_S`) or two (`DIVE_A`); later than that, one.
+pub const DIVE_S: f32 = 0.50;
+pub const DIVE_A: f32 = 0.75;
+/// A new Heart only rises after a dive if this much of its clock would be left.
+const MIN_HEART_SECS: f32 = 35.0;
 /// Shards needed for the next level: `XP_BASE + XP_LIN * level + XP_QUAD * level^2`.
 const XP_BASE: u32 = 18;
 const XP_LIN: u32 = 14;
@@ -624,8 +638,10 @@ pub struct HeartPhase {
     pub t0: f32,
     pub t1: f32,
     pub kind: SectionKind,
-    /// Heart health at which this phase is beaten (0 for the last one).
+    /// Always 0 since the depth run: nothing stops the Heart's health bar any more.
     pub floor: f32,
+    /// This section's share of the Heart's health (0..1), by its length and its form.
+    pub share: f32,
 }
 
 /// Places the Heart may stand (the centre first).
@@ -636,7 +652,7 @@ const HEART_STAY_SECS: f32 = 7.0;
 /// Heart's own radius), and the share of the phase it removes.
 const FORK_EVERY: f32 = 16.0;
 pub const FORK_DELIVER_R: f32 = 95.0;
-const FORK_SHARE: f32 = 0.2;
+const FORK_SHARE: f32 = 0.1;
 /// In Overdrive the Heart charges at most once per this many beats.
 const CHARGE_EVERY_BEATS: f32 = 8.0;
 /// Resonance: seconds it lasts, and what it multiplies damage and score by.
@@ -704,8 +720,8 @@ pub struct Stats {
     pub hearts_broken: u32,
     pub songs: u32,
     pub notes_shot: u32,
-    /// Heart phases beaten before their section ended.
-    pub phases_broken: u32,
+    /// Depths gained beyond the first by breaking Hearts early (a +3 dive counts 2).
+    pub dives: u32,
     /// Hostile bullets slipped past at close range.
     pub grazes: u32,
     /// Times resonance was set ringing.
@@ -771,6 +787,20 @@ pub struct World {
     pub feat: Feat,
     pub rng: Rng,
     pub no_fail: bool,
+    /// How deep the run is (0 at the start; shown as `depth + 1`). The goal of a run, and its
+    /// difficulty. Breaking a Heart takes it down by one to three; a song whose Heart is never
+    /// broken takes it down by one anyway.
+    pub depth: u32,
+    /// The Heart's clock: when it was born and when the song lets go of it.
+    pub heart_t0: f32,
+    pub heart_due: f32,
+    /// Seconds of real play per second of the Heart's clock (songs have silent stretches).
+    active_ratio: f32,
+    /// A Heart has been broken in this song.
+    pub dived: bool,
+    /// Depths the last dive took (for the HUD), and modifiers already announced.
+    pub last_dive: u32,
+    mods_seen: u8,
     /// The codex's showcase: every attack and enemy it is sent appears, whatever the pressure.
     pub demo: bool,
     pub diff: f32,
@@ -837,13 +867,11 @@ pub struct World {
     pub form_banner: f32,
     /// Beats since the last downbeat.
     bar_beat: u32,
-    /// How many Heart phases were broken early in this song (raises pressure).
+    /// Unused since the depth run (kept at 0; the HUD only shows it when it is not).
     pub rage: u32,
-    /// When the current phase (or the Heart's return) began, and when purgatory runs out.
+    /// When the current section's form began, and when purgatory runs out.
     phase_t0: f32,
     pub purg_until: f32,
-    /// Damage per second the player dealt in the phase they last broke.
-    phase_dps: f32,
     /// Musical layers currently driving attacks (bit = `LayerKind as u8`), for the HUD.
     pub armed: u8,
     /// 0..1 glow per layer: rises while the layer is armed.
@@ -918,6 +946,13 @@ impl World {
             feat: Feat::default(),
             rng: Rng::new(0x51AB_C0DE),
             no_fail,
+            depth: 0,
+            heart_t0: 0.0,
+            heart_due: 1.0,
+            active_ratio: 1.0,
+            dived: false,
+            last_dive: 0,
+            mods_seen: 0,
             demo: false,
             diff,
             ended: false,
@@ -958,7 +993,6 @@ impl World {
             rage: 0,
             phase_t0: 0.0,
             purg_until: 0.0,
-            phase_dps: 0.0,
             armed: 0,
             layer_glow: [0.0; N_LAYERS],
             chime: 0.0,
@@ -972,15 +1006,14 @@ impl World {
         if self.demo {
             return 1.0;
         }
-        let (r0, secs) = RAMP[(self.song_idx as usize).min(RAMP.len() - 1)];
+        let (r0, secs) = RAMP[(self.depth as usize / 2).min(RAMP.len() - 1)];
         // Harder tiers start nearer full pressure and get there sooner.
         let h = hardness(self.diff);
         let r0 = (r0 + 0.45 * h).min(0.95);
         let k = smooth01(self.active_t / (secs * (1.0 - 0.6 * h)));
         (r0 + (1.0 - r0) * k)
-            * (1.0 + RUN_ESCALATION * self.song_idx as f32)
+            * (1.0 + DEPTH_PRESSURE * self.depth as f32)
             * (1.0 + LEVEL_PRESSURE * self.player.level as f32)
-            * (1.0 + RAGE_PRESSURE * self.rage as f32)
             * self.mercy
             * if self.purgatory { PURGATORY_PRESSURE } else { 1.0 }
     }
@@ -989,15 +1022,67 @@ impl World {
     pub fn set_phases(&mut self, sections: &[(f32, f32, SectionKind)]) {
         let weight = |s: &(f32, f32, SectionKind)| (s.1 - s.0).max(0.0) * HeartForm::of(s.2).yield_();
         let total: f32 = sections.iter().map(weight).sum::<f32>().max(1e-3);
-        let mut left = self.heart.max_hp;
         self.phases.clear();
-        for (i, s) in sections.iter().enumerate() {
-            left -= self.heart.max_hp * weight(s) / total;
-            let floor = if i + 1 == sections.len() { 0.0 } else { left.max(0.0) };
-            self.phases.push(HeartPhase { t0: s.0, t1: s.1, kind: s.2, floor });
+        for s in sections.iter() {
+            self.phases.push(HeartPhase { t0: s.0, t1: s.1, kind: s.2, floor: 0.0, share: weight(s) / total });
         }
         self.phase_i = 0;
         self.purgatory = false;
+    }
+
+    /// Health of a Heart meant to last `secs` of play at this depth, tier and build.
+    fn heart_hp(&self, secs: f32) -> f32 {
+        secs.max(5.0)
+            * HEART_HP_PER_SEC
+            * (1.0 + DEPTH_HEART_HP * self.depth as f32)
+            * (1.0 - HEART_TIER_EASE * hardness(self.diff))
+            * self.gun_power().powf(HEART_POWER_EXP)
+    }
+
+    /// The Heart's clock runs from `t0` to `t1` (song time), of which `active_secs` are play.
+    /// Call after `begin_song`.
+    pub fn set_heart_window(&mut self, t0: f32, t1: f32, active_secs: f32) {
+        self.heart_t0 = t0;
+        self.heart_due = t1.max(t0 + 1.0);
+        self.active_ratio = (active_secs / (self.heart_due - t0)).clamp(0.3, 1.0);
+    }
+
+    /// Whether a new Heart will rise when this purgatory ends (enough of the song is left).
+    pub fn heart_will_return(&self) -> bool {
+        self.live_phases || self.heart_due - self.purg_until >= MIN_HEART_SECS
+    }
+
+    /// 0..1: how much of the Heart's clock is used.
+    pub fn heart_clock(&self) -> f32 {
+        ((self.t - self.heart_t0) / (self.heart_due - self.heart_t0).max(1.0)).clamp(0.0, 1.0)
+    }
+
+    /// How many depths breaking the Heart right now would take the run down.
+    pub fn dive_now(&self) -> u32 {
+        let k = self.heart_clock();
+        if k <= DIVE_S {
+            3
+        } else if k <= DIVE_A {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Switch on the modifiers this depth carries and announce the ones that are new.
+    fn sync_mods(&mut self) {
+        self.mods = self.base_mods;
+        for k in 0..((self.depth / DEPTH_PER_MOD) as usize).min(DEPTH_MODS) {
+            self.mods |= 1 << ((self.mod_offset as usize + k) % DEPTH_MODS);
+        }
+        let fresh = self.mods & !self.mods_seen & !self.base_mods;
+        self.mods_seen |= self.mods;
+        for (m, md) in MODS.iter().enumerate() {
+            if fresh >> m & 1 == 1 {
+                self.text(vec2(0.0, 150.0), &format!("+ {}", md.0), C_DANGER, 30.0, 3.6);
+                self.text(vec2(0.0, 180.0), md.1, C_WHITE, 20.0, 3.6);
+            }
+        }
     }
 
     /// The Heart is in the last phase of a song that is known ahead of time.
@@ -1010,9 +1095,9 @@ impl World {
         self.phases.get(self.phase_i).map_or(0.0, |p| p.floor)
     }
 
-    /// 0..1 of the current phase's health that is left.
+    /// 0..1 of the Heart's health that is left.
     pub fn phase_frac(&self) -> f32 {
-        ((self.heart.hp - self.phase_floor()) / self.heart.phase_max.max(1e-3)).clamp(0.0, 1.0)
+        (self.heart.hp / self.heart.max_hp.max(1e-3)).clamp(0.0, 1.0)
     }
 
     /// Seconds until the current phase's section ends.
@@ -1095,30 +1180,46 @@ impl World {
         self.snd(Sfx::Dash, 0.6, to.x);
     }
 
-    /// Purgatory ran out while the section is still playing: the Heart comes back, sized for
-    /// the damage the player has just shown they can do.
-    fn encore(&mut self) {
-        let left = if self.live_phases { self.phase_left().max(12.0) } else { self.phase_left() };
-        let bonus = (self.phase_dps * left * RAGE_KEEP_UP).max(self.heart.max_hp * 0.03);
-        self.heart.hp += bonus;
-        self.heart.max_hp += bonus;
+    /// Purgatory is over. A new Heart rises at the depth the dive reached, with the rest of the
+    /// song as its clock. If too little of the song is left, the rest is a victory lap.
+    fn heart_returns(&mut self) {
+        if self.live_phases {
+            self.heart_due = self.t + LIVE_HEART_SECS;
+        }
+        let left = self.heart_due - self.t;
+        if left < MIN_HEART_SECS {
+            self.heart.broken = true;
+            self.purg_until = f32::MAX;
+            self.text(vec2(0.0, -120.0), "VICTORY LAP", C_ACCENT, 46.0, 2.4);
+            self.text(vec2(0.0, -82.0), "the song is nearly over: everything stays shootable", C_WHITE, 22.0, 2.4);
+            return;
+        }
+        self.heart_t0 = self.t;
+        let hp = self.heart_hp(left * self.active_ratio * 0.95);
+        let pos = self.heart.pos;
+        self.heart = Heart::new(hp, 1.0);
+        self.heart.pos = pos;
         self.purgatory = false;
         self.phase_t0 = self.t;
-        self.heart.phase_max = bonus;
-        self.heart.reform = 1.0;
-        self.heart.nodes.clear();
-        if self.heart.form.has_nodes() {
-            let a0 = self.rng.angle();
-            for k in 0..3 {
-                self.heart.nodes.push(Node { ang: a0 + k as f32 * TAU / 3.0, hp: bonus / 3.0, max_hp: bonus / 3.0, flash: 0.0 });
-            }
-        }
+        let idx = self.phase_i;
+        self.enter_phase(idx);
         self.form_banner = 1.0;
         self.shake = self.shake.max(0.5);
         self.snd(Sfx::Slam, 0.9, 0.0);
-        self.burst(self.heart.pos, 50, 620.0, C_DANGER, 7.0);
-        self.text(vec2(0.0, -120.0), "THE HEART RETURNS", C_DANGER, 46.0, 2.4);
-        self.text(vec2(0.0, -82.0), &format!("rage {}: it hits harder now", self.rage), C_WHITE, 22.0, 2.4);
+        self.burst(pos, 50, 620.0, C_DANGER, 7.0);
+        self.text(vec2(0.0, -120.0), "A NEW HEART", C_DANGER, 46.0, 2.4);
+        self.text(vec2(0.0, -82.0), &format!("depth {}: break it for another dive", self.depth + 1), C_WHITE, 22.0, 2.4);
+    }
+
+    /// The song ended (or, in live mode, the clock ran out) with its Heart never broken: the
+    /// run sinks one depth anyway, with nothing gained.
+    fn heart_escapes(&mut self) {
+        self.depth += 1;
+        self.sync_mods();
+        if !self.pacifist {
+            self.text(vec2(0.0, -120.0), "THE HEART ESCAPES", C_DANGER, 46.0, 3.0);
+            self.text(vec2(0.0, -82.0), &format!("you sink to depth {} with nothing gained", self.depth + 1), C_WHITE, 22.0, 3.0);
+        }
     }
 
     fn enter_phase(&mut self, idx: usize) {
@@ -1127,19 +1228,23 @@ impl World {
         }
         self.phase_t0 = self.t;
         let idx = idx.min(self.phases.len() - 1);
+        self.phase_i = idx;
+        if self.purgatory {
+            // the Heart is down: the next one will take this section's form when it rises
+            return;
+        }
         let form = HeartForm::of(self.phases[idx].kind);
         if form != self.heart.form {
             self.form_banner = 1.0;
         }
-        self.phase_i = idx;
-        self.purgatory = false;
         self.heart.form = form;
         if !self.live_phases && self.phases.len() > 2 && idx + 1 == self.phases.len() {
             self.text(vec2(0.0, -170.0), "FINALE", C_DANGER, 58.0, 2.8);
             self.text(vec2(0.0, -128.0), "every pulse has an echo", C_WHITE, 22.0, 2.8);
             self.flash = self.flash.max(0.25);
         }
-        self.heart.phase_max = (self.heart.hp - self.phases[idx].floor).max(1.0);
+        // the section's share of the Heart: what its shield nodes or cores hold between them
+        self.heart.phase_max = (self.heart.max_hp * self.phases[idx].share.clamp(0.06, 0.5)).max(1.0);
         self.heart.nodes.clear();
         if form.has_nodes() {
             let a0 = self.rng.angle();
@@ -1156,9 +1261,13 @@ impl World {
         if self.heart.broken {
             return;
         }
-        let quota = self.heart.max_hp * LIVE_PHASE_SECS / LIVE_HEART_SECS * HeartForm::of(kind).yield_();
-        let floor = (self.heart.hp - quota).max(0.0);
-        self.phases.push(HeartPhase { t0: self.t, t1: self.t + LIVE_PHASE_SECS, kind, floor });
+        let share = LIVE_PHASE_SECS / LIVE_HEART_SECS * HeartForm::of(kind).yield_();
+        self.phases.push(HeartPhase { t0: self.t, t1: self.t + LIVE_PHASE_SECS, kind, floor: 0.0, share });
+        if self.purgatory {
+            // the Heart is down: only note which section is playing, for when the next one rises
+            self.phase_i = self.phases.len() - 1;
+            return;
+        }
         self.enter_phase(self.phases.len() - 1);
         // A new sky every third section: live audio has no song to give it an identity.
         if self.phases.len() % 3 == 0 {
@@ -1184,76 +1293,48 @@ impl World {
         }
     }
 
-    /// Take `dmg` off the Heart, stopping at the current phase's floor.
+    /// Take `dmg` off the Heart. Nothing stops its health bar: at zero it breaks.
     fn damage_heart(&mut self, dmg: f32) {
         if dmg <= 0.0 || self.heart.broken || self.purgatory || self.pacifist {
             return;
         }
-        let floor = self.phase_floor();
         self.resonate(1.2 * dmg / self.heart.max_hp.max(1.0));
-        self.heart.hp = (self.heart.hp - dmg).max(floor);
+        self.heart.hp = (self.heart.hp - dmg).max(0.0);
         self.heart.flash = 1.0;
         self.add_score(dmg * 4.0);
+        if self.heart.hp <= 1e-3 {
+            self.break_heart();
+            return;
+        }
+        // Every shield node or core is down before the section moved on: the Heart stands
+        // exposed until it does.
         let nodes_gone = self.heart.form.has_nodes() && !self.heart.nodes.is_empty() && self.heart.nodes.iter().all(|n| n.hp <= 0.0);
         if nodes_gone {
-            self.heart.hp = floor;
-        }
-        if self.heart.hp <= floor + 1e-3 {
-            // Live phases are made as the music goes, so "the last one so far" is not the end.
-            let more_to_come = self.live_phases && floor > 0.0;
-            if self.phases.is_empty() || (self.phase_i + 1 >= self.phases.len() && !more_to_come) {
-                self.break_heart();
-            } else {
-                self.enter_purgatory();
-            }
+            self.heart.nodes.clear();
+            self.heart.form = HeartForm::Core;
+            self.form_banner = 1.0;
+            self.add_score(800.0);
+            self.snd(Sfx::Clear, 0.8, self.heart.pos.x);
+            self.burst(self.heart.pos, 40, 600.0, C_PRIMARY, 6.0);
+            let p = self.heart.pos + vec2(0.0, -120.0);
+            self.text(p, "EXPOSED", C_ACCENT, 40.0, 2.0);
         }
     }
 
-    /// The phase was beaten before its section ended: a breather with a clock.
-    fn enter_purgatory(&mut self) {
-        self.purgatory = true;
-        self.stats.phases_broken += 1;
-        // Rage: the faster the phase fell, the more the rest of the Heart grows, so a strong
-        // build is answered with a tougher Heart instead of purgatory after purgatory.
-        let took = (self.t - self.phase_t0).max(1.0);
-        let planned = self.phases.get(self.phase_i).map_or(took, |p| (p.t1 - self.phase_t0).max(took));
-        self.phase_dps = self.heart.phase_max / took;
-        let grow = 1.0 + ((planned / took).min(3.0) - 1.0) * RAGE_KEEP_UP;
-        let before = self.heart.hp;
-        for ph in self.phases.iter_mut().skip(self.phase_i) {
-            ph.floor *= grow;
+    /// Give a random open common upgrade (part of a fast dive's reward).
+    fn free_upgrade(&mut self, k: usize) {
+        let pool: Vec<UpgradeId> = UpgradeId::ALL.iter().copied().filter(|u| !u.rare() && self.player.up(*u) < u.max()).collect();
+        if pool.is_empty() {
+            self.drop_shards(vec2(0.0, 230.0), 8, false);
+            return;
         }
-        self.heart.hp = before * grow;
-        self.heart.max_hp += before * (grow - 1.0);
-        self.rage = (self.rage + 1).min(RAGE_MAX);
-        self.purg_until = self.t + PURGATORY_SECS;
-        self.heart.nodes.clear();
-        self.pulses.clear();
-        // Everything hostile in the air becomes a shootable note.
-        for b in self.bullets.iter_mut() {
-            b.soft = true;
-            b.kind = B_NOTE;
-            b.r = 8.0;
-        }
-        self.add_score(1500.0);
-        self.snd(Sfx::Clear, 0.9, 0.0);
-        self.shake = self.shake.max(0.6);
-        self.flash = self.flash.max(0.5);
-        self.burst(self.heart.pos, 60, 700.0, C_PRIMARY, 7.0);
-        self.text(vec2(0.0, -120.0), "PURGATORY", C_ACCENT, 54.0, 2.6);
-        self.text(vec2(0.0, -78.0), "phase broken early - everything is shootable", C_WHITE, 22.0, 2.6);
-        self.window.broke_phase = true;
-        self.coda();
-        // The first two breaks of a song are rewarded with a graded offer, later ones with shards.
-        let left = self.phase_left().min(PURGATORY_SECS);
-        if left > 5.0 && self.rage <= 2 {
-            self.spawn_reward(left.min(14.0));
-        } else {
-            self.drop_shards(vec2(0.0, 150.0), 6, false);
-        }
+        let up = pool[self.rng.below(pool.len())];
+        self.apply_upgrade(up);
+        let p = self.player.pos + vec2(0.0, -70.0 - 28.0 * k as f32);
+        self.text(p, &format!("+ {}", up.name()), C_ACCENT, 24.0, 2.6);
     }
 
-    /// CODA: breaking a Heart phase heals.
+    /// CODA: breaking a Heart heals.
     fn coda(&mut self) {
         let n = self.player.up(UpgradeId::Coda) as i32;
         if n > 0 && self.player.hp < self.player.max_hp {
@@ -1264,29 +1345,78 @@ impl World {
         }
     }
 
+    /// The Heart breaks: the dive. How much of its clock was used decides how many depths the
+    /// run goes down, and a faster kill is paid more than one reward per depth. Then purgatory:
+    /// everything hostile becomes shootable, and the offers are on the field.
     fn break_heart(&mut self) {
+        let gain = self.dive_now();
         self.coda();
         self.heart.hp = 0.0;
-        self.heart.broken = true;
-        self.window.broke_phase = true;
         self.heart.nodes.clear();
+        self.window.broke_phase = true;
         self.stats.hearts_broken += 1;
+        self.stats.dives += gain - 1;
+        self.dived = true;
+        self.last_dive = gain;
+        self.depth += gain;
+        self.purgatory = true;
+        self.purg_until = self.t + PURGATORY_SECS + PURGATORY_PER_DIVE * (gain - 1) as f32;
+        self.fork = None;
+        self.carrying = false;
+        self.pulses.clear();
+        self.lasers.clear();
+        self.waves.clear();
+        self.portals.clear();
+        for t in self.tiles.iter_mut() {
+            t.armed = false;
+        }
+        // Everything hostile in the air becomes a shootable note; enemies burst into shards.
+        for b in self.bullets.iter_mut() {
+            b.soft = true;
+            b.kind = B_NOTE;
+            b.r = 8.0;
+        }
+        let dead: Vec<Vec2> = self.enemies.drain(..).map(|e| e.pos).collect();
+        for p in dead {
+            self.burst(p, 8, 300.0, C_SECONDARY, 4.0);
+            self.drop_shards(p, 2, false);
+        }
         self.snd(Sfx::HeartBreak, 1.0, 0.0);
-        self.add_score(5000.0);
+        self.add_score(4000.0 * gain as f32 * (1.0 + 0.1 * self.depth as f32));
         self.shake = 1.0;
         self.flash = 0.8;
-        self.burst(self.heart.pos, 90, 900.0, C_PRIMARY, 8.0);
-        self.burst(self.heart.pos, 50, 600.0, C_WHITE, 6.0);
-        self.text(vec2(0.0, -120.0), "HEART BROKEN", C_ACCENT, 54.0, 3.0);
-        self.text(vec2(0.0, -78.0), "victory lap - everything is shootable", C_WHITE, 22.0, 3.0);
-        // Every bullet on the field becomes a reward.
-        let pts: Vec<Vec2> = self.bullets.iter().map(|b| b.pos).collect();
-        self.bullets.clear();
-        for (n, p) in pts.into_iter().enumerate() {
-            if n % 3 == 0 {
-                self.drop_shards(p, 1, false);
+        self.warp = self.warp.max(0.35 * gain as f32);
+        let at = self.heart.pos;
+        self.burst(at, 90, 900.0, C_PRIMARY, 8.0);
+        self.burst(at, 50, 600.0, C_WHITE, 6.0);
+        let name = match gain {
+            3 => "ABYSSAL DIVE",
+            2 => "DEEP DIVE",
+            _ => "DIVE",
+        };
+        self.text(vec2(0.0, -150.0), "HEART BROKEN", C_ACCENT, 54.0, 3.2);
+        self.text(vec2(0.0, -104.0), &format!("{name}   +{gain}   DEPTH {}", self.depth + 1), if gain > 1 { C_ACCENT } else { C_WHITE }, 30.0, 3.2);
+        self.drop_shards(at, 6 * gain as usize, false);
+        // The reward: one offer for a late kill; a fast one is paid more than one per depth.
+        let life = PURGATORY_SECS + 10.0;
+        match gain {
+            3 => {
+                self.player.hp = self.player.max_hp;
+                for _ in 0..3 {
+                    self.spawn_offer(life, 3, true);
+                }
+                self.free_upgrade(0);
+                self.free_upgrade(1);
             }
+            2 => {
+                self.player.hp = (self.player.hp + 1).min(self.player.max_hp);
+                self.spawn_offer(life, 3, true);
+                self.spawn_offer(life, 3, false);
+                self.free_upgrade(0);
+            }
+            _ => self.spawn_offer(life, 3, false),
         }
+        self.sync_mods();
     }
 
     /// The pressure at which a mechanic with base threshold `p` unlocks on this difficulty.
@@ -1333,19 +1463,21 @@ impl World {
         self.song_idx = song_idx;
         self.rng = Rng::new(seed ^ 0xA5A5_5A5A);
         // The Heart is sized for the damage this build can do, so upgrades help without
-        // turning the next song into a walkover.
-        let hp = active_secs * 2.6 * (1.0 + 0.15 * song_idx as f32) * (0.75 + 0.25 * self.diff) * self.gun_power().powf(HEART_POWER_EXP);
+        // turning the next song into a walkover. Its clock is the song (`set_heart_window`).
+        let hp = self.heart_hp(active_secs);
         self.rage = 0;
         self.phase_t0 = 0.0;
         self.heart = Heart::new(hp, 1.0);
-        // Depth: every song after the first switches one more modifier on.
+        self.heart_t0 = 0.0;
+        self.heart_due = active_secs.max(1.0);
+        self.active_ratio = 1.0;
+        self.dived = false;
+        self.last_dive = 0;
         if song_idx == 0 {
             self.mod_offset = (seed % DEPTH_MODS as u64) as u8;
+            self.mods_seen = 0;
         }
-        self.mods = self.base_mods;
-        for k in 0..(song_idx as usize).min(DEPTH_MODS) {
-            self.mods |= 1 << ((self.mod_offset as usize + k) % DEPTH_MODS);
-        }
+        self.sync_mods();
         self.phases.clear();
         self.phase_i = 0;
         self.purgatory = false;
@@ -1405,7 +1537,7 @@ impl World {
             if ppos.distance(hpos) < HEART_R + FORK_DELIVER_R {
                 self.carrying = false;
                 self.fork_cd = FORK_EVERY;
-                let dmg = self.heart.phase_max * FORK_SHARE;
+                let dmg = self.heart.max_hp * FORK_SHARE;
                 self.burst(hpos, 46, 760.0, C_ACCENT, 6.0);
                 self.text(hpos + vec2(0.0, -150.0), "DELIVERED", C_ACCENT, 38.0, 1.6);
                 self.shake = self.shake.max(0.5);
@@ -1671,6 +1803,9 @@ impl World {
             }
             Ev::End => {
                 if !self.ended {
+                    if !self.dived {
+                        self.heart_escapes();
+                    }
                     self.ended = true;
                     let bonus = 2000.0 + self.player.hp.max(0) as f32 * 500.0;
                     self.score += bonus as u64;
@@ -1933,28 +2068,10 @@ impl World {
         self.bullets.push(Bullet { pos: self.heart.pos + d * (HEART_R * 0.9) + vel * late, vel, r: 4.5, soft: false, age: 0.0, fade: 1.0, kind: B_TICK, pat: 9, grazed: false });
     }
 
-    /// The newest modifier of this depth, if the depth added one: (name, what it does).
-    pub fn new_mod(&self) -> Option<(&'static str, &'static str)> {
-        let n = self.song_idx as usize;
-        if n == 0 || n > DEPTH_MODS {
-            return None;
-        }
-        let m = (self.mod_offset as usize + n - 1) % DEPTH_MODS;
-        // Already switched on in run setup: nothing new to announce.
-        if self.base_mods >> m & 1 == 1 {
-            return None;
-        }
-        Some(MODS[m])
-    }
-
     /// Announce the depth the run has reached (call after `begin_song`).
     pub fn announce_depth(&mut self, title: &str) {
-        self.text(vec2(0.0, -170.0), &format!("DEPTH {}", self.song_idx + 1), C_ACCENT, 58.0, 3.2);
+        self.text(vec2(0.0, -170.0), &format!("DEPTH {}", self.depth + 1), C_ACCENT, 58.0, 3.2);
         self.text(vec2(0.0, -126.0), title, C_WHITE, 24.0, 3.2);
-        if let Some((name, what)) = self.new_mod() {
-            self.text(vec2(0.0, 150.0), &format!("+ {name}"), C_DANGER, 30.0, 3.6);
-            self.text(vec2(0.0, 180.0), what, C_WHITE, 20.0, 3.6);
-        }
     }
 
     /// A reward the song placed (calm section, purgatory, track clear): the offer depends on
@@ -1984,7 +2101,7 @@ impl World {
                 1 => "1 hit".to_string(),
                 n => format!("{n} hits"),
             },
-            if w.broke_phase { "  +  phase broken" } else { "" },
+            if w.broke_phase { "  +  Heart broken" } else { "" },
             if w.peak_mult >= 3.0 { "  +  combo" } else { "" }
         );
         self.text(vec2(0.0, 96.0), &format!("GRADE {}", GRADES[grade]), if grade >= 2 { C_ACCENT } else { C_WHITE }, 40.0, 2.6);
@@ -2146,10 +2263,10 @@ impl World {
             EnemyKind::Sprite => (3.0, 16.0),
             EnemyKind::Turret => (6.0, 19.0),
             EnemyKind::Bomber => (3.0, 16.0),
-            EnemyKind::Elite => (22.0 + 8.0 * self.diff + 6.0 * self.song_idx as f32, 34.0),
+            EnemyKind::Elite => (22.0 + 8.0 * self.diff + 3.0 * self.depth as f32, 34.0),
         };
         // Ordinary enemies toughen with depth (elites already scale).
-        let hp = if matches!(kind, EnemyKind::Elite | EnemyKind::Wisp | EnemyKind::Mini | EnemyKind::Sprite) { hp } else { hp * (1.0 + 0.3 * self.song_idx as f32) };
+        let hp = if matches!(kind, EnemyKind::Elite | EnemyKind::Wisp | EnemyKind::Mini | EnemyKind::Sprite) { hp } else { hp * (1.0 + DEPTH_ENEMY_HP * self.depth as f32) };
         let mut vel = Vec2::ZERO;
         let mut state = 0.0;
         match kind {
@@ -2160,7 +2277,7 @@ impl World {
             EnemyKind::Orbiter => state = pos.y.atan2(pos.x / 1.1),
             EnemyKind::Wisp | EnemyKind::Sprite => state = self.rng.angle(),
             // Elites come in three kinds (see `ELITE_*`); the run's depth decides which are in play.
-            EnemyKind::Elite => state = self.rng.below((1 + self.song_idx as usize).min(3)) as f32,
+            EnemyKind::Elite => state = self.rng.below((1 + self.depth as usize / 3).min(3)) as f32,
             _ => {}
         }
         self.enemies.push(Enemy { kind, pos, vel, hp, max_hp: hp, r, rot: 0.0, age: 0.0, flash: 0.0, state });
@@ -2305,8 +2422,15 @@ impl World {
             n.flash = (n.flash - dt * 7.0).max(0.0);
         }
         self.purg += ((self.purgatory as u8 as f32) - self.purg) * (dt * 3.0).min(1.0);
-        if self.purgatory && !self.heart.broken && self.t >= self.purg_until && (self.phase_left() > 4.0 || self.live_phases) {
-            self.encore();
+        if self.purgatory && !self.heart.broken && self.t >= self.purg_until {
+            self.heart_returns();
+        }
+        // Live audio has no song end to be the Heart's deadline: its clock simply runs out.
+        if self.live_phases && !self.purgatory && !self.heart.broken && !self.demo && self.t >= self.heart_due {
+            self.heart_escapes();
+            self.purg_until = self.t;
+            self.purgatory = true;
+            self.heart_returns();
         }
         self.window.peak_mult = self.window.peak_mult.max(self.mult());
         self.res_t = (self.res_t - dt).max(0.0);
@@ -3080,6 +3204,89 @@ mod tests {
     use super::*;
     use crate::analysis::{Band, Onset};
 
+    /// A fresh run on a 100 second song whose Heart is broken with `used` of its clock gone.
+    /// Returns the world just after the break.
+    fn broken_at(used: f32) -> World {
+        let mut w = World::new(1.0, true);
+        w.begin_song(100.0, 0, 1);
+        w.set_heart_window(0.0, 100.0, 100.0);
+        w.t = 100.0 * used;
+        let hp = w.heart.hp;
+        w.damage_heart(hp + 1.0);
+        w
+    }
+
+    /// Offers on the field or waiting, plus upgrades already handed over.
+    fn rewards(w: &World) -> usize {
+        (!w.orbs.is_empty()) as usize + w.pending_orbs.len() + w.player.ups.iter().map(|u| *u as usize).sum::<usize>()
+    }
+
+    #[test]
+    fn an_earlier_kill_dives_deeper_and_pays_more_per_depth() {
+        let (s, a, b) = (broken_at(0.3), broken_at(0.6), broken_at(0.9));
+        assert_eq!((s.depth, a.depth, b.depth), (3, 2, 1));
+        assert_eq!((rewards(&s), rewards(&a), rewards(&b)), (5, 3, 1));
+        // the ratio the whole design rests on: rewards per depth rise with speed
+        assert!(rewards(&s) as f32 / 3.0 > rewards(&a) as f32 / 2.0);
+        assert!(rewards(&a) as f32 / 2.0 > rewards(&b) as f32 / 1.0);
+        for w in [&s, &a, &b] {
+            assert!(w.purgatory && w.dived && !w.heart.broken);
+        }
+    }
+
+    #[test]
+    fn a_heart_that_is_never_broken_escapes_and_the_run_sinks_one_depth() {
+        let mut w = World::new(1.0, true);
+        w.begin_song(100.0, 0, 1);
+        w.set_heart_window(0.0, 100.0, 100.0);
+        w.t = 100.0;
+        w.apply(&LevelEvent { t: 100.0, lead: 0.0, ev: Ev::End });
+        assert_eq!(w.depth, 1);
+        assert_eq!(rewards(&w), 0);
+        // a song whose Heart was broken does not sink again at its end
+        let mut w = broken_at(0.9);
+        w.apply(&LevelEvent { t: 100.0, lead: 0.0, ev: Ev::End });
+        assert_eq!(w.depth, 1);
+    }
+
+    #[test]
+    fn a_new_heart_rises_after_purgatory_only_if_the_song_has_time_for_it() {
+        let step = |w: &mut World, t: f32| w.update(1.0 / 120.0, t, &Input::default(), 0.0, &Feat::default(), 0.5, true);
+        // broken at 30 s of 100: purgatory, then a new Heart with the rest of the song as its clock
+        let mut w = broken_at(0.3);
+        let t = w.purg_until + 0.1;
+        step(&mut w, t);
+        assert!(!w.purgatory && !w.heart.broken && w.heart.hp > 0.0);
+        assert!((w.heart_t0 - t).abs() < 0.5 && w.heart_clock() < 0.05);
+        // it is a fresh chance at a full dive, and smaller than the first (less song is left)
+        assert_eq!(w.dive_now(), 3);
+        let first = World::new(1.0, true).heart_hp(100.0);
+        assert!(w.heart.max_hp < first);
+        // broken at 90 s of 100: too little left, the rest is a victory lap
+        let mut w = broken_at(0.9);
+        let t = w.purg_until + 0.1;
+        step(&mut w, t);
+        assert!(w.purgatory && w.heart.broken);
+    }
+
+    #[test]
+    fn breaking_fast_never_makes_the_heart_or_the_pressure_grow() {
+        // The old rage: pressure and health went up for playing well. Depth is the only dial now,
+        // and the player chose it.
+        let w = broken_at(0.3);
+        assert_eq!(w.rage, 0);
+        let mut plain = World::new(1.0, true);
+        plain.begin_song(100.0, 0, 1);
+        plain.depth = w.depth;
+        plain.active_t = 500.0;
+        let mut after = broken_at(0.3);
+        after.purgatory = false;
+        after.active_t = 500.0;
+        after.player.ups = plain.player.ups;
+        after.player.level = plain.player.level;
+        assert!((after.pressure() - plain.pressure()).abs() < 1e-4);
+    }
+
     /// Hold fire for 60 s of a steady song at `bpm` and return the damage dealt, in nominal shots.
     fn gun_minute(bpm: f32, tempo_lv: u8) -> f32 {
         let bl = 60.0 / bpm;
@@ -3094,6 +3301,9 @@ mod tests {
         }
         let mut w = World::new(1.0, true);
         w.begin_song(60.0, 0, 1);
+        // a Heart that cannot break in a minute: a dive would hand out upgrades mid-measurement
+        w.heart.hp = 1.0e9;
+        w.heart.max_hp = 1.0e9;
         w.beat_len = bl;
         w.gun = gun_track(&beats, &onsets, 70.0);
         w.player.ups[UpgradeId::Tempo as usize] = tempo_lv;

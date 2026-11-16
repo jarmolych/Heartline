@@ -3234,7 +3234,7 @@ impl Renderer {
     fn draw_rim(&self, w: &World, e: f32) {
         // Depth: one more frame of danger-coloured light around the arena for every song deep
         // the run is (up to four), breathing with the bar.
-        let depth = (w.song_idx as usize).min(4);
+        let depth = (w.depth as usize / 2).min(4);
         if depth > 0 && e < 0.99 {
             let lv = 1.0 - e;
             for d in 0..depth {
@@ -4141,8 +4141,8 @@ impl Renderer {
             }
             if ghost > 0.01 {
                 // purgatory: a hollow halo, a clock that drains, and embers circling the void
-                let left = (w.purg_until - w.t).min(w.phase_left()).max(0.0);
-                let frac = (left / 9.0).clamp(0.0, 1.0);
+                let left = (w.purg_until - w.t).max(0.0);
+                let frac = (left / crate::game::PURGATORY_SECS).clamp(0.0, 1.0);
                 disc2(core, r_out * 0.75, 22, alpha(pal.bg0, 0.85 * ghost), alpha(pal.bg0, 0.0));
                 arc(core, r_out * 0.55, 0.0, TAU, 2.0, alpha(WHITE, 0.55 * ghost));
                 arc(core, r_out * 1.75, -PI * 0.5, -PI * 0.5 + TAU * frac, 4.0, alpha(pal.accent, 0.9 * ghost));
@@ -4973,32 +4973,49 @@ impl Renderer {
             line(vec2(bx, by - 4.0 * u), vec2(bx, by + 4.0 * u), 1.0 * u, alpha(WHITE, 0.35));
             line(vec2(bx + bw, by - 4.0 * u), vec2(bx + bw, by + 4.0 * u), 1.0 * u, alpha(WHITE, 0.35));
             if w.heart.broken {
-                vtext("HEART BROKEN", sw * 0.5, by + 26.0 * u, 18.0 * u, pal.accent, 0);
+                vtext("VICTORY LAP", sw * 0.5, by + 26.0 * u, 18.0 * u, pal.accent, 0);
             } else {
                 let hc = mixc(pal.danger, WHITE, w.heart.flash);
                 line(vec2(bx, by), vec2(bx + bw * frac, by), 4.0 * u, hc);
                 diamond_fill(vec2(bx + bw * frac, by), 5.0 * u, WHITE);
                 vtext("HEART", bx - 12.0 * u, by + 7.0 * u, 16.0 * u, alpha(pal.danger, 0.9), 1);
-                // One notch per phase still ahead: the bar stops at the next one until the song moves on.
-                for (i, ph) in w.phases.iter().enumerate() {
-                    if i + 1 < w.phases.len() && ph.floor > 0.0 {
-                        let fx = bx + bw * (ph.floor / w.heart.max_hp.max(1.0)).clamp(0.0, 1.0);
-                        let next = i == w.phase_i;
-                        line(vec2(fx, by - 6.0 * u), vec2(fx, by + 6.0 * u), if next { 2.5 } else { 1.0 } * u, alpha(if next { pal.accent } else { WHITE }, if next { 0.95 } else { 0.4 }));
-                    }
-                }
-                if w.rage > 0 {
-                    vtext(&format!("RAGE {}", roman(w.rage as u8)), bx + bw + 12.0 * u, by + 27.0 * u, 15.0 * u, alpha(pal.danger, 0.95), -1);
-                }
                 if w.purgatory {
                     let pulse = 0.75 + 0.25 * (self.time * 5.0).sin();
-                    let left = w.phase_left().min((w.purg_until - w.t).max(0.0));
+                    let left = (w.purg_until - w.t).max(0.0);
                     vtext(&format!("PURGATORY  {:.0}", left.ceil()), sw * 0.5, by + 28.0 * u, 20.0 * u, alpha(pal.accent, pulse), 0);
-                } else if w.heart.form != HeartForm::Core {
-                    vtext(w.heart.form.name(), bx + bw + 12.0 * u, by + 7.0 * u, 16.0 * u, alpha(pal.accent, 0.9), -1);
-                    if w.form_banner > 0.0 {
-                        let a = (w.form_banner * 5.0).min(1.0);
-                        text_shadow(w.heart.form.hint(), sw * 0.5, by + 26.0 * u, 20.0 * u, alpha(WHITE, 0.9 * a), 0);
+                    if w.last_dive > 0 {
+                        let next = if w.heart_will_return() { "a new Heart is rising" } else { "the song is nearly over" };
+                        text_shadow(&format!("dived +{}: {next}", w.last_dive), sw * 0.5, by + 52.0 * u, 18.0 * u, alpha(WHITE, 0.75), 0);
+                    }
+                } else {
+                    // The Heart's clock: the song. Break it before a mark for a deeper dive.
+                    let cy = by + 13.0 * u;
+                    let k = w.heart_clock();
+                    let dive = w.dive_now();
+                    let dc = match dive {
+                        3 => pal.accent,
+                        2 => pal.primary,
+                        _ => alpha(WHITE, 0.8),
+                    };
+                    line(vec2(bx, cy), vec2(bx + bw, cy), 1.0 * u, alpha(WHITE, 0.16));
+                    line(vec2(bx, cy), vec2(bx + bw * k, cy), 2.0 * u, alpha(dc, 0.85));
+                    for (mark, n) in [(crate::game::DIVE_S, 3), (crate::game::DIVE_A, 2)] {
+                        let fx = bx + bw * mark;
+                        let open = k <= mark;
+                        // the next mark to beat throbs as the clock closes on it
+                        let near = open && mark - k < 0.08;
+                        let a = if open { 0.9 } else { 0.25 } * if near { 0.6 + 0.4 * (self.time * 9.0).sin().abs() } else { 1.0 };
+                        line(vec2(fx, cy - 5.0 * u), vec2(fx, cy + 5.0 * u), if open { 2.0 } else { 1.0 } * u, alpha(WHITE, a));
+                        text_shadow(&format!("+{n}"), fx - 5.0 * u, cy + 17.0 * u, 14.0 * u, alpha(WHITE, a * 0.9), 1);
+                    }
+                    diamond_fill(vec2(bx + bw * k, cy), 3.5 * u, dc);
+                    vtext(&format!("DIVE +{dive}"), bx + bw + 12.0 * u, by + 27.0 * u, 15.0 * u, dc, -1);
+                    if w.heart.form != HeartForm::Core {
+                        vtext(w.heart.form.name(), bx + bw + 12.0 * u, by + 7.0 * u, 16.0 * u, alpha(pal.accent, 0.9), -1);
+                        if w.form_banner > 0.0 {
+                            let a = (w.form_banner * 5.0).min(1.0);
+                            text_shadow(w.heart.form.hint(), sw * 0.5, by + 52.0 * u, 20.0 * u, alpha(WHITE, 0.9 * a), 0);
+                        }
                     }
                 }
             }
@@ -5008,10 +5025,11 @@ impl Renderer {
             // Section label
             let label = section_label(w.section_kind);
             vtext(label, sw - m, m + 26.0 * u, 26.0 * u, pal.secondary, 1);
-            if info.bpm > 1.0 {
-                let depth = if w.song_idx > 0 { format!("DEPTH {}   ", w.song_idx + 1) } else { String::new() };
-                text_shadow(&format!("{depth}{:.0} BPM", info.bpm), sw - m, m + 52.0 * u, 20.0 * u, alpha(WHITE, 0.6), 1);
-            }
+            // Depth: the run's goal, always in view.
+            let bpm_s = if info.bpm > 1.0 { format!("{:.0} BPM", info.bpm) } else { String::new() };
+            text_shadow(&bpm_s, sw - m, m + 52.0 * u, 20.0 * u, alpha(WHITE, 0.6), 1);
+            let gap = if bpm_s.is_empty() { 0.0 } else { text_w(&bpm_s, 20.0 * u) + 18.0 * u };
+            vtext(&format!("DEPTH {}", w.depth + 1), sw - m - gap, m + 54.0 * u, 26.0 * u, pal.accent, 1);
             // Musical layers driving attacks right now: lit = armed.
             if w.armed != 0 {
                 const NAMES: [&str; 6] = ["BEAT", "BASS", "SNARE", "HATS", "LEAD", "CHIME"];

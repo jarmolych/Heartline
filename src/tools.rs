@@ -42,8 +42,11 @@ pub struct SimOut {
     /// (seconds spent, hits taken) per section kind: Calm, Normal, Intense, Drop.
     pub by_kind: [(f32, u32); 4],
     pub heart_broken: Option<f32>,
-    /// Heart phases broken early.
-    pub breaks: u32,
+    /// Every time the run went deeper: (song time, depths). A Heart that escaped is the +1 at
+    /// the end.
+    pub dives: Vec<(f32, u32)>,
+    /// The first Heart of the song: depths its break took (0 = it escaped).
+    pub first_dive: u32,
     pub level: u32,
     pub kills: u32,
     pub max_bullets: usize,
@@ -97,13 +100,18 @@ pub fn simulate(an: &crate::analysis::Analysis, level: &crate::level::Level, dif
         }
         w.player.level = give;
     }
+    // `--song-idx N` stands for a later depth: two depths per song is a steady run
+    w.depth = song_idx * 2;
+    let depth0 = w.depth;
     w.begin_song(level.active_secs, song_idx, level.seed);
+    w.set_heart_window(0.0, level.duration, level.active_secs);
     w.gun = level.gun.clone();
     w.set_phases(&level.phases);
     w.beat_len = if level.bpm > 1.0 { 60.0 / level.bpm } else { 0.5 };
     let mut bot = DelayedBot::new(bot_delay);
     let dt = 1.0 / 120.0;
-    let mut out = SimOut { breaks: 0,
+    let mut last_depth = depth0;
+    let mut out = SimOut { dives: Vec::new(), first_dive: 0,
         first_death: None,
         deaths: 0,
         hit_times: Vec::new(),
@@ -167,6 +175,13 @@ pub fn simulate(an: &crate::analysis::Analysis, level: &crate::level::Level, dif
         if w.heart.broken && out.heart_broken.is_none() {
             out.heart_broken = Some(t);
         }
+        if w.depth != last_depth {
+            if out.dives.is_empty() && w.dived {
+                out.first_dive = w.depth - last_depth;
+            }
+            out.dives.push((t, w.depth - last_depth));
+            last_depth = w.depth;
+        }
         out.max_bullets = out.max_bullets.max(w.bullets.len());
         out.max_enemies = out.max_enemies.max(w.enemies.len());
         bullet_sum += w.bullets.len() as f64;
@@ -177,7 +192,10 @@ pub fn simulate(an: &crate::analysis::Analysis, level: &crate::level::Level, dif
     out.by_pat = w.stats.by_pat;
     out.by_tile = w.stats.by_tile;
     out.level = w.player.level;
-    out.breaks = w.stats.phases_broken;
+    if !w.dived && !w.ended {
+        // the level's end event did not fire inside the loop: the Heart still escapes
+        out.dives.push((t, 1));
+    }
     out.kills = w.stats.kills;
     out.mean_bullets = (bullet_sum / steps.max(1) as f64) as f32;
     out
@@ -198,6 +216,8 @@ fn sim_report(args: &Args) {
     println!("bot reaction delay {:.0} ms, {} run(s) per difficulty; death = first death time, the bot is revived to finish the song", args.bot_delay, args.runs.max(1));
     println!("{:<26} {:>4} {:>4} {:<6} {:>5} {:>4} {:>4} {:>19} {:>17} {:>5} {:>3} {:>3} {:>2}  hits per 30 s", "track", "dur", "bpm", "diff", "death", "dths", "hits", "hits/min C/N/I/D", "src b/e/t/l/w/h", "heart", "lvl", "bul", "en");
     let mut src_tot = [[0u32; 6]; 7];
+    // per tier: first Heart escaped / +1 / +2 / +3, and all depths gained
+    let mut dive_tot = [[0u32; 5]; 7];
     let mut pat_tot = [[0u32; 12]; 7];
     let mut tile_tot = [[0u32; 9]; 7];
     let mut totals = [(0u32, 0u32, 0.0f32, 0.0f32); 7];
@@ -217,8 +237,14 @@ fn sim_report(args: &Args) {
             for run in 0..args.runs.max(1) {
                 let level = crate::level::generate(&loaded.an, args.seed + run as u64, diff);
                 let o = simulate(&loaded.an, &level, diff, delay, args.song_idx, args.give);
-                if args.give > 0 {
-                    println!("    with {} upgrades: {} phase(s) broken early, heart broken at {:?}", args.give, o.breaks, o.heart_broken.map(|t| t as i32));
+                {
+                    let ds: Vec<String> = o.dives.iter().map(|d| format!("+{}@{:.0}s", d.1, d.0)).collect();
+                    println!("    dives: {}  (first Heart: {})", ds.join(" "), if o.first_dive == 0 { "escaped".to_string() } else { format!("+{}", o.first_dive) });
+                }
+                {
+                    let dt = &mut dive_tot[di];
+                    dt[o.first_dive.min(3) as usize] += 1;
+                    dt[4] += o.dives.iter().map(|d| d.1).sum::<u32>();
                 }
                 let per_min = |k: usize| -> String {
                     let (secs, hits) = o.by_kind[k];
@@ -278,6 +304,8 @@ fn sim_report(args: &Args) {
                 frac / n as f32,
                 src_tot[di]
             );
+            let dv = dive_tot[di];
+            println!("       first Heart: escaped {}  +1 {}  +2 {}  +3 {}   depths per song {:.2}", dv[0], dv[1], dv[2], dv[3], dv[4] as f32 / n as f32);
             println!("       bullet hits by pattern ring/fan/spiral/cross/flower/arc/wall/burst/pincer/dart/orbiter/elite {:?}", pat_tot[di]);
             println!("       tile hits by checker/rows/cols/ring/cross/diag/scatter/colband/rowband {:?}", tile_tot[di]);
         }

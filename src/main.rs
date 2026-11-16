@@ -431,7 +431,6 @@ enum Demo {
     Charge,
     Finale,
     Purgatory,
-    Rage,
     Relocation,
     Enemy(EnemyKind),
     Pattern(Pattern),
@@ -484,7 +483,7 @@ fn codex_items(tab: usize) -> Vec<CodexItem> {
                 Demo::Form(SectionKind::Drop),
                 Demo::Finale,
                 Demo::Purgatory,
-                Demo::Rage,
+                Demo::Form(SectionKind::Drop),
                 Demo::Relocation,
                 Demo::Form(SectionKind::Normal),
             ];
@@ -519,11 +518,11 @@ fn codex_items(tab: usize) -> Vec<CodexItem> {
 /// Milestones: (id kept in the scores file, name, how to earn it).
 const MILESTONES: [(&str, &str, &str); 12] = [
     ("heart", "HEARTBREAKER", "Break a Heart."),
-    ("depth3", "GOING DEEPER", "Reach depth 3 in one run."),
-    ("depth5", "THE ABYSS", "Reach depth 5 in one run."),
+    ("depth3", "GOING DEEPER", "Reach depth 5 in one run."),
+    ("depth5", "THE ABYSS", "Reach depth 10 in one run."),
     ("clean", "UNTOUCHED", "Clear a track without taking a hit."),
     ("graze", "PAPER THIN", "Graze 150 bullets in one run."),
-    ("breaker", "IMPATIENT", "Break five Heart phases early in one run."),
+    ("breaker", "IMPATIENT", "Break five Hearts in one run."),
     ("resonant", "IN TUNE", "Set resonance ringing three times in one run."),
     ("glass", "GLASS CANNON", "Clear a track with the GLASS mutator on."),
     ("flatline", "FLATLINER", "Clear a track on FLATLINE."),
@@ -532,14 +531,14 @@ const MILESTONES: [(&str, &str, &str); 12] = [
     ("jumps", "PERFECT TIMING", "Land 20 perfect jumps in one Highway road."),
 ];
 const CODEX_HEART: [(&str, &str); 10] = [
-    ("CHARGE", "While the body of the Heart can be hurt, a charge appears far from it. Carry it into the ring around the Heart to take a fifth of the phase at once. A hit knocks it loose."),
-    ("SHELL", "Calm sections. The Heart is immune: break the three shield nodes circling the arena."),
+    ("CHARGE", "While the body of the Heart can be hurt, a charge appears far from it. Carry it into the ring around the Heart to take a tenth of its health at once. A hit knocks it loose."),
+    ("SHELL", "Calm sections. The Heart's body is immune: break the three shield nodes circling the arena. With all three down before the section ends, it stands exposed."),
     ("VALVE", "Groove sections. It opens for the first half of every bar; while shut, shots do a fifth."),
-    ("SPLIT", "Surge sections. Three linked cores orbit it and only the lit one can be hurt. Break them in order."),
+    ("SPLIT", "Surge sections. Three linked cores orbit it and only the lit one can be hurt. Break them in order; with all three down it stands exposed until the section changes."),
     ("OVERDRIVE", "Drops. Exposed, taking half again as much damage, and it charges down a lit lane: step out of it."),
     ("FINALE", "The last section of a song. Every pulse has an echo half a beat later, made of shootable notes."),
-    ("PURGATORY", "Break a phase before its section ends and everything becomes shootable for up to nine seconds."),
-    ("RAGE", "Each early break grows what is left of the Heart and adds a tenth to the pressure for that song."),
+    ("PURGATORY", "When the Heart breaks, everything hostile becomes shootable for ten seconds or more and your rewards are on the field. Then a new Heart rises at the depth you dived to."),
+    ("THE DIVE", "Depth is the goal. Every Heart has a clock: the song. Break it with half the clock left and you go three depths down with five rewards; with a quarter left, two depths and three rewards; later, one and one. Never break it and you sink one depth with nothing."),
     ("RELOCATION", "From PULSE up it moves on bar lines. A ring shows where; it holds its fire on the way."),
     ("BEAT RING", "The ticked ring around the Heart. Every pulse is timed to cross it on a beat."),
 ];
@@ -564,7 +563,7 @@ const CODEX_MUSIC: [(&str, &str); 10] = [
     ("EAR CANDY", "A flourish the song rarely plays: a comet trailing shards, a keypad of shards, or a sprite."),
     ("GRAZE", "Slip past a bullet at close range without being hit: score, combo, and it feeds resonance. Dash straight through one for a THREAD, worth three."),
     ("RESONANCE", "The meter under the combo bar. Full, it rings for eight seconds: more damage, double score."),
-    ("GRADES", "Calm sections, purgatory and a cleared track grade you from C to S. Better grades offer more, and rarer, upgrades."),
+    ("GRADES", "Calm sections grade you from C to S on the hits you took and your combo since the last one. Better grades offer more, and rarer, upgrades."),
 ];
 const MENU_ROWS: [(Icon, &str, &str); 6] = [
     (Icon::Play, "PLAY", "Set up a run on the track that is playing: the mode, the difficulty, mutators."),
@@ -582,7 +581,7 @@ const S_DIFF: usize = 3;
 const S_MUT: usize = 4;
 const S_START: usize = 5;
 const SETUP_MODES: [(Icon, &str, &str); 5] = [
-    (Icon::Endless, "ENDLESS", "This track, then the library keeps coming. HP, upgrades and score carry over until you fall."),
+    (Icon::Endless, "ENDLESS", "This track, then the library keeps coming. Break each Heart to dive: depth, HP and upgrades carry over until you fall."),
     (Icon::Single, "SINGLE", "Just this song. You can still carry on into more songs from the results screen."),
     (Icon::Calendar, "DAILY", "An endless run on today's seed. The same songs give everyone the same levels and upgrade offers today."),
     (Icon::Bolt, "DROP RUSH", "Every track is cut down to its biggest section. Short, dense, endless."),
@@ -1166,7 +1165,7 @@ impl App {
         w.beat_len = bl;
         let kind = match demo {
             Demo::Form(k) => k,
-            Demo::Charge | Demo::Finale | Demo::Purgatory | Demo::Rage | Demo::Upgrade(_) => SectionKind::Drop,
+            Demo::Charge | Demo::Finale | Demo::Purgatory | Demo::Upgrade(_) => SectionKind::Drop,
             Demo::Relocation => SectionKind::Intense,
             _ => SectionKind::Normal,
         };
@@ -1174,11 +1173,11 @@ impl App {
         // a steady gun on the beat grid, so the player in the showcase can shoot back
         let step = bl.clamp(0.3, 1.0);
         w.gun = [1.0f32, 2.0, 4.0, 4.0, 8.0].iter().map(|d| (0..8000).map(|i| i as f32 * step / d).collect()).collect();
-        match demo {
-            Demo::Upgrade(up) => w.player.ups[up as usize] = up.max(),
-            Demo::Rage => w.rage = 4,
-            _ => {}
+        if let Demo::Upgrade(up) = demo {
+            w.player.ups[up as usize] = up.max();
         }
+        // the showcase is one long song, so its Heart's clock never runs out
+        w.set_heart_window(0.0, 900.0, 900.0);
         self.world = w;
         self.show_demo = demo;
         self.show_t = 0.0;
@@ -1219,7 +1218,7 @@ impl App {
         let mut gap = 4.0;
         match demo {
             Demo::None => {}
-            Demo::Form(_) | Demo::Charge | Demo::Finale | Demo::Purgatory | Demo::Rage | Demo::Relocation => {
+            Demo::Form(_) | Demo::Charge | Demo::Finale | Demo::Purgatory | Demo::Relocation => {
                 let p = [Pattern::Ring, Pattern::Fan, Pattern::Arc, Pattern::Flower][n % 4];
                 w.apply(&ev(pulse(p, 14, n), 0.0));
                 gap = 2.0;
@@ -1470,14 +1469,14 @@ impl App {
     fn check_milestones(&mut self) {
         let st = self.world.stats;
         let cleared = st.songs >= 1;
-        let depth = self.world.song_idx + 1;
+        let depth = self.world.depth + 1;
         let mut got: Vec<&str> = Vec::new();
         if st.hearts_broken >= 1 { got.push("heart"); }
-        if depth >= 3 { got.push("depth3"); }
-        if depth >= 5 { got.push("depth5"); }
+        if depth >= 5 { got.push("depth3"); }
+        if depth >= 10 { got.push("depth5"); }
         if cleared && st.hits == 0 { got.push("clean"); }
         if st.grazes >= 150 { got.push("graze"); }
-        if st.phases_broken >= 5 { got.push("breaker"); }
+        if st.hearts_broken >= 5 { got.push("breaker"); }
         if st.resonances >= 3 { got.push("resonant"); }
         if cleared && self.world.base_mods & game::MOD_GLASS != 0 { got.push("glass"); }
         if cleared && self.diff == DIFFS.len() - 1 { got.push("flatline"); }
@@ -1643,8 +1642,9 @@ impl App {
             return;
         }
         self.check_milestones();
-        let (score, depth) = (self.world.score, self.world.song_idx + 1);
-        if self.scores.get(&self.run_key).map_or(true, |b| score > b.0) && score > 0 {
+        let (score, depth) = (self.world.score, self.world.depth + 1);
+        // Depth is the goal: a deeper run is the better one, score breaks ties.
+        if self.scores.get(&self.run_key).map_or(true, |b| depth > b.1 || (depth == b.1 && score > b.0)) && score > 0 {
             self.run_best = true;
             self.scores.insert(self.run_key.clone(), (score, depth));
             if let Some(path) = scores_path() {
@@ -1860,7 +1860,6 @@ impl App {
             self.qi = self.queue.len() - 1;
             self.juke.playing = false;
             self.audio.stop();
-            self.world.spawn_reward(22.0);
             self.screen = Screen::Play;
             self.phase = Phase::Intermission(0.0);
         }
@@ -1893,6 +1892,16 @@ impl App {
             }
         }
         self.world.begin_song(active, self.qi as u32, loaded.level.seed);
+        // The Heart's clock is this song (or, in DROP RUSH, the part of it that is played).
+        let due = if end_t < f32::MAX { end_t } else { loaded.level.duration };
+        if start > 0.0 && end_t == f32::MAX {
+            // started part-way in (a debug start): the Heart is sized for what is left
+            active *= ((due - start) / due.max(1.0)).clamp(0.05, 1.0);
+            let hp = self.world.heart.max_hp * ((due - start) / due.max(1.0)).clamp(0.05, 1.0);
+            self.world.heart.hp = hp;
+            self.world.heart.max_hp = hp;
+        }
+        self.world.set_heart_window(start, due, active);
         self.world.gun = loaded.level.gun.clone();
         if !self.world.pacifist {
             self.world.set_phases(&loaded.level.phases);
@@ -2070,7 +2079,6 @@ impl App {
                     self.qi += 1;
                     self.song = None;
                     if self.qi < self.queue.len() {
-                        self.world.spawn_reward(22.0);
                         self.phase = Phase::Intermission(0.0);
                     } else {
                         self.screen = Screen::Results;
@@ -4011,8 +4019,9 @@ async fn run(args: Args) {
                 match app.scores.get(&key).copied() {
                     Some((s, d)) => {
                         ui::icon(Icon::Trophy, cx0 + 20.0 * u, ry + row_h * 0.5, 15.0 * u, pal.accent);
-                        text_left(&format!("{s}"), cx0 + 48.0 * u, ry + row_h * 0.5 + 11.0 * u, 32.0 * u, WHITE);
-                        text_left(&format!("depth {d}"), cx0 + 62.0 * u + text_w(&format!("{s}"), 32.0 * u), ry + row_h * 0.5 + 8.0 * u, 20.0 * u, dim_w(0.6));
+                        let ds = format!("DEPTH {d}");
+                        text_left(&ds, cx0 + 48.0 * u, ry + row_h * 0.5 + 11.0 * u, 32.0 * u, WHITE);
+                        text_left(&format!("score {s}"), cx0 + 62.0 * u + text_w(&ds, 32.0 * u), ry + row_h * 0.5 + 8.0 * u, 20.0 * u, dim_w(0.6));
                     }
                     None => text_left("none yet for this track, tier and mode", cx0 + 4.0 * u, ry + row_h * 0.5 + 8.0 * u, 20.0 * u, dim_w(0.55)),
                 }
@@ -4439,15 +4448,19 @@ async fn run(args: Args) {
                 ui::panel(px, py, pw, ph, u);
                 let hcol = if app.died { pal.danger } else { pal.accent };
                 render::vtext(if app.died { "SIGNAL LOST" } else { "RUN COMPLETE" }, sw * 0.5, py + 86.0 * u, 62.0 * u, hcol, 0);
-                text_center(&format!("{:08}", app.world.score), sw * 0.5, py + 196.0 * u, 96.0 * u, WHITE);
-                let rank = if app.died {
-                    "C"
-                } else if st.hits == 0 && st.hearts_broken >= st.songs.max(1) {
+                let depth = app.world.depth + 1;
+                text_center(&format!("DEPTH {depth}"), sw * 0.5, py + 180.0 * u, 88.0 * u, WHITE);
+                text_center(&format!("{:08}", app.world.score), sw * 0.5, py + 224.0 * u, 32.0 * u, dim_w(0.7));
+                // the rank is how fast the run went down: depths per track
+                let pace = app.world.depth as f32 / st.songs.max(1) as f32;
+                let rank = if pace >= 2.5 {
                     "S"
-                } else if st.hearts_broken >= st.songs.max(1) {
+                } else if pace >= 1.75 {
                     "A"
-                } else {
+                } else if pace >= 1.0 && !(app.died && st.songs == 0) {
                     "B"
+                } else {
+                    "C"
                 };
                 // the rank in its own tile, the multiplier and the best on the other side
                 let rs = 104.0 * u;
@@ -4461,8 +4474,8 @@ async fn run(args: Args) {
                 if app.run_best {
                     let pulse = 0.7 + 0.3 * (app.rend.time * 6.0).sin();
                     text_left("NEW BEST", px + pad + 42.0 * u, py + 158.0 * u, 30.0 * u, Color::new(pal.accent.r, pal.accent.g, pal.accent.b, pulse));
-                } else if let Some((s, _)) = app.scores.get(&app.run_key) {
-                    text_left(&format!("best {s}"), px + pad + 42.0 * u, py + 156.0 * u, 24.0 * u, dim_w(0.7));
+                } else if let Some((_, d)) = app.scores.get(&app.run_key) {
+                    text_left(&format!("best depth {d}"), px + pad + 42.0 * u, py + 156.0 * u, 24.0 * u, dim_w(0.7));
                 } else {
                     text_left("no best kept", px + pad + 42.0 * u, py + 156.0 * u, 22.0 * u, dim_w(0.5));
                 }
@@ -4475,7 +4488,7 @@ async fn run(args: Args) {
                     (Icon::Target, "enemies destroyed", format!("{}", st.kills)),
                     (Icon::Sfx, "notes shot down", format!("{}", st.notes_shot)),
                     (Icon::Visuals, "grazes  (threads)", format!("{}  ({})", st.grazes, st.threads)),
-                    (Icon::Bolt, "phases broken early", format!("{}", st.phases_broken)),
+                    (Icon::Bolt, "extra depths dived", format!("{}", st.dives)),
                     (Icon::Shard, "shards collected", format!("{}", st.shards)),
                     (Icon::Combo, "best combo", format!("{:.0}", st.max_combo)),
                     (Icon::Cross, "hits taken", format!("{}", st.hits)),
@@ -4747,7 +4760,7 @@ async fn run(args: Args) {
                         }
                     } else {
                         let mut rows: Vec<(&String, &(u64, u32))> = app.scores.iter().filter(|(k, _)| !k.starts_with("ACH|")).collect();
-                        rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+                        rows.sort_by(|a, b| (b.1 .1, b.1 .0).cmp(&(a.1 .1, a.1 .0)));
                         if rows.is_empty() {
                             text_left("No scores yet. Finish a run or a Highway road and it will be kept here.", x, y0, 24.0 * u, soft);
                         }
