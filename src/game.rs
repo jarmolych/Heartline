@@ -61,10 +61,19 @@ pub enum UpgradeId {
     Coda,
     /// A dash started on the beat costs no cooldown.
     Syncope,
+    /// Endless: more shot damage every time it is taken.
+    Fortissimo,
+    /// Endless: a full heal and a shield.
+    DaCapo,
+    /// Endless: more score every time it is taken.
+    Bravo,
 }
 
 /// Number of upgrades (`Player::ups` is indexed by `UpgradeId as usize`).
-pub const N_UPGRADES: usize = 19;
+pub const N_UPGRADES: usize = 22;
+/// Shot damage per FORTISSIMO and score per BRAVO.
+const FORTISSIMO_DMG: f32 = 0.08;
+const BRAVO_SCORE: f32 = 0.10;
 
 impl UpgradeId {
     pub const ALL: [UpgradeId; N_UPGRADES] = [
@@ -87,7 +96,15 @@ impl UpgradeId {
         UpgradeId::Accent,
         UpgradeId::Coda,
         UpgradeId::Syncope,
+        UpgradeId::Fortissimo,
+        UpgradeId::DaCapo,
+        UpgradeId::Bravo,
     ];
+    /// Endless upgrades have no top level. They only turn up in an offer once the ordinary
+    /// ones cannot fill it, so a deep run never runs out of things to take.
+    pub fn endless(self) -> bool {
+        matches!(self, UpgradeId::Fortissimo | UpgradeId::DaCapo | UpgradeId::Bravo)
+    }
     /// Rare upgrades are only offered for an A or S grade (`World::spawn_reward`).
     pub fn rare(self) -> bool {
         matches!(self, UpgradeId::Ricochet | UpgradeId::Downbeat | UpgradeId::Transpose | UpgradeId::Orbit)
@@ -113,6 +130,9 @@ impl UpgradeId {
             UpgradeId::Accent => "ACCENT",
             UpgradeId::Coda => "CODA",
             UpgradeId::Syncope => "SYNCOPE",
+            UpgradeId::Fortissimo => "FORTISSIMO",
+            UpgradeId::DaCapo => "DA CAPO",
+            UpgradeId::Bravo => "BRAVO",
         }
     }
     pub fn desc(self) -> &'static str {
@@ -136,6 +156,9 @@ impl UpgradeId {
             UpgradeId::Accent => "chance for a shot to hit 2.5x as hard",
             UpgradeId::Coda => "breaking a Heart heals you",
             UpgradeId::Syncope => "a dash on the beat has no cooldown",
+            UpgradeId::Fortissimo => "+8% shot damage, no limit",
+            UpgradeId::DaCapo => "full heal and a shield",
+            UpgradeId::Bravo => "+10% score, no limit",
         }
     }
     pub fn max(self) -> u8 {
@@ -159,7 +182,21 @@ impl UpgradeId {
             UpgradeId::Accent => 3,
             UpgradeId::Coda => 2,
             UpgradeId::Syncope => 2,
+            UpgradeId::Fortissimo | UpgradeId::DaCapo | UpgradeId::Bravo => 250,
         }
+    }
+}
+
+/// The name of the water at `depth` (as shown, from 1): the run has no last level, so how far
+/// down it got is what it achieved.
+pub fn zone_name(depth: u32) -> &'static str {
+    match depth {
+        0..=4 => "THE SHALLOWS",
+        5..=9 => "TWILIGHT",
+        10..=19 => "MIDNIGHT",
+        20..=29 => "THE ABYSS",
+        30..=44 => "THE TRENCH",
+        _ => "NO LIGHT",
     }
 }
 
@@ -787,6 +824,8 @@ pub struct World {
     pub feat: Feat,
     pub rng: Rng,
     pub no_fail: bool,
+    /// The run has ended and its result is on screen: nothing scores any more.
+    pub over: bool,
     /// How deep the run is (0 at the start; shown as `depth + 1`). The goal of a run, and its
     /// difficulty. Breaking a Heart takes it down by one to three; a song whose Heart is never
     /// broken takes it down by one anyway.
@@ -946,6 +985,7 @@ impl World {
             feat: Feat::default(),
             rng: Rng::new(0x51AB_C0DE),
             no_fail,
+            over: false,
             depth: 0,
             heart_t0: 0.0,
             heart_due: 1.0,
@@ -1110,6 +1150,7 @@ impl World {
         let p = &self.player;
         let tempo = (p.up(UpgradeId::Tempo) as usize).min(GUN_INTERVALS.len() - 1);
         (1.0 + 0.5 * p.up(UpgradeId::Gain) as f32)
+            * (1.0 + FORTISSIMO_DMG * p.up(UpgradeId::Fortissimo) as f32)
             * (1.0 + 0.7 * p.up(UpgradeId::Chord) as f32)
             * (GUN_INTERVALS[0] / GUN_INTERVALS[tempo])
             * (1.0 + 0.2 * p.up(UpgradeId::Echo) as f32)
@@ -1248,7 +1289,10 @@ impl World {
         self.heart.nodes.clear();
         if form.has_nodes() {
             let a0 = self.rng.angle();
-            let hp = self.heart.phase_max / 3.0;
+            // Split's cores come one at a time and only the lit one can be hurt, so they hold
+            // less than a Shell's nodes: a long surge must not turn into a wall of health.
+            let (part, cap) = if form == HeartForm::Split { (0.5, 0.15) } else { (0.8, 0.27) };
+            let hp = (self.heart.phase_max * part).min(self.heart.max_hp * cap) / 3.0;
             for k in 0..3 {
                 self.heart.nodes.push(Node { ang: a0 + k as f32 * TAU / 3.0, hp, max_hp: hp, flash: 0.0 });
             }
@@ -1323,10 +1367,10 @@ impl World {
 
     /// Give a random open common upgrade (part of a fast dive's reward).
     fn free_upgrade(&mut self, k: usize) {
-        let pool: Vec<UpgradeId> = UpgradeId::ALL.iter().copied().filter(|u| !u.rare() && self.player.up(*u) < u.max()).collect();
+        let mut pool: Vec<UpgradeId> = UpgradeId::ALL.iter().copied().filter(|u| !u.rare() && !u.endless() && self.player.up(*u) < u.max()).collect();
         if pool.is_empty() {
-            self.drop_shards(vec2(0.0, 230.0), 8, false);
-            return;
+            // everything ordinary is maxed: the free one is damage or score
+            pool = vec![UpgradeId::Fortissimo, UpgradeId::Bravo];
         }
         let up = pool[self.rng.below(pool.len())];
         self.apply_upgrade(up);
@@ -1518,8 +1562,13 @@ impl World {
     }
 
     fn add_score(&mut self, base: f32) {
+        // The run is over (the results screen is up): the scene still moves, the score does not.
+        if self.over {
+            return;
+        }
         let res = if self.res_t > 0.0 { RESONANCE_SCORE } else { 1.0 };
-        self.score += (base * self.mult() * self.score_mult * res).round().max(0.0) as u64;
+        let bravo = 1.0 + BRAVO_SCORE * self.player.up(UpgradeId::Bravo) as f32;
+        self.score += (base * self.mult() * self.score_mult * res * bravo).round().max(0.0) as u64;
     }
 
     /// The charge: offered while the body of the Heart can be hurt, picked up by touch,
@@ -1927,7 +1976,7 @@ impl World {
         self.enemies.retain(|e| e.hp > -0.5);
         // Echo drones fire on every beat at the nearest target.
         let n = self.player.drones();
-        let dmg = (1.0 + 0.5 * self.player.up(UpgradeId::Gain) as f32) * (self.beat_len / 0.5).clamp(0.5, 2.0);
+        let dmg = (1.0 + 0.5 * self.player.up(UpgradeId::Gain) as f32) * (1.0 + FORTISSIMO_DMG * self.player.up(UpgradeId::Fortissimo) as f32) * (self.beat_len / 0.5).clamp(0.5, 2.0);
         for k in 0..n {
             let from = self.player.drone_pos(k);
             let mut target = self.heart_target(from);
@@ -2070,7 +2119,7 @@ impl World {
 
     /// Announce the depth the run has reached (call after `begin_song`).
     pub fn announce_depth(&mut self, title: &str) {
-        self.text(vec2(0.0, -170.0), &format!("DEPTH {}", self.depth + 1), C_ACCENT, 58.0, 3.2);
+        self.text(vec2(0.0, -170.0), &format!("DEPTH {}   {}", self.depth + 1, zone_name(self.depth + 1)), C_ACCENT, 50.0, 3.2);
         self.text(vec2(0.0, -126.0), title, C_WHITE, 24.0, 3.2);
     }
 
@@ -2123,7 +2172,7 @@ impl World {
             return;
         }
         let open = |u: &UpgradeId| self.player.up(*u) < u.max();
-        let mut pool: Vec<UpgradeId> = UpgradeId::ALL.iter().copied().filter(|u| !u.rare() && open(u)).collect();
+        let mut pool: Vec<UpgradeId> = UpgradeId::ALL.iter().copied().filter(|u| !u.rare() && !u.endless() && open(u)).collect();
         let rares: Vec<UpgradeId> = UpgradeId::ALL.iter().copied().filter(|u| u.rare() && open(u)).collect();
         let mut picks: Vec<(UpgradeId, bool)> = Vec::new();
         if rare && !rares.is_empty() {
@@ -2132,6 +2181,12 @@ impl World {
         while picks.len() < choices && !pool.is_empty() {
             let i = self.rng.below(pool.len());
             picks.push((pool.swap_remove(i), false));
+        }
+        // Everything ordinary is at its top level (or nearly): the endless ones fill the offer.
+        let mut spare: Vec<UpgradeId> = UpgradeId::ALL.iter().copied().filter(|u| u.endless() && open(u)).collect();
+        while picks.len() < choices && !spare.is_empty() {
+            let i = self.rng.below(spare.len());
+            picks.push((spare.swap_remove(i), false));
         }
         if picks.is_empty() {
             self.drop_shards(vec2(0.0, 250.0), 10, true);
@@ -2158,6 +2213,10 @@ impl World {
             }
             UpgradeId::Phase => p.dash_cd_max = 1.1 * 0.75f32.powi(p.ups[up as usize] as i32),
             UpgradeId::Encore => p.shield = true,
+            UpgradeId::DaCapo => {
+                p.hp = p.max_hp;
+                p.shield = true;
+            }
             _ => {}
         }
         // Every upgrade also patches you up a little.
@@ -2662,7 +2721,7 @@ impl World {
         let p = &mut self.player;
         let bounce = p.ups[UpgradeId::Ricochet as usize];
         let n = 1 + p.ups[UpgradeId::Chord as usize] as usize;
-        let dmg = (1.0 + 0.5 * p.ups[UpgradeId::Gain as usize] as f32) * scale * res_boost;
+        let dmg = (1.0 + 0.5 * p.ups[UpgradeId::Gain as usize] as f32) * (1.0 + FORTISSIMO_DMG * p.ups[UpgradeId::Fortissimo as usize] as f32) * scale * res_boost;
         let pierce = p.ups[UpgradeId::Pierce as usize];
         let base = p.aim_dir.y.atan2(p.aim_dir.x);
         p.muzzle = scale.clamp(0.7, 1.6);

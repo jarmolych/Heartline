@@ -4946,7 +4946,8 @@ impl Renderer {
             for up in UpgradeId::ALL.iter().rev() {
                 let lvl = w.player.up(*up);
                 if lvl > 0 {
-                    text_shadow(&format!("{} {}", up.name(), roman(lvl)), sw - m, uy, 20.0 * u, alpha(pal.accent, 0.85), 1);
+                    let lv = if lvl <= 6 { roman(lvl).to_string() } else { format!("x{lvl}") };
+                    text_shadow(&format!("{} {lv}", up.name()), sw - m, uy, 20.0 * u, alpha(pal.accent, 0.85), 1);
                     uy -= 22.0 * u;
                 }
             }
@@ -5487,6 +5488,31 @@ pub fn upgrade_emblem(up: UpgradeId, c: Vec2, r: f32, th: f32, col: Color, col2:
             l(p(-0.4, 0.0), p(0.9, 0.0));
             l(p(0.45, -0.4), p(0.9, 0.0));
             l(p(0.45, 0.4), p(0.9, 0.0));
+        }
+        // FORTISSIMO: three rising accents
+        UpgradeId::Fortissimo => {
+            for (k, x) in [-0.7f32, 0.0, 0.7].iter().enumerate() {
+                let h = 0.35 + 0.3 * k as f32;
+                l(p(x - 0.28, h), p(*x, -h));
+                l(p(*x, -h), p(x + 0.28, h));
+            }
+        }
+        // DA CAPO: the repeat sign
+        UpgradeId::DaCapo => {
+            line(p(-0.75, -0.9), p(-0.75, 0.9), th * 1.8, col);
+            l(p(-0.4, -0.9), p(-0.4, 0.9));
+            disc(p(0.1, -0.35), r * 0.16, 8, col2);
+            disc(p(0.1, 0.35), r * 0.16, 8, col2);
+            arc(p(0.35, 0.0), r * 0.55, -PI * 0.5, PI * 0.5, th, col2);
+        }
+        // BRAVO: a star
+        UpgradeId::Bravo => {
+            let _ = time;
+            for k in 0..5 {
+                let a0 = -PI * 0.5 + k as f32 * TAU / 5.0;
+                let a1 = a0 + 2.0 * TAU / 5.0;
+                l(c + dir(a0) * r * 0.95, c + dir(a1) * r * 0.95);
+            }
         }
     }
 }

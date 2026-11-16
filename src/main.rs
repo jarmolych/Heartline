@@ -507,7 +507,13 @@ fn codex_items(tab: usize) -> Vec<CodexItem> {
         3 => UpgradeId::ALL
             .iter()
             .map(|up| {
-                let lv = if up.max() > 1 { format!("levels 1-{}", up.max()) } else { "one level".to_string() };
+                let lv = if up.endless() {
+                    "no limit, offered once the others are maxed".to_string()
+                } else if up.max() > 1 {
+                    format!("levels 1-{}", up.max())
+                } else {
+                    "one level".to_string()
+                };
                 mk(up.name(), &format!("{}upgrade, {lv}", if up.rare() { "rare " } else { "" }), up.desc(), Demo::Upgrade(*up))
             })
             .collect(),
@@ -3709,6 +3715,7 @@ async fn run(args: Args) {
         let codex_live = app.screen == Screen::Codex && app.show_want != Demo::None;
         app.rend.show_shift = if codex_live { vec2(0.17, -0.045) } else { Vec2::ZERO };
         app.rend.show_zoom = if codex_live { 0.6 } else { 1.0 };
+        app.world.over = app.screen == Screen::Results;
         app.rend.update_view(&app.world);
 
         // ---- simulate ----
@@ -4446,9 +4453,12 @@ async fn run(args: Args) {
                 let (px, py) = (sw * 0.5 - pw * 0.5, sh * 0.5 - ph * 0.5 - 10.0 * u);
                 let pad = 30.0 * u;
                 ui::panel(px, py, pw, ph, u);
-                let hcol = if app.died { pal.danger } else { pal.accent };
-                render::vtext(if app.died { "SIGNAL LOST" } else { "RUN COMPLETE" }, sw * 0.5, py + 86.0 * u, 62.0 * u, hcol, 0);
                 let depth = app.world.depth + 1;
+                // A run has no last level: where it got to is the result, and a record is a win.
+                app.record_score();
+                let head = if app.run_best { "NEW RECORD" } else if app.died { "DESCENT OVER" } else { "RUN COMPLETE" };
+                render::vtext(head, sw * 0.5, py + 74.0 * u, 58.0 * u, pal.accent, 0);
+                text_center(&format!("you reached {}", game::zone_name(depth)), sw * 0.5, py + 108.0 * u, 22.0 * u, pal.primary);
                 text_center(&format!("DEPTH {depth}"), sw * 0.5, py + 180.0 * u, 88.0 * u, WHITE);
                 text_center(&format!("{:08}", app.world.score), sw * 0.5, py + 224.0 * u, 32.0 * u, dim_w(0.7));
                 // the rank is how fast the run went down: depths per track
