@@ -73,6 +73,10 @@ pub struct Args {
     screen: String,
     /// Debug: use this folder or playlist as the music library for this launch (not saved).
     library: Option<PathBuf>,
+    /// Report on the notes the player made while playing (`heartline-notes.txt`, or the file
+    /// given with `--notes-from`).
+    notes: bool,
+    notes_file: Option<PathBuf>,
     /// Debug: two seconds into the first song, trade it as if E (1) or Q (-1) was pressed.
     swap: i32,
     live_in: String,
@@ -124,6 +128,11 @@ fn parse_args() -> Args {
             "--ss" => a.ss = val().parse().ok(),
             "--give" => a.give = val().parse().unwrap_or(0),
             "--sim" => a.sim = true,
+            "--notes" => a.notes = true,
+            "--notes-from" => {
+                a.notes = true;
+                a.notes_file = Some(PathBuf::from(val()));
+            }
             "--sample" => a.sample = val().parse().unwrap_or(0),
             "--runs" => a.runs = val().parse().unwrap_or(1),
             "--bot-delay" => a.bot_delay = val().parse().unwrap_or(140.0),
@@ -251,7 +260,7 @@ fn main() {
         }
     }));
     let args = parse_args();
-    let cli = args.analyze.is_some() || args.gen_test.is_some() || args.live_probe.is_some() || args.sim;
+    let cli = args.analyze.is_some() || args.gen_test.is_some() || args.live_probe.is_some() || args.sim || args.notes;
     if cli {
         #[cfg(windows)]
         unsafe {
@@ -805,6 +814,19 @@ fn load_scores() -> std::collections::HashMap<String, (u64, u32)> {
     }
     m
 }
+
+/// Where the player's sync notes are kept (see `App::sync_note`).
+pub fn notes_path() -> Option<PathBuf> {
+    std::env::current_exe().ok().map(|e| e.with_file_name("heartline-notes.txt"))
+}
+
+/// The keys that take a note during a song: (key, what is written, what the player is told).
+const NOTE_KEYS: [(KeyCode, &str, &str); 4] = [
+    (KeyCode::T, "TAP", "tap"),
+    (KeyCode::G, "GOOD", "noted: the sync is good here"),
+    (KeyCode::B, "BAD", "noted: the sync is off here"),
+    (KeyCode::C, "CANDY", "noted: ear candy"),
+];
 
 fn settings_path() -> Option<PathBuf> {
     std::env::current_exe().ok().map(|e| e.with_file_name("heartline.cfg"))
@@ -1808,6 +1830,26 @@ impl App {
         self.args.seed.wrapping_add(laps.wrapping_mul(0xA24B_AED4_963E_E407))
     }
 
+    /// Write down a note the player made while playing: T taps along with what the attacks
+    /// should follow, G and B say the sync is good or off here, C marks ear candy as it sounds.
+    /// Each line says what, when in which song, and what the level was doing.
+    /// `heartline.exe --notes` reads them back against what the analysis heard.
+    fn sync_note(&mut self, kind: &str, said: &str, t: f32) {
+        let (Some(path), Some(song)) = (notes_path(), self.queue.get(self.qi)) else { return };
+        let w = &self.world;
+        let line = format!("{kind}\t{t:.3}\t{}\t{}\t{:?}\t{}\t{}\t{}\n", song.display(), w.section_idx, w.section_kind, w.armed, w.depth + 1, DIFFS[self.diff].1);
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = f.write_all(line.as_bytes());
+        }
+        let p = self.world.player.pos + vec2(0.0, -44.0);
+        if kind == "TAP" {
+            self.world.text(p, said, game::C_WHITE, 14.0, 0.3);
+        } else {
+            self.world.text(p, said, game::C_ACCENT, 20.0, 1.4);
+        }
+    }
+
     /// Trade the song that just started for another: forward (`dir` > 0) skips to what comes
     /// next, backward goes to the library track before it. The build, the score and the depth
     /// stay. Returns false when there is nothing to trade it for.
@@ -2017,6 +2059,15 @@ impl App {
                 (if self.qi == 0 && !self.load_in_arena { 1.0 } else { 0.0 }, hud, 0.0)
             }
             Phase::Song => {
+                // The player's own notes on the sync (see `sync_note`).
+                if self.args.selftest.is_none() {
+                    let tn = (self.audio.song_time() as f32 - self.offset_ms / 1000.0).max(0.0);
+                    for (key, kind, said) in NOTE_KEYS {
+                        if is_key_pressed(key) {
+                            self.sync_note(kind, said, tn);
+                        }
+                    }
+                }
                 // Not feeling this one? In its first seconds Q / E trade it for another.
                 self.song_age += dt;
                 let debug_swap = if self.args.swap != 0 && self.song_age > 2.0 { std::mem::take(&mut self.args.swap) } else { 0 };
@@ -4409,6 +4460,13 @@ async fn run(args: Args) {
             Screen::Paused => {
                 dim(0.55);
                 render::vtext("PAUSED", sw * 0.5, sh * 0.3, 80.0 * u, WHITE, 0);
+                // how to leave notes on the sync, where a paused player will see it
+                let ny = sh * 0.42 + 250.0 * u;
+                text_center("Help tune the sync while you play:", sw * 0.5, ny, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                let mut kx = sw * 0.5 - 520.0 * u;
+                for (k, what) in [("T", "tap along with what the attacks should follow"), ("G", "sync is good here"), ("B", "sync is off here"), ("C", "ear candy right now")] {
+                    kx = ui::keycap(k, what, kx, ny + 32.0 * u, u);
+                }
                 // Quitting throws the run away, so it takes a second press.
                 let live = app.live.is_some();
                 let quit_label = if app.quit_armed { "REALLY QUIT?  THE RUN IS LOST" } else { "QUIT TO MENU" };

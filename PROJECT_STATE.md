@@ -91,7 +91,20 @@ spots" first. The newest round (menu layout, skies, foregrounds, run flow) is
     floors removed; HUD clock and DEPTH, results and records by depth; builds
     `Heartline-0.3.0-T14`. Plan: `docs/plans/0.7-depth-run.md`.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T14-win-x64` (built from branch 46).
+47. `tune/depth-feedback` — endless upgrades, lighter Split, score stops at the end, results
+    header and zone names
+48. `feat/sync-main-line` — the Heart answers the song's main line (learned rhythm per
+    section, echoes, free-time rule), ear candy as rare sounds, T / G / B / C note keys and
+    `--notes`; builds `Heartline-0.3.0-T15`. Plan: `docs/plans/0.8-sync.md`.
+
+**Test build:** `#UserTesting\Heartline-0.3.0-T15-win-x64` (built from branch 48).
+
+**To raise with the player (they asked to be reminded):** what should be past depth 25. See
+the top of `docs/plans/0.8-sync.md`.
+
+**Sync notes:** the player can press T / G / B / C while playing; the notes land in
+`heartline-notes.txt` next to the exe they ran (so in the `#UserTesting` build folder). Read
+them with `heartline.exe --notes-from "<that file>"` before changing the sync again.
 
 **The dive, simulated** (8 Straftat songs, plain 120 ms bot, first Heart of a song, LULLABY to
 FLATLINE): escaped / +1 / +2 / +3 = 1/3/3/1, 1/0/4/3, 2/4/2/0, 3/2/1/2, 1/5/1/1, 5/1/1/1,
@@ -258,6 +271,11 @@ SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia
 tools, balance simulator, bot · `rng.rs` PRNG · `runner.rs` Highway side mode.
 
 ## Session Log
+- 2026-11-15 — After the player's depth-30 run on T14 (`docs/plans/0.8-sync.md`): endless
+  upgrades, lighter Split, score frozen on the results screen, results header reframed. Sync:
+  pulses follow the song's main line with a learned rhythm per section and echoes, ear candy
+  is found as rare sounds, note keys and `--notes` report so the player's taps can tune it.
+  45 unit tests (2 new). T15.
 - 2026-11-15 — The depth run (`docs/plans/0.7-depth-run.md`), from the player's question "what
   is the point of the game": depth is the goal and the difficulty; a Heart broken early dives
   further and pays more per depth; purgatory, then a new Heart; a Heart never broken escapes

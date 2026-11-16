@@ -52,6 +52,7 @@ License, see `OFL.txt`); to use another font, put its TTF next to the exe as
 | Space / Shift / RMB | dash (invulnerable while dashing) |
 | Esc / P | pause (quitting a run asks twice) |
 | Q / E | previous / next track (menus, and the first 8 seconds of a song in a run) |
+| T / G / B / C (in a run) | notes on the sync: tap along with what the attacks should follow / sync is good here / sync is off here / ear candy right now. Saved to `heartline-notes.txt` next to the exe |
 | F11 | fullscreen |
 
 How it plays:
@@ -66,6 +67,10 @@ How it plays:
 - **Attacks are aimed and announced.** Before the Heart fires, a ring closes onto it and the
   danger zone is drawn on the floor (a cone, a wall with a gap, a pincer with an open lane, a
   cross). It fires exactly on the beat. Step out of the zone; the rest of the arena is yours.
+- **The Heart answers the song's main line**: its strong notes, whatever plays them. In a
+  song with a steady beat it learns each section's rhythm and answers it the same way every
+  bar: full pulses on the strongest places, small echoes of shootable notes on the rest. In
+  free-time music it answers the strongest notes and waits when the music waits.
 - **Bars have a shape.** Each kind of section (calm / groove / surge / drop) has its own
   pattern per beat of the bar, and it comes back when that part of the song comes back.
 - **Difficulty does not depend on the song.** Budgets are per second: a slow song gets fewer,

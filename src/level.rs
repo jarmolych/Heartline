@@ -27,7 +27,7 @@ pub const N_PALETTES: u8 = 5;
 // ---------------------------------------------------------------------------------------------
 
 /// Hostile bullets per second the Heart may fire at average song energy.
-const BULLETS_PER_SEC: f32 = 10.0;
+const BULLETS_PER_SEC: f32 = 8.0;
 /// Enemy "points" per second (a Chaser costs 1).
 const ENEMY_POINTS_PER_SEC: f32 = 0.20;
 /// Target seconds between Heart pulses per section kind (Calm, Normal, Intense, Drop).
@@ -550,6 +550,51 @@ impl Bucket {
         self.tokens -= give;
         give as u16
     }
+    /// Like `pulse_count`, but never 0: when the tokens do not cover the pattern's smallest
+    /// size it is given anyway and owed (the debt is capped, so a quiet stretch stays quiet).
+    fn pulse_count_or_least(&mut self, pattern: Pattern, diff: f32) -> u16 {
+        let n = self.pulse_count(pattern, diff);
+        if n > 0 {
+            return n;
+        }
+        let lo = (pattern.range().0 * diff.clamp(0.7, 1.0)).max(3.0).floor();
+        self.tokens = (self.tokens - lo).max(-2.0 * lo);
+        lo as u16
+    }
+}
+
+/// The beat grid is only used to shape or fill the Heart's pulses when the analysis is at least
+/// this sure the song has a steady beat.
+const LINE_GRID_CONF: f32 = 0.35;
+/// How full of pulses a section is, against one every `PULSE_INTERVAL`.
+const LINE_FILL: f32 = 1.0;
+/// What a pulse answers: a beat filling a hole, a note of the main line, a lesser note of its
+/// rhythm (a small echo), or a one-off accent outside the rhythm.
+const PULSE_FILL: u8 = 0;
+const PULSE_LINE: u8 = 1;
+const PULSE_ECHO: u8 = 2;
+const PULSE_ACCENT: u8 = 3;
+
+/// The song's main line: every strong note, in whatever register, as (time, weight). Kicks and
+/// bass notes, snares and mid-range notes and pitched hits are all candidates; hi-hats are not
+/// (they drive the darts and the shards). Hits that land together count as one, louder, note.
+pub fn main_line(an: &Analysis) -> Vec<(f32, f32)> {
+    let mut raw: Vec<(f32, f32)> = an
+        .onsets
+        .iter()
+        .filter(|o| o.band != Band::High && !an.in_silence(o.t))
+        .map(|o| (o.t, o.strength * if o.band == Band::Low { 1.0 } else { 0.9 }))
+        .collect();
+    raw.extend(an.chimes.iter().filter(|c| !an.in_silence(c.t)).map(|c| (c.t, 0.7 * c.strength.min(1.2))));
+    raw.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut notes: Vec<(f32, f32)> = Vec::with_capacity(raw.len());
+    for (t, w) in raw {
+        match notes.last_mut() {
+            Some(l) if t - l.0 < 0.06 => l.1 = l.1.max(w) + 0.3 * l.1.min(w),
+            _ => notes.push((t, w)),
+        }
+    }
+    notes
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -604,9 +649,15 @@ fn direct(an: &Analysis, norm: &Norm, seed: u64, diff: f32, has: &[bool; N_LAYER
                 order[..=at].rotate_right(1);
             }
             let mut armed = [false; N_LAYERS];
-            let mut spent = 0.0f32;
+            // The Heart's pulses are armed in every section: it always answers the main line,
+            // and the other families are added on top as the credits allow.
+            armed[LayerKind::Beat as usize] = true;
+            let mut spent = FAMILY_COST[LayerKind::Beat as usize];
             for &k in &order {
                 let beat = k == LayerKind::Beat as usize;
+                if beat {
+                    continue;
+                }
                 // Tile strikes and lasers never run in calm sections.
                 if calm && (k == LayerKind::Bass as usize || k == LayerKind::Lead as usize) {
                     continue;
@@ -615,7 +666,7 @@ fn direct(an: &Analysis, norm: &Norm, seed: u64, diff: f32, has: &[bool; N_LAYER
                 if !playing {
                     continue;
                 }
-                if spent + FAMILY_COST[k] <= credits || spent == 0.0 {
+                if spent + FAMILY_COST[k] <= credits {
                     armed[k] = true;
                     spent += FAMILY_COST[k];
                 }
@@ -814,55 +865,177 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
     };
     let dens = |t: f32| -> f32 { plan.get(section_index(t)).map_or(1.0, |p| p.dens) };
 
-    // ---- Heart pulses: kicks first, the beat grid fills any hole the drums leave ----
-    // Candidates in time order: (time, strength, is_kick).
-    let mut cand: Vec<(f32, f32, bool)> = Vec::with_capacity(an.beats.len() + an.onsets.len() / 3);
-    for o in an.onsets.iter().filter(|o| o.band == Band::Low) {
-        cand.push((o.t, o.strength, true));
-    }
-    for &b in &an.beats {
-        cand.push((b, 0.5, false));
-    }
-    cand.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let kick_times: Vec<f32> = an.onsets.iter().filter(|o| o.band == Band::Low).map(|o| o.t).collect();
-    let kick_soon = |t: f32, within: f32| -> bool {
-        let i = kick_times.partition_point(|&k| k <= t + 0.02);
-        i < kick_times.len() && kick_times[i] - t < within
-    };
+    // ---- Heart pulses: the Heart answers the song's main line ----
+    // The main line is what a listener would tap along to: the strong notes, in whatever
+    // register they are played (kick, snare, a piano chord, a lead). In a song with a steady
+    // beat the Heart learns each section's rhythm: the places in the bar where the line lands.
+    // The strongest places, kept far enough apart to be read, get a full pulse every time a
+    // note falls there; the rest of the rhythm gets a small echo of shootable notes. So the
+    // whole line is answered, the same way in every bar, instead of whichever note came after
+    // a timer. In free-time music there are no bars: the Heart answers every note above a
+    // strength line drawn for the section, and waits when the music waits.
+    let notes = main_line(an);
     let lead_p = pulse_lead(beat_len, diff);
+    let bar_pos = |t: f32| -> usize {
+        let bp = (beat_pos(&an.beats, t) - an.downbeat as f32).rem_euclid(4.0) * 2.0;
+        (bp.round() as usize) % 8
+    };
+    // sixteenth of the bar a time falls on, and how far off it (in sixteenths)
+    let slot = |t: f32| -> (usize, f32) {
+        let bp = (beat_pos(&an.beats, t) - an.downbeat as f32).rem_euclid(4.0) * 4.0;
+        ((bp.round() as usize) % 16, (bp - bp.round()).abs())
+    };
+    let cdist = |a: usize, b: usize| -> usize {
+        let d = (a as i32 - b as i32).rem_euclid(16) as usize;
+        d.min(16 - d)
+    };
+    let grid_ok = an.beat_conf >= LINE_GRID_CONF;
+    // every pulse as (time, what it is): PULSE_FILL, PULSE_LINE or PULSE_ECHO
+    let mut picked: Vec<(f32, u8)> = Vec::new();
+    for s in an.sections.iter() {
+        let ki = kind_idx(s.kind);
+        let target = PULSE_INTERVAL[ki] / diff.sqrt();
+        let a = notes.partition_point(|n| n.0 < s.t0);
+        let b = notes.partition_point(|n| n.0 < s.t1);
+        let sec = &notes[a..b];
+        if sec.is_empty() {
+            continue;
+        }
+        let mut here: Vec<(f32, u8)> = Vec::new();
+        if grid_ok {
+            let mut prof = [0.0f32; 16];
+            for n in sec {
+                let (k, off) = slot(n.0);
+                if off < 0.3 {
+                    prof[k] += n.1;
+                }
+            }
+            let top = prof.iter().cloned().fold(1e-6f32, f32::max);
+            let mut order: Vec<usize> = (0..16).collect();
+            order.sort_by(|x, y| prof[*y].partial_cmp(&prof[*x]).unwrap_or(std::cmp::Ordering::Equal));
+            let per_bar = ((LINE_FILL * 4.0 * beat_len / target).round() as usize).clamp(1, 8);
+            let apart = ((0.55 * target) / (beat_len / 4.0)).ceil().max(1.0) as usize;
+            let mut main: Vec<usize> = Vec::new();
+            for &k in &order {
+                if main.len() >= per_bar || prof[k] < 0.25 * top {
+                    break;
+                }
+                if main.iter().all(|&m| cdist(m, k) >= apart) {
+                    main.push(k);
+                }
+            }
+            // echoes: the next strongest places, no more of them than full pulses, so the rhythm
+            // is filled in without burying it
+            let mut echo: Vec<usize> = Vec::new();
+            for &k in &order {
+                if prof[k] < 0.55 * top || echo.len() >= main.len().min(2) {
+                    break;
+                }
+                if !main.contains(&k) && main.iter().chain(echo.iter()).all(|&m| cdist(m, k) >= 2) {
+                    echo.push(k);
+                }
+            }
+            // a typical note of the line here, to recognise an accent that falls outside the rhythm
+            let mut on_main: Vec<f32> = sec.iter().filter(|n| slot(n.0).1 < 0.3 && main.contains(&slot(n.0).0)).map(|n| n.1).collect();
+            on_main.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+            let typical = on_main.get(on_main.len() / 2).copied().unwrap_or(1.0);
+            for n in sec {
+                let (k, off) = slot(n.0);
+                let on = off < 0.3;
+                if on && main.contains(&k) {
+                    here.push((n.0, PULSE_LINE));
+                } else if on && echo.contains(&k) {
+                    here.push((n.0, PULSE_ECHO));
+                } else if n.1 >= 1.5 * typical {
+                    // a one-off accent: answered if there is room for it
+                    here.push((n.0, PULSE_ACCENT));
+                }
+            }
+        } else {
+            let want = ((LINE_FILL * (s.t1 - s.t0) / target).round() as usize).max(1);
+            let mut ranked: Vec<f32> = sec.iter().map(|n| n.1).collect();
+            ranked.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+            let line = if ranked.len() > want { ranked[want - 1] } else { 0.0 };
+            for n in sec {
+                if n.1 >= line {
+                    here.push((n.0, PULSE_LINE));
+                }
+            }
+        }
+        // keep them readable: full pulses apart from each other, echoes clear of everything
+        let mut last_full = picked.iter().rev().find(|p| p.1 != PULSE_ECHO).map_or(-10.0, |p| p.0);
+        let mut last_any = picked.last().map_or(-10.0, |p| p.0);
+        for (i, &(t, what)) in here.iter().enumerate() {
+            let ok = match what {
+                PULSE_ECHO => t - last_any >= 0.2,
+                PULSE_ACCENT => {
+                    // an accent must not push a note of the rhythm out
+                    let next_line = here[i + 1..].iter().find(|h| h.1 == PULSE_LINE).map_or(f32::MAX, |h| h.0);
+                    t - last_full >= 0.55 * target && next_line - t >= 0.55 * target
+                }
+                _ => t - last_full >= 0.5 * target,
+            };
+            if !ok {
+                continue;
+            }
+            let what = if what == PULSE_ACCENT { PULSE_LINE } else { what };
+            picked.push((t, what));
+            last_any = t;
+            if what != PULSE_ECHO {
+                last_full = t;
+            }
+        }
+    }
+    // Where the line leaves a long hole and the song has a beat worth trusting, the beat fills it.
+    // A piece with no steady pulse gets no filler: the Heart waits for the music.
+    if grid_ok {
+        let mut fill: Vec<(f32, u8)> = Vec::new();
+        let mut j = 0usize;
+        let mut last = -10.0f32;
+        for &bt in &an.beats {
+            while j < picked.len() && picked[j].0 <= bt {
+                last = picked[j].0;
+                j += 1;
+            }
+            let target = PULSE_INTERVAL[kind_idx(kind_at(bt))] / diff.sqrt();
+            let next = picked.get(j).map_or(f32::MAX, |p| p.0);
+            let last_any = last.max(fill.last().map_or(-10.0, |f| f.0));
+            if bt - last_any >= 1.4 * target && next - bt >= 0.6 * target {
+                fill.push((bt, PULSE_FILL));
+            }
+        }
+        picked.extend(fill);
+        picked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    }
     let mut bullets = Bucket::new(BULLETS_PER_SEC * diff, 2.4);
-    let mut last_pulse = -10.0f32;
     let mut phase = [rng.angle(), rng.angle(), rng.angle(), rng.angle()];
     let mut uses = [[0u32; 8]; 4];
     let mut soft_n = [0u32; 4];
-    for &(t, strength, is_kick) in &cand {
+    for &(t, what) in &picked {
         if t < grace || an.in_silence(t) || !armed(t, LayerKind::Beat) {
             continue;
         }
         let kind = kind_at(t);
         let ki = kind_idx(kind);
-        let target = PULSE_INTERVAL[ki] / diff.sqrt();
-        let since = t - last_pulse;
-        if is_kick {
-            // Weak in-between kicks do not interrupt the pattern.
-            if since < 0.62 * target || (strength < 0.3 && since < target) {
-                continue;
-            }
-        } else if since < 1.4 * target || kick_soon(t, 0.3 * target) {
-            continue;
-        }
         let i = level_i(t);
         bullets.fill(t, BULLETS_PER_SEC * diff * energy(i) * calm_mul(kind) * dens(t));
+        if what == PULSE_ECHO {
+            // the rest of the rhythm: three shootable notes fanned at the player
+            bullets.tokens = (bullets.tokens - 2.0).max(-8.0);
+            let speed = beat_speed(pulse_speed(Pattern::Fan, i, kind, diff), beat_len);
+            ev.push(LevelEvent { t, lead: lead_p, ev: Ev::Pulse { pattern: Pattern::Fan, count: 3, speed, rot: 0.0, soft: true } });
+            continue;
+        }
         let deck = &kind_decks[ki];
         // Which half-beat of the bar is this? That picks the move.
-        let bp = beat_pos(&an.beats, t) - an.downbeat as f32;
-        let pos = ((bp.rem_euclid(4.0) * 2.0).round() as usize) % 8;
+        let pos = bar_pos(t);
         let pattern = deck.moves[pos];
-        let count = bullets.pulse_count(pattern, diff);
+        // A note of the line is always answered, with a small pulse if the budget is spent;
+        // a filler beat is dropped instead.
+        let count = if what == PULSE_LINE { bullets.pulse_count_or_least(pattern, diff) } else { bullets.pulse_count(pattern, diff) };
         if count == 0 {
             continue;
         }
-        last_pulse = t;
         let rot = pulse_rot(pattern, deck, &mut phase[ki], uses[ki][pos]);
         uses[ki][pos] += 1;
         let soft = pos != 0 && {
@@ -1565,6 +1738,46 @@ impl LiveGen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_heart_answers_the_same_notes_of_a_riff_every_time() {
+        // 40 s at 120 BPM: a one-bar riff of plucked notes, four loud and two quiet, the same
+        // every bar, over a soft kick. The Heart must answer the same notes of it in every bar,
+        // not whichever note happens to come after a timer.
+        use std::sync::atomic::AtomicU32;
+        let sr = 44_100u32;
+        let srf = sr as f32;
+        let tau = std::f32::consts::TAU;
+        let n = (40.0 * srf) as usize;
+        let mut x = vec![0.0f32; n];
+        let riff: [(f32, f32); 6] = [(0.0, 0.55), (0.375, 0.16), (0.75, 0.55), (1.0, 0.5), (1.375, 0.16), (1.75, 0.5)];
+        for (i, s) in x.iter_mut().enumerate() {
+            let t = i as f32 / srf;
+            let tb = t % 0.5;
+            *s += (tau * 55.0 * tb).sin() * (-tb * 22.0).exp() * 0.12;
+            let bar_t = t % 2.0;
+            for (at, amp) in riff {
+                if bar_t >= at && bar_t < at + 0.3 {
+                    let u = bar_t - at;
+                    *s += (tau * 660.0 * u).sin() * (-u * 14.0).exp() * amp;
+                }
+            }
+        }
+        let an = crate::analysis::analyze(&x, sr, &AtomicU32::new(0));
+        let level = generate(&an, 1, 1.35);
+        let pulses: Vec<f32> = level.events.iter().filter(|e| matches!(e.ev, Ev::Pulse { .. }) && e.t > 8.0 && e.t < 38.0).map(|e| e.t).collect();
+        assert!(pulses.len() >= 15, "only {} pulses", pulses.len());
+        // where in the two-second bar each pulse falls, in sixteenths
+        let mut used = [0u32; 16];
+        for &t in &pulses {
+            used[((t % 2.0) / 0.125).round() as usize % 16] += 1;
+        }
+        let bars = 15.0;
+        let steady: u32 = used.iter().filter(|&&c| c as f32 >= 0.7 * bars).sum();
+        assert!(steady as f32 >= 0.85 * pulses.len() as f32, "pulses per sixteenth {used:?}: {steady} of {} are in places answered every bar", pulses.len());
+        // and the quiet notes are not among them
+        assert!(used[3] + used[11] <= 3, "the quiet notes were answered: {used:?}");
+    }
 
     fn steady(bpm: f32, secs: f32) -> (Vec<f32>, Vec<Onset>) {
         let bl = 60.0 / bpm;
