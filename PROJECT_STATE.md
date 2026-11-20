@@ -72,13 +72,50 @@ merging the last one brings everything:
 42. `feat/track-picker` — track list in run setup, depth frames around the arena
 43. `docs/fifth-pass-t9` — plan progress, README, `CLAUDE.md` brief and this file
 44. `feat/thread` — dash through a bullet for a "thread"; builds `Heartline-0.3.0-T10`
+45. `feat/menu-ror2-layout` — run setup rebuilt after Risk of Rain 2's layout, smooth font,
+    rounded widgets, track corner, song swap, no camera change in silence, DROP RUSH
+    cross-fades, crescent / signal / gate / comet skies, four more weathers, sea of sound /
+    equaliser skyline / dunes foregrounds; then the second round the same day (see section 4
+    of the plan): smooth sea and dunes, mesas / cloud deck / striped hills, new palms and
+    horizon details, three more weathers, codex with live previews, heartbeat launch; builds
+    `Heartline-0.3.0-T13`
 
 The third playtest (2026-11-15) and what was done about it are in
 `docs/plans/0.4-playtest-3.md`. The depth pass that followed (every area of the game, planned
 and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "Known weak
-spots" first.
+spots" first. The newest round (menu layout, skies, foregrounds, run flow) is
+`docs/plans/0.6-menu-and-skies.md`.
 
-**Test build:** `#UserTesting\Heartline-0.3.0-T10-win-x64` (built from branch 44).
+46. `feat/depth-run` — the run's goal is depth: Hearts on a clock, dives of +1 to +3 by how
+    fast they break, purgatory with rewards, a new Heart at the new depth; rage and phase
+    floors removed; HUD clock and DEPTH, results and records by depth; builds
+    `Heartline-0.3.0-T14`. Plan: `docs/plans/0.7-depth-run.md`.
+
+47. `tune/depth-feedback` — endless upgrades, lighter Split, score stops at the end, results
+    header and zone names
+48. `feat/sync-main-line` — the Heart answers the song's main line (learned rhythm per
+    section, echoes, free-time rule), ear candy as rare sounds, T / G / B / C note keys and
+    `--notes`; builds `Heartline-0.3.0-T15`. Plan: `docs/plans/0.8-sync.md`.
+
+**Test build:** `#UserTesting\Heartline-0.3.0-T15-win-x64` (built from branch 48).
+
+**To raise with the player (they asked to be reminded):** what should be past depth 25. See
+the top of `docs/plans/0.8-sync.md`.
+
+**Sync notes:** the player can press T / G / B / C while playing; the notes land in
+`heartline-notes.txt` next to the exe they ran (so in the `#UserTesting` build folder). Read
+them with `heartline.exe --notes-from "<that file>"` before changing the sync again.
+
+**The dive, simulated** (8 Straftat songs, plain 120 ms bot, first Heart of a song, LULLABY to
+FLATLINE): escaped / +1 / +2 / +3 = 1/3/3/1, 1/0/4/3, 2/4/2/0, 3/2/1/2, 1/5/1/1, 5/1/1/1,
+4/3/1/0; depths per song 3.4 / 5.5 / 1.6 / 2.5 / 2.3 / 1.9 / 1.8. Runs differ a lot from one
+to the next. Hits per minute: 1.6 / 1.6 / 3.8 / 3.5 / 4.3 / 5.1 / 6.3.
+
+**Font:** Oxanium SemiBold is built into the exe (`assets/fonts/oxanium/`, SIL Open Font
+License 1.1; the player approved the download on 2026-11-15 as the free match for Risk of
+Rain 2's font). `heartline-font.ttf` next to the exe overrides it; Bahnschrift and then the
+pixel font are fallbacks. It must be a fixed-weight TTF: macroquad's rasteriser draws a
+variable font at its thinnest weight. `OFL.txt` ships beside the exe.
 
 **Verified by machine only:** 39 unit tests, `--sim` balance runs, screenshots of the menu
 screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any
@@ -234,6 +271,26 @@ SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia
 tools, balance simulator, bot · `rng.rs` PRNG · `runner.rs` Highway side mode.
 
 ## Session Log
+- 2026-11-15 — After the player's depth-30 run on T14 (`docs/plans/0.8-sync.md`): endless
+  upgrades, lighter Split, score frozen on the results screen, results header reframed. Sync:
+  pulses follow the song's main line with a learned rhythm per section and echoes, ear candy
+  is found as rare sounds, note keys and `--notes` report so the player's taps can tune it.
+  45 unit tests (2 new). T15.
+- 2026-11-15 — The depth run (`docs/plans/0.7-depth-run.md`), from the player's question "what
+  is the point of the game": depth is the goal and the difficulty; a Heart broken early dives
+  further and pays more per depth; purgatory, then a new Heart; a Heart never broken escapes
+  and the run sinks one depth. Rage and phase floors removed. 43 unit tests (4 new). T14.
+- 2026-11-15 — Menu and skies round (`docs/plans/0.6-menu-and-skies.md`): run setup in grouped
+  panels with a scrolling difficulty strip, track preview and library bar top right on both
+  menus, smooth font, round corners, icons, results screen, Q / E song swap in a track's first
+  8 s, runs can always carry on, no camera change in silence, DROP RUSH cross-fade, globe sky
+  replaced, three new skies, four new weathers, three new foregrounds. 39 unit tests. T11.
+  Then, with the player's go-ahead, Oxanium SemiBold as the built-in font. T12.
+- 2026-11-15 — Second round on T12 (plan 0.6 section 4): bars skyline and arch sky removed,
+  sea and dunes made smooth, three new foregrounds, palms redrawn, five new horizon details,
+  three new weathers, built-in tracks no longer mixed into the library, file / folder / live
+  only in run setup, codex rebuilt with clickable entries and live previews, heartbeat launch
+  animation. 39 unit tests. T13.
 - 2026-11-15 — Fifth pass of 0.5: Comb and Sweep patterns, track list, depth frames. 39 unit
   tests pass; shipped `Heartline-0.3.0-T9`.
 - 2026-11-15 — Fourth pass of 0.5: carry-a-charge objective, milestones, live pulses announced

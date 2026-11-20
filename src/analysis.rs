@@ -893,8 +893,6 @@ const CHIME_DUAL: f32 = 0.85;
 /// Notes at most this far apart belong to one run, and a run needs this many notes.
 const RUN_GAP: f32 = 0.4;
 const RUN_MIN: usize = 4;
-/// A pitch band counts as rare when the song uses it at most this many times.
-const RARE_MAX: usize = 3;
 /// At least this many seconds between two pieces of ear candy.
 const CANDY_GAP: f32 = 7.0;
 /// A chime's rise must be concentrated in two neighbouring bands by at least this fraction
@@ -1002,18 +1000,63 @@ fn pick_chimes(spec: &[[f32; N_SPEC]], onsets: &[Onset], hop_dt: f32) -> Vec<Chi
     out
 }
 
-/// Pick the ear candy out of the chimes: quick runs of notes, two-tone hits, and pitched sounds
-/// the song hardly ever uses. Regular chime patterns (a bell on every off-beat) are a layer, not
-/// candy, so they are left out.
-fn find_candy(chimes: &[Chime], duration: f32) -> Vec<Candy> {
-    const BINS: usize = 8;
-    let bin_of = |p: f32| ((p * BINS as f32) as usize).min(BINS - 1);
-    let mut uses = [0usize; BINS];
-    for c in chimes {
-        uses[bin_of(c.pitch)] += 1;
+/// Ear candy is rated by how alike its `CANDY_TWINS`-th most similar other hit is (so a sound
+/// the song uses up to three times can still be candy), and it must be at least `CANDY_ODD`
+/// standard deviations less alike than the song's hits usually are.
+const CANDY_TWINS: usize = 3;
+const CANDY_ODD: f32 = 3.0;
+
+/// What a hit added to the spectrum, as a unit vector over the bands, and how much it added.
+fn hit_shape(spec: &[[f32; N_SPEC]], i: usize) -> Option<([f32; N_SPEC], f32)> {
+    if i < 6 || i + 6 >= spec.len() {
+        return None;
     }
+    let mut shape = [0.0f32; N_SPEC];
+    let mut total = 0.0f32;
+    for (k, s) in shape.iter_mut().enumerate() {
+        // Compressed magnitudes (a square root): in plain magnitude the loudest band is the
+        // whole fingerprint, in the log domain every band rises alike.
+        let after = (1..=4).map(|d| (0.5 * spec[i + d][k]).exp()).sum::<f32>() / 4.0;
+        let before = (2..=5).map(|d| (0.5 * spec[i - d][k]).exp()).sum::<f32>() / 4.0;
+        *s = (after - before).max(0.0);
+        total += *s;
+    }
+    let norm = shape.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if total < 1e-5 || norm < 1e-9 {
+        return None;
+    }
+    for s in shape.iter_mut() {
+        *s /= norm;
+    }
+    Some((shape, total))
+}
+
+/// How alike two hit shapes are (0..1). The bands are spaced evenly in pitch, so the same
+/// instrument playing another note is the same shape moved along: try a few shifts.
+fn shape_sim(a: &[f32; N_SPEC], b: &[f32; N_SPEC]) -> f32 {
+    let mut best = 0.0f32;
+    for s in -2i32..=2 {
+        let mut dot = 0.0f32;
+        for k in 0..N_SPEC as i32 {
+            let j = k + s;
+            if j >= 0 && j < N_SPEC as i32 {
+                dot += a[k as usize] * b[j as usize];
+            }
+        }
+        best = best.max(dot);
+    }
+    best
+}
+
+/// Find the ear candy: sounds the song hardly ever makes. Every hit gets a fingerprint (what it
+/// added to the spectrum). A loud hit with no near twins anywhere in the song, whatever note the
+/// twins play, is a sound the song used once or twice. That is what a listener hears as a
+/// special touch, and it is found where it happens, not on the nearest strong beat.
+/// Quick runs of notes that move in pitch count too, unless the song is full of them.
+fn find_candy(spec: &[[f32; N_SPEC]], onsets: &[Onset], chimes: &[Chime], duration: f32, hop_dt: f32) -> Vec<Candy> {
     let mut found: Vec<Candy> = Vec::new();
-    // Runs: maximal chains of notes closer than RUN_GAP that move in pitch.
+    // ---- runs: maximal chains of notes closer than RUN_GAP that move in pitch ----
+    let mut runs: Vec<Candy> = Vec::new();
     let mut i = 0;
     while i < chimes.len() {
         let mut j = i;
@@ -1027,29 +1070,95 @@ fn find_candy(chimes: &[Chime], duration: f32) -> Vec<Candy> {
             // A run that sits on one note for bars is a part of the groove, not a flourish.
             if hi - lo >= 0.2 && run[n - 1].t - run[0].t <= 4.0 {
                 let strength = run.iter().map(|c| c.strength).sum::<f32>() / n as f32;
-                found.push(Candy { t: run[0].t, dur: run[n - 1].t - run[0].t, kind: CandyKind::Run, pitch: run[0].pitch, pitch_end: run[n - 1].pitch, strength: strength + 0.1 * n as f32 });
+                runs.push(Candy { t: run[0].t, dur: run[n - 1].t - run[0].t, kind: CandyKind::Run, pitch: run[0].pitch, pitch_end: run[n - 1].pitch, strength: 0.6 * strength + 0.05 * n as f32 });
             }
         }
         i = j + 1;
     }
-    for (k, c) in chimes.iter().enumerate() {
-        let alone = (k == 0 || c.t - chimes[k - 1].t > 0.6) && (k + 1 == chimes.len() || chimes[k + 1].t - c.t > 0.6);
-        if c.dual && c.strength >= 0.45 {
-            found.push(Candy { t: c.t, dur: 0.3, kind: CandyKind::Dial, pitch: c.pitch, pitch_end: c.pitch, strength: c.strength });
-        } else if alone && c.strength >= 0.6 && uses[bin_of(c.pitch)] <= RARE_MAX {
-            found.push(Candy { t: c.t, dur: 0.3, kind: CandyKind::Rare, pitch: c.pitch, pitch_end: c.pitch, strength: c.strength + 0.3 });
+    // What a song does all the time is part of its sound, not candy.
+    if std::env::var("HL_CANDY").is_ok() {
+        eprintln!("runs: {}  hits: {}", runs.len(), onsets.len());
+    }
+    if (runs.len() as f32) <= (duration / 45.0).max(1.0) {
+        found.extend(runs);
+    }
+
+    // ---- rare sounds: one fingerprint per audible hit, whatever band it was found in ----
+    let mut times: Vec<(f32, f32)> = Vec::new();
+    for o in onsets {
+        match times.last_mut() {
+            Some(l) if o.t - l.0 < 0.08 => l.1 = l.1.max(o.strength),
+            _ => times.push((o.t, o.strength)),
         }
     }
-    // What a song does all the time is part of its sound, not candy: a kind that turns up more
-    // than once every 15 seconds is dropped for this song.
-    for kind in [CandyKind::Run, CandyKind::Dial, CandyKind::Rare] {
-        if found.iter().filter(|c| c.kind == kind).count() as f32 > duration / 15.0 {
-            found.retain(|c| c.kind != kind);
+    let hits: Vec<(f32, [f32; N_SPEC], f32)> = times
+        .iter()
+        .filter_map(|&(t, _)| hit_shape(spec, (t / hop_dt).round() as usize).map(|(shape, total)| (t, shape, total)))
+        .collect();
+    if hits.len() >= 24 {
+        let totals: Vec<f32> = hits.iter().map(|h| h.2).collect();
+        // Quiet hits have noisy fingerprints: only clearly audible ones can be candy. The bar is
+        // a share of the song's loudest hits, not a rank among them: in a song full of kicks
+        // a rank would rule out everything that is not a kick.
+        let top = percentile(&totals, 0.98).max(1e-6);
+        let loud = 0.3 * top;
+        // For every loud hit: how alike is the third most similar other hit? A sound the song
+        // keeps using has many near twins; one it used once or twice has none.
+        let mut rated: Vec<(usize, f32)> = Vec::new();
+        for (a, h) in hits.iter().enumerate() {
+            if h.2 < loud {
+                continue;
+            }
+            let mut best = [0.0f32; CANDY_TWINS];
+            for (b, o) in hits.iter().enumerate() {
+                if a == b {
+                    continue;
+                }
+                let s = shape_sim(&h.1, &o.1);
+                if s > best[CANDY_TWINS - 1] {
+                    best[CANDY_TWINS - 1] = s;
+                    best.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+                }
+            }
+            rated.push((a, best[CANDY_TWINS - 1]));
+        }
+        let (m, sd) = mean_std(&rated.iter().map(|r| r.1).collect::<Vec<f32>>());
+        if let Ok(v) = std::env::var("HL_CANDY_AT") {
+            let at: f32 = v.parse().unwrap_or(0.0);
+            for h in hits.iter().filter(|h| (h.0 - at).abs() < 0.6) {
+                let r = rated.iter().find(|r| (hits[r.0].0 - h.0).abs() < 1e-4).map(|r| r.1);
+                eprintln!("hit t={:.2} total={:.3} (loud line {:.3}, top {:.3}) twin={:?} song {:.3}+-{:.3}", h.0, h.2, loud, top, r, m, sd);
+            }
+        }
+        for &(a, twin) in &rated {
+            // rare for THIS song: well outside how alike its sounds usually are
+            let odd = (m - twin) / sd.max(0.01);
+            if odd < CANDY_ODD {
+                continue;
+            }
+            let h = &hits[a];
+            // where it sits in pitch, and whether it is a tone (a few bands) or a wash of noise
+            let centre = h.1.iter().enumerate().map(|(k, x)| k as f32 * x * x).sum::<f32>() / (N_SPEC - 1) as f32;
+            let tonal = (1..N_SPEC - 1).map(|k| h.1[k - 1] * h.1[k - 1] + h.1[k] * h.1[k] + h.1[k + 1] * h.1[k + 1]).fold(0.0f32, f32::max);
+            let dual = chimes.iter().any(|c| c.dual && (c.t - h.0).abs() < 0.06);
+            let kind = if dual {
+                CandyKind::Dial
+            } else if tonal >= 0.6 {
+                CandyKind::Rare
+            } else {
+                CandyKind::Run
+            };
+            let (dur, pitch_end) = if kind == CandyKind::Run { (0.9, 1.0 - centre) } else { (0.3, centre) };
+            if std::env::var("HL_CANDY").is_ok() {
+                eprintln!("candy? t={:.1} odd={:.1} twin={:.2} (song {:.2} +- {:.2}) loud={:.2} tonal={:.2} {:?}", h.0, odd, twin, m, sd, h.2 / top, tonal, kind);
+            }
+            found.push(Candy { t: h.0, dur, kind, pitch: centre.clamp(0.0, 1.0), pitch_end: pitch_end.clamp(0.0, 1.0), strength: 0.4 * odd + (h.2 / top).min(1.2) });
         }
     }
+
     // Keep it special: the strongest first, none within CANDY_GAP of one already kept, and no
-    // more than one per 25 seconds of song.
-    let cap = (duration / 25.0).ceil() as usize;
+    // more than one per 40 seconds of song.
+    let cap = (duration / 40.0).ceil() as usize;
     found.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
     let mut kept: Vec<Candy> = Vec::new();
     for c in found {
@@ -1605,7 +1714,7 @@ pub fn analyze(mono: &[f32], sr: u32, progress: &AtomicU32) -> Analysis {
 
     // ---- musical layers, chimes and phases ----
     let chimes = pick_chimes(&spec, &onsets, hop_dt);
-    let candy = find_candy(&chimes, duration);
+    let candy = find_candy(&spec, &onsets, &chimes, duration, hop_dt);
     let layers = find_layers(&bars, duration, &onsets, &feats, &chimes, hop_dt);
     label_phases(&mut sections, &feats, &onsets, &layers, hop_dt);
 
@@ -1956,6 +2065,33 @@ mod tests {
         let c = an.candy[0];
         assert_eq!(c.kind, CandyKind::Run);
         assert!((c.t - 12.1).abs() < 0.25 && c.pitch_end > c.pitch, "{c:?}");
+    }
+
+    #[test]
+    fn a_sound_the_song_makes_once_is_ear_candy() {
+        // A 120 BPM kick with a bell on every off-beat for 40 s, and one burst of hiss at 21.37 s
+        // that belongs to neither and falls on no beat. The hiss is the candy, where it happens.
+        let sr = 44_100u32;
+        let srf = sr as f32;
+        let tau = std::f32::consts::TAU;
+        let n = (40.0 * srf) as usize;
+        let mut x = vec![0.0f32; n];
+        let mut seed = 0x1234_5678u32;
+        for (i, s) in x.iter_mut().enumerate() {
+            let t = i as f32 / srf;
+            let tb = t % 0.5;
+            *s += (tau * 55.0 * tb).sin() * (-tb * 18.0).exp() * 0.7;
+            let tc = (t + 0.25) % 0.5;
+            *s += (tau * 1800.0 * tc).sin() * (-tc * 30.0).exp() * 0.25;
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            if (21.37..21.77).contains(&t) {
+                let noise = (seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0;
+                *s += noise * (-(t - 21.37) * 9.0).exp() * 0.5;
+            }
+        }
+        let an = analyze(&x, sr, &AtomicU32::new(0));
+        assert!(an.candy.iter().any(|c| (c.t - 21.37).abs() < 0.2), "{:?}", an.candy);
+        assert!(an.candy.len() <= 2, "{:?}", an.candy);
     }
 
     #[test]

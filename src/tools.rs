@@ -28,6 +28,9 @@ pub fn run_cli(args: &Args) {
     if args.sim {
         sim_report(args);
     }
+    if args.notes {
+        notes_report(args);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -42,8 +45,11 @@ pub struct SimOut {
     /// (seconds spent, hits taken) per section kind: Calm, Normal, Intense, Drop.
     pub by_kind: [(f32, u32); 4],
     pub heart_broken: Option<f32>,
-    /// Heart phases broken early.
-    pub breaks: u32,
+    /// Every time the run went deeper: (song time, depths). A Heart that escaped is the +1 at
+    /// the end.
+    pub dives: Vec<(f32, u32)>,
+    /// The first Heart of the song: depths its break took (0 = it escaped).
+    pub first_dive: u32,
     pub level: u32,
     pub kills: u32,
     pub max_bullets: usize,
@@ -97,13 +103,18 @@ pub fn simulate(an: &crate::analysis::Analysis, level: &crate::level::Level, dif
         }
         w.player.level = give;
     }
+    // `--song-idx N` stands for a later depth: two depths per song is a steady run
+    w.depth = song_idx * 2;
+    let depth0 = w.depth;
     w.begin_song(level.active_secs, song_idx, level.seed);
+    w.set_heart_window(0.0, level.duration, level.active_secs);
     w.gun = level.gun.clone();
     w.set_phases(&level.phases);
     w.beat_len = if level.bpm > 1.0 { 60.0 / level.bpm } else { 0.5 };
     let mut bot = DelayedBot::new(bot_delay);
     let dt = 1.0 / 120.0;
-    let mut out = SimOut { breaks: 0,
+    let mut last_depth = depth0;
+    let mut out = SimOut { dives: Vec::new(), first_dive: 0,
         first_death: None,
         deaths: 0,
         hit_times: Vec::new(),
@@ -167,6 +178,13 @@ pub fn simulate(an: &crate::analysis::Analysis, level: &crate::level::Level, dif
         if w.heart.broken && out.heart_broken.is_none() {
             out.heart_broken = Some(t);
         }
+        if w.depth != last_depth {
+            if out.dives.is_empty() && w.dived {
+                out.first_dive = w.depth - last_depth;
+            }
+            out.dives.push((t, w.depth - last_depth));
+            last_depth = w.depth;
+        }
         out.max_bullets = out.max_bullets.max(w.bullets.len());
         out.max_enemies = out.max_enemies.max(w.enemies.len());
         bullet_sum += w.bullets.len() as f64;
@@ -177,7 +195,10 @@ pub fn simulate(an: &crate::analysis::Analysis, level: &crate::level::Level, dif
     out.by_pat = w.stats.by_pat;
     out.by_tile = w.stats.by_tile;
     out.level = w.player.level;
-    out.breaks = w.stats.phases_broken;
+    if !w.dived && !w.ended {
+        // the level's end event did not fire inside the loop: the Heart still escapes
+        out.dives.push((t, 1));
+    }
     out.kills = w.stats.kills;
     out.mean_bullets = (bullet_sum / steps.max(1) as f64) as f32;
     out
@@ -198,6 +219,8 @@ fn sim_report(args: &Args) {
     println!("bot reaction delay {:.0} ms, {} run(s) per difficulty; death = first death time, the bot is revived to finish the song", args.bot_delay, args.runs.max(1));
     println!("{:<26} {:>4} {:>4} {:<6} {:>5} {:>4} {:>4} {:>19} {:>17} {:>5} {:>3} {:>3} {:>2}  hits per 30 s", "track", "dur", "bpm", "diff", "death", "dths", "hits", "hits/min C/N/I/D", "src b/e/t/l/w/h", "heart", "lvl", "bul", "en");
     let mut src_tot = [[0u32; 6]; 7];
+    // per tier: first Heart escaped / +1 / +2 / +3, and all depths gained
+    let mut dive_tot = [[0u32; 5]; 7];
     let mut pat_tot = [[0u32; 12]; 7];
     let mut tile_tot = [[0u32; 9]; 7];
     let mut totals = [(0u32, 0u32, 0.0f32, 0.0f32); 7];
@@ -217,8 +240,14 @@ fn sim_report(args: &Args) {
             for run in 0..args.runs.max(1) {
                 let level = crate::level::generate(&loaded.an, args.seed + run as u64, diff);
                 let o = simulate(&loaded.an, &level, diff, delay, args.song_idx, args.give);
-                if args.give > 0 {
-                    println!("    with {} upgrades: {} phase(s) broken early, heart broken at {:?}", args.give, o.breaks, o.heart_broken.map(|t| t as i32));
+                {
+                    let ds: Vec<String> = o.dives.iter().map(|d| format!("+{}@{:.0}s", d.1, d.0)).collect();
+                    println!("    dives: {}  (first Heart: {})", ds.join(" "), if o.first_dive == 0 { "escaped".to_string() } else { format!("+{}", o.first_dive) });
+                }
+                {
+                    let dt = &mut dive_tot[di];
+                    dt[o.first_dive.min(3) as usize] += 1;
+                    dt[4] += o.dives.iter().map(|d| d.1).sum::<u32>();
                 }
                 let per_min = |k: usize| -> String {
                     let (secs, hits) = o.by_kind[k];
@@ -278,8 +307,138 @@ fn sim_report(args: &Args) {
                 frac / n as f32,
                 src_tot[di]
             );
+            let dv = dive_tot[di];
+            println!("       first Heart: escaped {}  +1 {}  +2 {}  +3 {}   depths per song {:.2}", dv[0], dv[1], dv[2], dv[3], dv[4] as f32 / n as f32);
             println!("       bullet hits by pattern ring/fan/spiral/cross/flower/arc/wall/burst/pincer/dart/orbiter/elite {:?}", pat_tot[di]);
             println!("       tile hits by checker/rows/cols/ring/cross/diag/scatter/colband/rowband {:?}", tile_tot[di]);
+        }
+    }
+}
+
+/// Sorted event times that have a partner within `tol` in `other` (also sorted), as a count.
+fn matched(times: &[f32], other: &[f32], tol: f32) -> usize {
+    times
+        .iter()
+        .filter(|&&t| {
+            let i = other.partition_point(|&o| o < t - tol);
+            i < other.len() && other[i] <= t + tol
+        })
+        .count()
+}
+
+/// Read back the notes the player made while playing (`App::sync_note`) against what the
+/// analysis heard and what the level did. The taps are the important part: they say what the
+/// player hears as the main line, so each stream of events is scored by how well it matches them.
+fn notes_report(args: &Args) {
+    let path = args.notes_file.clone().or_else(crate::notes_path);
+    let Some(path) = path else { return };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no notes at {}", path.display());
+        return;
+    };
+    let mut songs: std::collections::BTreeMap<String, Vec<(String, f32)>> = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() >= 3 {
+            if let Ok(t) = f[1].parse::<f32>() {
+                songs.entry(f[2].to_string()).or_default().push((f[0].to_string(), t));
+            }
+        }
+    }
+    println!("notes from {}: {} song(s)", path.display(), songs.len());
+    const TOL: f32 = 0.08;
+    for (song, notes) in &songs {
+        println!();
+        println!("{song}");
+        let progress = AtomicU32::new(0);
+        let stage = AtomicU32::new(0);
+        let loaded = match crate::load_track(Path::new(song), args.seed, crate::DIFFS[2].0, &progress, &stage) {
+            Ok(l) => l,
+            Err(e) => {
+                println!("  cannot read it: {e}");
+                continue;
+            }
+        };
+        let (an, level) = (&loaded.an, &loaded.level);
+        let of = |k: &str| -> Vec<f32> {
+            let mut v: Vec<f32> = notes.iter().filter(|n| n.0 == k).map(|n| n.1).collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            v
+        };
+        let taps = of("TAP");
+        println!("  {} taps, {} good, {} off, {} ear candy   (tempo {:.0} BPM, beat confidence {:.2})", taps.len(), of("GOOD").len(), of("BAD").len(), of("CANDY").len(), an.bpm, an.beat_conf);
+        let band = |b: crate::analysis::Band| -> Vec<f32> { an.onsets.iter().filter(|o| o.band == b).map(|o| o.t).collect() };
+        let line: Vec<f32> = crate::level::main_line(an).iter().map(|n| n.0).collect();
+        let pulse = |echo: bool| -> Vec<f32> {
+            level
+                .events
+                .iter()
+                .filter(|e| match e.ev {
+                    Ev::Pulse { pattern, count, soft, .. } => echo == (pattern == Pattern::Fan && count == 3 && soft),
+                    _ => false,
+                })
+                .map(|e| e.t)
+                .collect()
+        };
+        if taps.len() >= 8 {
+            // a player taps a little late or early by a steady amount: take that out first
+            let mut lags: Vec<f32> = taps
+                .iter()
+                .filter_map(|&t| {
+                    let i = line.partition_point(|&o| o < t);
+                    let near = [i.checked_sub(1).and_then(|j| line.get(j)), line.get(i)].into_iter().flatten().map(|&o| t - o).min_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap_or(std::cmp::Ordering::Equal));
+                    near.filter(|d| d.abs() < 0.25)
+                })
+                .collect();
+            lags.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let lag = lags.get(lags.len() / 2).copied().unwrap_or(0.0);
+            let taps: Vec<f32> = taps.iter().map(|t| t - lag).collect();
+            let (t0, t1) = (taps[0] - 1.0, taps[taps.len() - 1] + 1.0);
+            println!("  taps span {:.0}s - {:.0}s, {:.2} a second, tapped {:+.0} ms against the notes", t0 + 1.0, t1 - 1.0, taps.len() as f32 / (t1 - t0 - 2.0).max(1.0), lag * 1000.0);
+            println!("  {:<26} {:>6} {:>10} {:>12}", "stream", "events", "taps met", "events tapped");
+            let streams: [(&str, Vec<f32>); 9] = [
+                ("Heart pulses", pulse(false)),
+                ("Heart echoes", pulse(true)),
+                ("main line (all its notes)", line.clone()),
+                ("low onsets (kick, bass)", band(crate::analysis::Band::Low)),
+                ("mid onsets (snare, notes)", band(crate::analysis::Band::Mid)),
+                ("high onsets (hats)", band(crate::analysis::Band::High)),
+                ("chimes (pitched hits)", an.chimes.iter().map(|c| c.t).collect()),
+                ("beats", an.beats.clone()),
+                ("enemy portals", level.events.iter().filter(|e| matches!(e.ev, Ev::Spawn { .. })).map(|e| e.t).collect()),
+            ];
+            for (name, ev) in &streams {
+                let inside: Vec<f32> = ev.iter().copied().filter(|&t| t >= t0 && t <= t1).collect();
+                let met = matched(&taps, &inside, TOL);
+                let tapped = matched(&inside, &taps, TOL);
+                println!("  {:<26} {:>6} {:>9.0}% {:>11.0}%", name, inside.len(), 100.0 * met as f32 / taps.len() as f32, 100.0 * tapped as f32 / inside.len().max(1) as f32);
+            }
+        } else if !taps.is_empty() {
+            println!("  too few taps to compare (8 or more are needed)");
+        }
+        for t in of("CANDY") {
+            let near = an.candy.iter().map(|c| (c.t - t).abs()).fold(f32::MAX, f32::min);
+            let found: Vec<String> = an.candy.iter().filter(|c| (c.t - t).abs() < 15.0).map(|c| format!("{:.1}s {:?}", c.t, c.kind)).collect();
+            println!("  ear candy marked at {:.1}s: {}  (found nearby: {})", t, if near < 1.2 { "the level has one there".to_string() } else { "MISSED".to_string() }, if found.is_empty() { "none".to_string() } else { found.join(", ") });
+        }
+        for (k, label) in [("GOOD", "good"), ("BAD", "off")] {
+            for t in of(k) {
+                let sec = an.sections.iter().position(|s| t >= s.t0 && t < s.t1).unwrap_or(0);
+                let s = &an.sections[sec.min(an.sections.len().saturating_sub(1))];
+                let n = |v: &[f32]| v.iter().filter(|&&x| (x - t).abs() <= 4.0).count();
+                println!(
+                    "  sync {label} at {:.1}s: section {} ({:?}, {:.0}s-{:.0}s), within 4 s: {} pulses, {} echoes, {} line notes, {} beats",
+                    t,
+                    sec,
+                    s.kind,
+                    s.t0,
+                    s.t1,
+                    n(&pulse(false)),
+                    n(&pulse(true)),
+                    n(&line),
+                    n(&an.beats)
+                );
+            }
         }
     }
 }
