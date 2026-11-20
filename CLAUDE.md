@@ -82,6 +82,12 @@ always pulsing or moving. So:
   nothing may need a modifier key.
 - look at a screenshot next to the sunset before shipping a visual change
 
+## Game design rules
+- **The player chooses the difficulty; it never changes in secret.** Never make the game harder
+  because the player did well (the old "rage" did, and it felt wrong). Difficulty comes only
+  from what the player picked: the difficulty tier, mutators, and the depth they choose to dive
+  to.
+
 ## Checking your own work
 Each of these takes seconds. Replace `MUSIC` with a folder of songs on this PC and `FILE` with one
 song.
