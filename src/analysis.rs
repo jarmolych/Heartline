@@ -100,6 +100,83 @@ pub struct Section {
     pub t1: f32,
     pub intensity: f32,
     pub kind: SectionKind,
+    /// Which distinct part of the song this is (0 = A, 1 = B, ...): sections that sound alike
+    /// share a phase, so a returning chorus has the phase of the first chorus.
+    pub phase: u8,
+    /// How many musical layers (`LayerKind`) play through most of this section.
+    pub layers: u8,
+}
+
+/// The musical layers the analysis tells apart. Each is either playing or not, bar by bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayerKind {
+    /// Kick drum / main beat.
+    Beat = 0,
+    /// Sustained low end (bass line).
+    Bass,
+    /// Snares, claps and other mid-band hits.
+    Snare,
+    /// Hi-hats and other high-band hits.
+    Hats,
+    /// Sustained mid band: lead melody, vocals, pads.
+    Lead,
+    /// Ear candy: pitched hits high in the spectrum (chimes, bells, plucks).
+    Chimes,
+}
+
+pub const N_LAYERS: usize = 6;
+pub const LAYER_KINDS: [LayerKind; N_LAYERS] = [LayerKind::Beat, LayerKind::Bass, LayerKind::Snare, LayerKind::Hats, LayerKind::Lead, LayerKind::Chimes];
+
+/// When one musical layer plays: time ranges snapped to bar lines.
+#[derive(Clone, Debug)]
+pub struct Layer {
+    pub kind: LayerKind,
+    pub spans: Vec<(f32, f32)>,
+}
+
+impl Layer {
+    pub fn active(&self, t: f32) -> bool {
+        self.spans.iter().any(|&(a, b)| t >= a && t < b)
+    }
+    /// Fraction of `t0..t1` this layer plays in.
+    pub fn coverage(&self, t0: f32, t1: f32) -> f32 {
+        let sum: f32 = self.spans.iter().map(|&(a, b)| (b.min(t1) - a.max(t0)).max(0.0)).sum();
+        sum / (t1 - t0).max(1e-3)
+    }
+}
+
+/// A pitched hit in the mid or upper spectrum.
+#[derive(Clone, Copy, Debug)]
+pub struct Chime {
+    pub t: f32,
+    /// 0 (about 380 Hz) .. 1 (top of the spectrum).
+    pub pitch: f32,
+    pub strength: f32,
+    /// Two separate tones sounded at once (phone keypad tones, bell dyads).
+    pub dual: bool,
+}
+
+/// What kind of ear candy a moment is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandyKind {
+    /// A quick run of pitched notes: an arpeggio, a glissando, a dialled number.
+    Run = 0,
+    /// Two-tone hits, like a phone keypad.
+    Dial,
+    /// A pitched sound the song uses only once or twice.
+    Rare,
+}
+
+/// Ear candy: a small, special sound the song drops in. The level marks each one.
+#[derive(Clone, Copy, Debug)]
+pub struct Candy {
+    pub t: f32,
+    pub dur: f32,
+    pub kind: CandyKind,
+    /// Pitch (0..1) at the start and at the end.
+    pub pitch: f32,
+    pub pitch_end: f32,
+    pub strength: f32,
 }
 
 pub struct Analysis {
@@ -120,9 +197,17 @@ pub struct Analysis {
     pub beat_conf: f32,
     /// 0..1 confidence in the bar phase (`downbeat`): margin of the winning phase over the runner-up.
     pub downbeat_conf: f32,
+    /// One entry per `LayerKind`, in that order.
+    pub layers: Vec<Layer>,
+    pub chimes: Vec<Chime>,
+    /// The song's ear candy, in time order (a few per minute at most).
+    pub candy: Vec<Candy>,
 }
 
 impl Analysis {
+    pub fn layer(&self, k: LayerKind) -> Option<&Layer> {
+        self.layers.get(k as usize)
+    }
     pub fn intensity_at(&self, t: f32) -> f32 {
         if self.intensity.is_empty() {
             return 0.0;
@@ -793,10 +878,331 @@ fn label_sections(edges: &[f32], score: &[f32], intensity: &[f32], hop_dt: f32) 
                 kind = SectionKind::Drop;
             }
         }
-        out.push(Section { t0: r.0, t1: r.1, intensity: r.3, kind });
+        out.push(Section { t0: r.0, t1: r.1, intensity: r.3, kind, phase: 0, layers: 0 });
         prev_q = qn;
     }
     out
+}
+
+// ---- layers, chimes, phases ----
+
+/// Lowest spectrum band chimes are looked for in (about 380 Hz, so keypad tones and mallets count).
+const CHIME_LO: usize = 9;
+/// Two separate bands together must hold this much of the rise to count as a two-tone hit.
+const CHIME_DUAL: f32 = 0.85;
+/// Notes at most this far apart belong to one run, and a run needs this many notes.
+const RUN_GAP: f32 = 0.4;
+const RUN_MIN: usize = 4;
+/// A pitch band counts as rare when the song uses it at most this many times.
+const RARE_MAX: usize = 3;
+/// At least this many seconds between two pieces of ear candy.
+const CANDY_GAP: f32 = 7.0;
+/// A chime's rise must be concentrated in two neighbouring bands by at least this fraction
+/// (hats and snares rise across the whole top end).
+const CHIME_CONC: f32 = 0.6;
+/// Smallest reference value (80th percentile over bars) for a layer to exist at all:
+/// hits per second for Beat / Snare / Hats / Chimes, normalised band level for Bass / Lead.
+const LAYER_MIN_REF: [f32; N_LAYERS] = [0.6, 0.1, 0.4, 1.0, 0.1, 0.35];
+/// A layer switches on at this fraction of its reference and off below the second one.
+const LAYER_ON: f32 = 0.5;
+const LAYER_OFF: f32 = 0.3;
+/// Sections closer than this (RMS distance of z-scored features) are the same phase.
+const PHASE_DIST: f32 = 0.45;
+const MAX_PHASES: usize = 8;
+
+/// Pitched hits in the upper spectrum: frames where the rise in log-magnitude is concentrated in
+/// one or two bands, peak-picked, away from kicks.
+fn pick_chimes(spec: &[[f32; N_SPEC]], onsets: &[Onset], hop_dt: f32) -> Vec<Chime> {
+    let frames = spec.len();
+    let mut score = vec![0.0f32; frames];
+    let mut bin = vec![0u8; frames];
+    let mut dual = vec![false; frames];
+    for i in 2..frames {
+        let mut rises = [0.0f32; N_SPEC];
+        let mut total = 0.0f32;
+        for k in CHIME_LO..N_SPEC {
+            // Compare magnitudes, not log-magnitudes: in the log domain the faint side lobes of
+            // a pitched hit rise nearly as much as its own band.
+            let d = spec[i][k].exp() - spec[i - 2][k].exp();
+            if d > 0.0 {
+                rises[k] = d;
+                total += d;
+            }
+        }
+        if total < 1e-6 {
+            continue;
+        }
+        // One tone: a band and its two neighbours hold most of the rise.
+        let (mut best, mut bk) = (0.0f32, CHIME_LO);
+        for k in CHIME_LO..N_SPEC {
+            let trio = rises[k] + if k > CHIME_LO { rises[k - 1] } else { 0.0 } + if k + 1 < N_SPEC { rises[k + 1] } else { 0.0 };
+            if trio > best && rises[k] >= 0.4 * trio {
+                best = trio;
+                bk = k;
+            }
+        }
+        if best / total >= CHIME_CONC {
+            score[i] = best;
+            bin[i] = bk as u8;
+        } else {
+            // Two tones at once: the two strongest bands, at least two bands apart.
+            let mut k1 = CHIME_LO;
+            for k in CHIME_LO..N_SPEC {
+                if rises[k] > rises[k1] {
+                    k1 = k;
+                }
+            }
+            let mut k2 = usize::MAX;
+            for k in CHIME_LO..N_SPEC {
+                if (k as i64 - k1 as i64).abs() >= 2 && (k2 == usize::MAX || rises[k] > rises[k2]) {
+                    k2 = k;
+                }
+            }
+            if k2 != usize::MAX && rises[k2] >= 0.5 * rises[k1] {
+                let near = |k: usize| rises[k] + if k > CHIME_LO { rises[k - 1] * 0.5 } else { 0.0 } + if k + 1 < N_SPEC { rises[k + 1] * 0.5 } else { 0.0 };
+                let both = near(k1) + near(k2);
+                if both / total >= CHIME_DUAL {
+                    score[i] = both;
+                    bin[i] = k1.min(k2) as u8;
+                    dual[i] = true;
+                }
+            }
+        }
+    }
+    let nonzero: Vec<f32> = score.iter().copied().filter(|&s| s > 0.0).collect();
+    if nonzero.len() < 8 {
+        return Vec::new();
+    }
+    // Relative to the song's own strong pitched hits, so a busy low-mid does not hide them.
+    let (m, sd) = mean_std(&nonzero);
+    let top = percentile(&nonzero, 0.98).max(0.3);
+    let thr = (m + 1.5 * sd).min(0.45 * top).max(0.3 * top).max(0.3);
+    // Snares fail the concentration test on their own; only kicks need masking out.
+    let drums: Vec<f32> = onsets.iter().filter(|o| o.band == Band::Low).map(|o| o.t).collect();
+    let near_drum = |t: f32| -> bool {
+        let j = drums.partition_point(|&d| d < t - 0.03);
+        j < drums.len() && drums[j] <= t + 0.03
+    };
+    let mut out: Vec<Chime> = Vec::new();
+    for i in 3..frames.saturating_sub(3) {
+        if score[i] < thr || (i - 3..=i + 3).any(|j| score[j] > score[i]) {
+            continue;
+        }
+        let t = i as f32 * hop_dt + ONSET_BIAS_S;
+        if near_drum(t) || out.last().is_some_and(|c| t - c.t < 0.09) {
+            continue;
+        }
+        out.push(Chime {
+            t,
+            pitch: (bin[i] as usize - CHIME_LO) as f32 / (N_SPEC - 1 - CHIME_LO) as f32,
+            strength: (score[i] / top).min(1.5),
+            dual: dual[i],
+        });
+    }
+    out
+}
+
+/// Pick the ear candy out of the chimes: quick runs of notes, two-tone hits, and pitched sounds
+/// the song hardly ever uses. Regular chime patterns (a bell on every off-beat) are a layer, not
+/// candy, so they are left out.
+fn find_candy(chimes: &[Chime], duration: f32) -> Vec<Candy> {
+    const BINS: usize = 8;
+    let bin_of = |p: f32| ((p * BINS as f32) as usize).min(BINS - 1);
+    let mut uses = [0usize; BINS];
+    for c in chimes {
+        uses[bin_of(c.pitch)] += 1;
+    }
+    let mut found: Vec<Candy> = Vec::new();
+    // Runs: maximal chains of notes closer than RUN_GAP that move in pitch.
+    let mut i = 0;
+    while i < chimes.len() {
+        let mut j = i;
+        while j + 1 < chimes.len() && chimes[j + 1].t - chimes[j].t <= RUN_GAP {
+            j += 1;
+        }
+        let n = j - i + 1;
+        if n >= RUN_MIN {
+            let run = &chimes[i..=j];
+            let (lo, hi) = run.iter().fold((1.0f32, 0.0f32), |a, c| (a.0.min(c.pitch), a.1.max(c.pitch)));
+            // A run that sits on one note for bars is a part of the groove, not a flourish.
+            if hi - lo >= 0.2 && run[n - 1].t - run[0].t <= 4.0 {
+                let strength = run.iter().map(|c| c.strength).sum::<f32>() / n as f32;
+                found.push(Candy { t: run[0].t, dur: run[n - 1].t - run[0].t, kind: CandyKind::Run, pitch: run[0].pitch, pitch_end: run[n - 1].pitch, strength: strength + 0.1 * n as f32 });
+            }
+        }
+        i = j + 1;
+    }
+    for (k, c) in chimes.iter().enumerate() {
+        let alone = (k == 0 || c.t - chimes[k - 1].t > 0.6) && (k + 1 == chimes.len() || chimes[k + 1].t - c.t > 0.6);
+        if c.dual && c.strength >= 0.45 {
+            found.push(Candy { t: c.t, dur: 0.3, kind: CandyKind::Dial, pitch: c.pitch, pitch_end: c.pitch, strength: c.strength });
+        } else if alone && c.strength >= 0.6 && uses[bin_of(c.pitch)] <= RARE_MAX {
+            found.push(Candy { t: c.t, dur: 0.3, kind: CandyKind::Rare, pitch: c.pitch, pitch_end: c.pitch, strength: c.strength + 0.3 });
+        }
+    }
+    // What a song does all the time is part of its sound, not candy: a kind that turns up more
+    // than once every 15 seconds is dropped for this song.
+    for kind in [CandyKind::Run, CandyKind::Dial, CandyKind::Rare] {
+        if found.iter().filter(|c| c.kind == kind).count() as f32 > duration / 15.0 {
+            found.retain(|c| c.kind != kind);
+        }
+    }
+    // Keep it special: the strongest first, none within CANDY_GAP of one already kept, and no
+    // more than one per 25 seconds of song.
+    let cap = (duration / 25.0).ceil() as usize;
+    found.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+    let mut kept: Vec<Candy> = Vec::new();
+    for c in found {
+        if kept.len() < cap && c.t > 4.0 && c.t < duration - 5.0 && kept.iter().all(|k| (k.t - c.t).abs() >= CANDY_GAP) {
+            kept.push(c);
+        }
+    }
+    kept.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+    kept
+}
+
+/// Decide, bar by bar, which musical layers are playing.
+fn find_layers(bars: &[f32], duration: f32, onsets: &[Onset], feats: &[Feat], chimes: &[Chime], hop_dt: f32) -> Vec<Layer> {
+    let mut edges: Vec<f32> = bars.iter().copied().filter(|&b| b < duration - 0.05).collect();
+    if edges.first().map_or(true, |&b| b > 0.5) {
+        edges.insert(0, 0.0);
+    }
+    edges.push(duration);
+    let nb = edges.len() - 1;
+    let frames = feats.len();
+    let rate = |times: &mut dyn Iterator<Item = f32>| -> Vec<f32> {
+        let mut v = vec![0.0f32; nb];
+        for t in times {
+            let b = edges.partition_point(|&e| e <= t);
+            if b >= 1 && b <= nb {
+                v[b - 1] += 1.0;
+            }
+        }
+        for (b, x) in v.iter_mut().enumerate() {
+            *x /= (edges[b + 1] - edges[b]).max(0.2);
+        }
+        v
+    };
+    // The median over a bar ignores drum transients, so it measures what is sustained.
+    let median = |get: &dyn Fn(&Feat) -> f32| -> Vec<f32> {
+        (0..nb)
+            .map(|b| {
+                if frames == 0 {
+                    return 0.0;
+                }
+                let a = ((edges[b] / hop_dt) as usize).min(frames - 1);
+                let z = ((edges[b + 1] / hop_dt) as usize).clamp(a + 1, frames);
+                let mut v: Vec<f32> = feats[a..z].iter().map(get).collect();
+                v.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+                v[v.len() / 2]
+            })
+            .collect()
+    };
+    let band = |b: Band| rate(&mut onsets.iter().filter(|o| o.band == b).map(|o| o.t));
+    let values: [Vec<f32>; N_LAYERS] = [
+        band(Band::Low),
+        median(&|f| f.low),
+        band(Band::Mid),
+        band(Band::High),
+        median(&|f| f.mid),
+        rate(&mut chimes.iter().map(|c| c.t)),
+    ];
+    LAYER_KINDS
+        .iter()
+        .map(|&kind| {
+            let v = &values[kind as usize];
+            let reference = percentile(v, 0.8);
+            let mut on = vec![false; nb];
+            if reference >= LAYER_MIN_REF[kind as usize] {
+                let mut state = false;
+                for b in 0..nb {
+                    state = if state { v[b] >= LAYER_OFF * reference } else { v[b] >= LAYER_ON * reference };
+                    on[b] = state;
+                }
+                // A single odd bar does not start or stop a layer.
+                for b in 1..nb.saturating_sub(1) {
+                    if on[b] != on[b - 1] && on[b] != on[b + 1] {
+                        on[b] = on[b - 1];
+                    }
+                }
+            }
+            let mut spans: Vec<(f32, f32)> = Vec::new();
+            for b in 0..nb {
+                if on[b] {
+                    match spans.last_mut() {
+                        Some(s) if (s.1 - edges[b]).abs() < 1e-3 => s.1 = edges[b + 1],
+                        _ => spans.push((edges[b], edges[b + 1])),
+                    }
+                }
+            }
+            Layer { kind, spans }
+        })
+        .collect()
+}
+
+/// Give every section a phase id: sections whose spectrum, drum density and loudness are alike
+/// share one. Also counts the layers playing through each section.
+fn label_phases(sections: &mut [Section], feats: &[Feat], onsets: &[Onset], layers: &[Layer], hop_dt: f32) {
+    const D: usize = N_SPEC + 4;
+    let frames = feats.len();
+    let n = sections.len();
+    for s in sections.iter_mut() {
+        s.layers = layers.iter().filter(|l| l.coverage(s.t0, s.t1) >= 0.5).count() as u8;
+    }
+    if n < 2 || frames == 0 {
+        return;
+    }
+    let mut f: Vec<[f32; D]> = sections
+        .iter()
+        .map(|s| {
+            let a = ((s.t0 / hop_dt) as usize).min(frames - 1);
+            let z = ((s.t1 / hop_dt) as usize).clamp(a + 1, frames);
+            let len = (z - a) as f32;
+            let secs = (s.t1 - s.t0).max(0.5);
+            let mut v = [0.0f32; D];
+            for ft in &feats[a..z] {
+                for k in 0..N_SPEC {
+                    v[k] += ft.spec[k] / len;
+                }
+                v[N_SPEC + 3] += ft.rms / len;
+            }
+            for o in onsets.iter().filter(|o| o.t >= s.t0 && o.t < s.t1) {
+                v[N_SPEC + o.band as usize] += 1.0 / secs;
+            }
+            v
+        })
+        .collect();
+    for d in 0..D {
+        let col: Vec<f32> = f.iter().map(|v| v[d]).collect();
+        let (m, sd) = mean_std(&col);
+        // The drum densities and loudness are 4 values against 24 spectrum bands: weigh them up.
+        let w = if d >= N_SPEC { 2.0 } else { 1.0 };
+        for v in f.iter_mut() {
+            v[d] = if sd > 1e-4 { w * (v[d] - m) / sd } else { 0.0 };
+        }
+    }
+    let dist = |a: &[f32; D], b: &[f32; D]| -> f32 { (a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>() / D as f32).sqrt() };
+    let mut centroids: Vec<([f32; D], f32)> = Vec::new();
+    for (i, s) in sections.iter_mut().enumerate() {
+        let mut best = (f32::MAX, 0usize);
+        for (p, (c, _)) in centroids.iter().enumerate() {
+            let d = dist(&f[i], c);
+            if d < best.0 {
+                best = (d, p);
+            }
+        }
+        if !centroids.is_empty() && (best.0 < PHASE_DIST || centroids.len() >= MAX_PHASES) {
+            let (c, w) = &mut centroids[best.1];
+            for d in 0..D {
+                c[d] = (c[d] * *w + f[i][d]) / (*w + 1.0);
+            }
+            *w += 1.0;
+            s.phase = best.1 as u8;
+        } else {
+            s.phase = centroids.len() as u8;
+            centroids.push((f[i], 1.0));
+        }
+    }
 }
 
 /// Chance-corrected fraction of strong onsets that land within 25 ms of the beat grid's 16th-note
@@ -1168,7 +1574,7 @@ pub fn analyze(mono: &[f32], sr: u32, progress: &AtomicU32) -> Analysis {
     let sections = label_sections(&refined, &energy_score, &intensity, hop_dt);
     let mut sections = sections;
     if sections.is_empty() {
-        sections.push(Section { t0: 0.0, t1: duration, intensity: 0.5, kind: SectionKind::Normal });
+        sections.push(Section { t0: 0.0, t1: duration, intensity: 0.5, kind: SectionKind::Normal, phase: 0, layers: 0 });
     }
 
     // ---- sustained mid-band phrases (drive laser sweeps) ----
@@ -1197,6 +1603,12 @@ pub fn analyze(mono: &[f32], sr: u32, progress: &AtomicU32) -> Analysis {
         }
     }
 
+    // ---- musical layers, chimes and phases ----
+    let chimes = pick_chimes(&spec, &onsets, hop_dt);
+    let candy = find_candy(&chimes, duration);
+    let layers = find_layers(&bars, duration, &onsets, &feats, &chimes, hop_dt);
+    label_phases(&mut sections, &feats, &onsets, &layers, hop_dt);
+
     // ---- content seed ----
     let seed = crate::rng::fnv1a(
         mono.iter()
@@ -1205,7 +1617,7 @@ pub fn analyze(mono: &[f32], sr: u32, progress: &AtomicU32) -> Analysis {
     ) ^ (mono.len() as u64).wrapping_mul(0x9E37_79B9);
 
     progress.store(1000, Ordering::Relaxed);
-    Analysis { duration, hop_dt, feats, intensity, onsets, bpm, beats, downbeat, sections, phrases, silences, seed, beat_conf, downbeat_conf }
+    Analysis { duration, hop_dt, feats, intensity, onsets, bpm, beats, downbeat, sections, phrases, silences, seed, beat_conf, downbeat_conf, layers, chimes, candy }
 }
 
 #[cfg(test)]
@@ -1473,6 +1885,77 @@ mod tests {
         assert!(hot / an.duration < 0.6, "too much of the song is Intense: {:?}", an.sections);
         let mean = an.intensity.iter().sum::<f32>() / an.intensity.len() as f32;
         assert!((0.4..0.6).contains(&mean), "intensity mean {mean}");
+    }
+
+    #[test]
+    fn repeated_sections_share_a_phase() {
+        // intro 0-16, verse 16-40, chorus 40-64, breakdown 64-72, chorus 72-96
+        let sr = 44_100;
+        let an = analyze(&compressed_song(sr), sr, &AtomicU32::new(0));
+        let phase_at = |t: f32| an.section_at(t).map(|s| s.phase).unwrap();
+        assert_eq!(phase_at(52.0), phase_at(84.0), "the two choruses differ: {:?}", an.sections);
+        assert_ne!(phase_at(8.0), phase_at(52.0), "intro and chorus share a phase: {:?}", an.sections);
+        assert_ne!(phase_at(28.0), phase_at(52.0), "verse and chorus share a phase: {:?}", an.sections);
+        // The groove (kick) is missing from the intro and the breakdown.
+        let beat = an.layer(LayerKind::Beat).unwrap();
+        assert!(beat.active(30.0) && beat.active(50.0) && beat.active(90.0), "{:?}", beat.spans);
+        assert!(!beat.active(6.0) && !beat.active(68.0), "{:?}", beat.spans);
+    }
+
+    #[test]
+    fn chimes_are_found_between_the_drums() {
+        // A 120 BPM kick with a short 2.5 kHz bell on every off-beat of the second half.
+        let sr = 44_100u32;
+        let srf = sr as f32;
+        let tau = std::f32::consts::TAU;
+        let n = (24.0 * srf) as usize;
+        let mut x = vec![0.0f32; n];
+        for (i, s) in x.iter_mut().enumerate() {
+            let t = i as f32 / srf;
+            let tb = t % 0.5;
+            *s += (tau * 55.0 * tb).sin() * (-tb * 18.0).exp() * 0.7;
+            if t >= 12.0 {
+                let tc = (t + 0.25) % 0.5;
+                *s += (tau * 2500.0 * tc).sin() * (-tc * 30.0).exp() * 0.25;
+            }
+        }
+        let an = analyze(&x, sr, &AtomicU32::new(0));
+        let early = an.chimes.iter().filter(|c| c.t < 11.5).count();
+        let late = an.chimes.iter().filter(|c| c.t >= 12.0).count();
+        assert!(early <= 2 && late >= 18, "chimes before {early}, after {late}");
+        let off = an.chimes.iter().filter(|c| c.t >= 12.0 && ((c.t + 0.25) % 0.5).min(0.5 - (c.t + 0.25) % 0.5) < 0.03).count();
+        assert!(off * 10 >= late * 9, "{off} of {late} chimes are on the bell");
+        let ch = an.layer(LayerKind::Chimes).unwrap();
+        assert!(ch.active(18.0) && !ch.active(5.0), "{:?}", ch.spans);
+        // A bell on every off-beat is a layer, not ear candy.
+        assert!(an.candy.is_empty(), "{:?}", an.candy);
+    }
+
+    #[test]
+    fn a_run_of_notes_is_ear_candy() {
+        // A 120 BPM kick, and at 12.1 s six quick rising notes (a little arpeggio).
+        let sr = 44_100u32;
+        let srf = sr as f32;
+        let tau = std::f32::consts::TAU;
+        let n = (24.0 * srf) as usize;
+        let mut x = vec![0.0f32; n];
+        for (i, s) in x.iter_mut().enumerate() {
+            let t = i as f32 / srf;
+            let tb = t % 0.5;
+            *s += (tau * 55.0 * tb).sin() * (-tb * 18.0).exp() * 0.7;
+            for k in 0..6 {
+                let t0 = 12.1 + k as f32 * 0.16;
+                if t >= t0 && t < t0 + 0.15 {
+                    let f = 900.0 * 1.26f32.powi(k);
+                    *s += (tau * f * (t - t0)).sin() * (-(t - t0) * 28.0).exp() * 0.3;
+                }
+            }
+        }
+        let an = analyze(&x, sr, &AtomicU32::new(0));
+        assert_eq!(an.candy.len(), 1, "{:?} from chimes {:?}", an.candy, an.chimes);
+        let c = an.candy[0];
+        assert_eq!(c.kind, CandyKind::Run);
+        assert!((c.t - 12.1).abs() < 0.25 && c.pitch_end > c.pitch, "{c:?}");
     }
 
     #[test]

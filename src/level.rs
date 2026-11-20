@@ -12,7 +12,7 @@
 //!    2, 3, 4 (and the off-beats) is the same every bar, and the same again when that kind of
 //!    section returns, so patterns can be learned.
 
-use crate::analysis::{Analysis, Band, Onset, SectionKind};
+use crate::analysis::{Analysis, Band, LayerKind, Onset, SectionKind, N_LAYERS};
 use crate::rng::Rng;
 
 pub const COLS: usize = 15;
@@ -68,12 +68,20 @@ pub enum Pattern {
     Burst,
     /// Two cones at `aim +- PINCER_OFFSET`, leaving the lane through the player open.
     Pincer,
+    /// Five short lines of bullets fanned `COMB_STEP` apart around the player: step into a gap.
+    Comb,
+    /// A cone whose bullets are slower from one side to the other, so it arrives as a scythe
+    /// swinging across (the sign of `rot` picks the side that arrives first).
+    Sweep,
 }
+
+pub const COMB_STEP: f32 = 0.62;
+pub const SWEEP_HALF: f32 = 0.62;
 
 impl Pattern {
     /// Whether the pattern is laid out relative to the player's direction.
     pub fn aimed(self) -> bool {
-        matches!(self, Pattern::Fan | Pattern::Cross | Pattern::Wall | Pattern::Burst | Pattern::Pincer)
+        matches!(self, Pattern::Fan | Pattern::Cross | Pattern::Wall | Pattern::Burst | Pattern::Pincer | Pattern::Comb | Pattern::Sweep)
     }
     /// (min, max) bullets for one pulse at Normal.
     fn range(self) -> (f32, f32) {
@@ -87,6 +95,8 @@ impl Pattern {
             Pattern::Wall => (9.0, 16.0),
             Pattern::Burst => (3.0, 5.0),
             Pattern::Pincer => (6.0, 12.0),
+            Pattern::Comb => (10.0, 15.0),
+            Pattern::Sweep => (6.0, 11.0),
         }
     }
     fn speed_mul(self) -> f32 {
@@ -106,6 +116,14 @@ pub enum EnemyKind {
     Splitter,
     Mini,
     Elite,
+    /// A light drifting enemy that appears on the song's chimes.
+    Wisp,
+    /// Ear candy made visible: a harmless golden sprite worth catching.
+    Sprite,
+    /// Metronome: stands where it arrives and fires a fan at the player on every downbeat.
+    Turret,
+    /// Cymbal: drifts at the player, arms when close and bursts into a ring two beats later.
+    Bomber,
 }
 
 impl EnemyKind {
@@ -117,6 +135,10 @@ impl EnemyKind {
             EnemyKind::Splitter => 2.2,
             EnemyKind::Mini => 0.4,
             EnemyKind::Elite => 0.0,
+            EnemyKind::Wisp => 0.3,
+            EnemyKind::Sprite => 0.0,
+            EnemyKind::Turret => 1.6,
+            EnemyKind::Bomber => 1.2,
         }
     }
 }
@@ -187,6 +209,13 @@ pub enum Ev {
     Section { idx: u16, kind: SectionKind, intensity: f32, palette: u8 },
     Orbs,
     Heal { x: f32, y: f32 },
+    /// Which musical layers drive attacks from now on (bit = `LayerKind as u8`).
+    Layers { armed: u8 },
+    /// A chime was heard (cosmetic; wisps arrive as `Spawn`). `pitch` is 0..1.
+    Chime { pitch: f32, strength: f32 },
+    /// Ear candy (`analysis::CandyKind as u8`): a run paints a trail of shards from `pitch` to
+    /// `pitch_end`, keypad tones lay out a keypad of shards, a one-off sound releases a sprite.
+    Candy { kind: u8, pitch: f32, pitch_end: f32, dur: f32 },
     End,
 }
 
@@ -212,6 +241,12 @@ pub struct Level {
     pub beats: Vec<f32>,
     pub seed: u64,
     pub active_secs: f32,
+    /// The player's gun track: shot times per TEMPO level (see `gun_track`).
+    pub gun: Vec<Vec<f32>>,
+    /// The look this song gets (backdrop, weather, floor).
+    pub mood: Mood,
+    /// The song's sections as (start, end, kind): one Heart phase each (`World::set_phases`).
+    pub phases: Vec<(f32, f32, SectionKind)>,
 }
 
 /// Whole-song overview for the HUD: the "heartline" of the track.
@@ -388,12 +423,12 @@ fn make_deck(rng: &mut Rng, kind: SectionKind, diff: f32) -> Deck {
     // Accent lands on the downbeat, `main` on the other beats, `off` between beats.
     let (accents, mains): (&[Pattern], &[Pattern]) = match kind {
         SectionKind::Calm => (&[Pattern::Fan, Pattern::Wall], &[Pattern::Fan, Pattern::Burst]),
-        SectionKind::Normal => (&[Pattern::Wall, Pattern::Pincer, Pattern::Cross], &[Pattern::Fan, Pattern::Burst, Pattern::Spiral]),
+        SectionKind::Normal => (&[Pattern::Wall, Pattern::Pincer, Pattern::Cross, Pattern::Comb], &[Pattern::Fan, Pattern::Burst, Pattern::Spiral, Pattern::Sweep]),
         _ => {
             if hard {
                 (&[Pattern::Wall, Pattern::Pincer, Pattern::Cross, Pattern::Flower, Pattern::Arc], &[Pattern::Fan, Pattern::Spiral, Pattern::Burst, Pattern::Ring])
             } else {
-                (&[Pattern::Wall, Pattern::Pincer, Pattern::Cross], &[Pattern::Fan, Pattern::Spiral, Pattern::Burst])
+                (&[Pattern::Wall, Pattern::Pincer, Pattern::Cross, Pattern::Comb], &[Pattern::Fan, Pattern::Spiral, Pattern::Burst, Pattern::Sweep])
             }
         }
     };
@@ -457,8 +492,30 @@ fn shift_tiles(p: TilePattern, n: u32) -> TilePattern {
 }
 
 /// How long before a kick the Heart announces its pulse (approach ring closing on the beat).
-pub fn pulse_lead(beat_len: f32) -> f32 {
-    (beat_len * 0.9).clamp(0.42, 0.6)
+pub fn pulse_lead(beat_len: f32, diff: f32) -> f32 {
+    (beat_len * 0.9).clamp(0.42, 0.6) * (1.12 - 0.37 * hardness(diff))
+}
+
+/// Budget multipliers of the gentlest and the hardest difficulty tier (`main.rs::DIFFS`).
+pub const DIFF_MIN: f32 = 0.7;
+pub const DIFF_MAX: f32 = 3.2;
+
+/// Where a difficulty multiplier sits between the gentlest (0) and the hardest (1) tier. The
+/// rules that are not budgets (warning time, ramp, mercy, unlock order) scale with this.
+pub fn hardness(diff: f32) -> f32 {
+    ((diff - DIFF_MIN) / (DIFF_MAX - DIFF_MIN)).clamp(0.0, 1.0)
+}
+
+/// Radius of the "beat ring" around the Heart: every pulse is timed to cross it on a beat.
+pub const BEAT_RING_R: f32 = 320.0;
+
+/// The speed nearest `speed` at which a bullet leaving the Heart crosses the beat ring a whole
+/// number of half-beats later.
+pub fn beat_speed(speed: f32, beat_len: f32) -> f32 {
+    let dist = BEAT_RING_R - 0.85 * 62.0;
+    let half = (beat_len * 0.5).max(0.08);
+    let n = (dist / speed.max(60.0) / half).round().max(1.0);
+    dist / (n * half)
 }
 
 fn pulse_speed(pattern: Pattern, i: f32, kind: SectionKind, diff: f32) -> f32 {
@@ -495,6 +552,79 @@ impl Bucket {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The director: musical layers fill a credit budget
+// ---------------------------------------------------------------------------------------------
+// Every musical layer is bound to one attack family for as long as it plays:
+//   Beat -> Heart pulses, Bass -> tile strikes, Snare -> enemies, Hats -> dart streams,
+//   Lead -> lasers, Chimes -> wisps.
+// Each section has a credit budget (from its energy, the difficulty and how far into the song it
+// is). The budget is spent by arming layers, never by one-off attacks, and each PHASE of the
+// song arms them in its own order, so a returning chorus brings the same combination back.
+
+/// What arming each layer's attack family costs (index = `LayerKind`).
+const FAMILY_COST: [f32; N_LAYERS] = [3.0, 2.0, 2.0, 1.5, 2.0, 1.0];
+/// Credits of a section: base + energy * (0..1 song-relative intensity).
+const CREDITS_BASE: f32 = 4.5;
+const CREDITS_ENERGY: f32 = 6.5;
+/// A layer must play through at least this much of a section to be armed in it.
+const LAYER_MIN_COVER: f32 = 0.35;
+/// Credits left over (or overdrawn) scale how dense the armed families are, within these limits.
+const DENSITY_RANGE: (f32, f32) = (0.75, 1.6);
+
+struct SectionPlan {
+    armed: [bool; N_LAYERS],
+    /// Density multiplier for the armed families.
+    dens: f32,
+}
+
+impl SectionPlan {
+    fn mask(&self) -> u8 {
+        self.armed.iter().enumerate().map(|(k, &a)| (a as u8) << k).sum()
+    }
+}
+
+/// Decide which layers are armed in every section. `has[k]` says whether the song has layer k at
+/// all; a family whose layer never plays is bound to the bar grid instead and is always on offer.
+fn direct(an: &Analysis, norm: &Norm, seed: u64, diff: f32, has: &[bool; N_LAYERS]) -> Vec<SectionPlan> {
+    an.sections
+        .iter()
+        .map(|s| {
+            let calm = s.kind == SectionKind::Calm;
+            let ease = 0.8 + 0.2 * (s.t0 / (0.25 * an.duration.max(1.0))).min(1.0);
+            let credits = (CREDITS_BASE + CREDITS_ENERGY * norm.at(s.intensity)) * if calm { 0.6 } else { 1.0 } * (0.8 + 0.2 * diff).min(1.5) * ease;
+            // The order layers are offered in belongs to the phase.
+            let mut rng = Rng::new(seed ^ 0xD1EC_7012 ^ (s.phase as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut order: [usize; N_LAYERS] = [0, 1, 2, 3, 4, 5];
+            for i in (1..N_LAYERS).rev() {
+                order.swap(i, rng.below(i + 1));
+            }
+            if rng.chance(0.7) {
+                let at = order.iter().position(|&k| k == LayerKind::Beat as usize).unwrap_or(0);
+                order[..=at].rotate_right(1);
+            }
+            let mut armed = [false; N_LAYERS];
+            let mut spent = 0.0f32;
+            for &k in &order {
+                let beat = k == LayerKind::Beat as usize;
+                // Tile strikes and lasers never run in calm sections.
+                if calm && (k == LayerKind::Bass as usize || k == LayerKind::Lead as usize) {
+                    continue;
+                }
+                let playing = beat || !has[k] || an.layers.get(k).is_some_and(|l| l.coverage(s.t0, s.t1) >= LAYER_MIN_COVER);
+                if !playing {
+                    continue;
+                }
+                if spent + FAMILY_COST[k] <= credits || spent == 0.0 {
+                    armed[k] = true;
+                    spent += FAMILY_COST[k];
+                }
+            }
+            SectionPlan { armed, dens: (credits / spent.max(1.0)).clamp(DENSITY_RANGE.0, DENSITY_RANGE.1) }
+        })
+        .collect()
+}
+
 fn edge_point(rng: &mut Rng) -> (f32, f32) {
     let inset = 34.0;
     match rng.below(4) {
@@ -510,23 +640,29 @@ fn pick_enemy(rng: &mut Rng, kind: SectionKind) -> EnemyKind {
     match kind {
         SectionKind::Calm => EnemyKind::Chaser,
         SectionKind::Normal => {
-            if r < 0.66 {
+            if r < 0.58 {
                 EnemyKind::Chaser
-            } else if r < 0.86 {
+            } else if r < 0.74 {
                 EnemyKind::Darter
-            } else {
+            } else if r < 0.86 {
                 EnemyKind::Orbiter
+            } else {
+                EnemyKind::Turret
             }
         }
         _ => {
-            if r < 0.45 {
+            if r < 0.36 {
                 EnemyKind::Chaser
-            } else if r < 0.68 {
+            } else if r < 0.54 {
                 EnemyKind::Darter
-            } else if r < 0.86 {
+            } else if r < 0.67 {
                 EnemyKind::Splitter
-            } else {
+            } else if r < 0.78 {
                 EnemyKind::Orbiter
+            } else if r < 0.90 {
+                EnemyKind::Bomber
+            } else {
+                EnemyKind::Turret
             }
         }
     }
@@ -551,6 +687,16 @@ fn laser_event(rng: &mut Rng, t: f32, dur: f32, lead: f32) -> LevelEvent {
     LevelEvent { t, lead, ev: Ev::Laser { horizontal, from, to, dur } }
 }
 
+/// Fewest seconds between two wisps (at difficulty 1 and density 1).
+const WISP_INTERVAL: f32 = 1.4;
+
+/// Where a chime of a given pitch (0..1) appears: low notes on the left of an arc over the
+/// Heart, high notes on the right.
+pub fn chime_point(pitch: f32) -> (f32, f32) {
+    let a = std::f32::consts::PI * (1.1 - 1.2 * pitch.clamp(0.0, 1.0));
+    (a.cos() * HALF_W * 0.8, -a.sin().abs() * HALF_H * 0.78 + HALF_H * 0.1)
+}
+
 fn shard_point(ang: f32, wobble: f32) -> (f32, f32) {
     let r = 250.0 + 110.0 * wobble.sin();
     (ang.cos() * r * 1.55, ang.sin() * r * 0.9)
@@ -564,7 +710,9 @@ fn pulse_rot(pattern: Pattern, deck: &Deck, phase: &mut f32, uses: u32) -> f32 {
             let side = if uses % 2 == 0 { deck.gap_side } else { -deck.gap_side };
             side * (0.5 + 0.22 * ((uses / 2) % 2) as f32)
         }
-        Pattern::Fan | Pattern::Burst | Pattern::Pincer | Pattern::Cross => 0.0,
+        Pattern::Fan | Pattern::Burst | Pattern::Pincer | Pattern::Cross | Pattern::Comb => 0.0,
+        // The scythe swings from alternating sides.
+        Pattern::Sweep => if uses % 2 == 0 { 1.0 } else { -1.0 },
         _ => {
             *phase += deck.rot_step;
             *phase
@@ -605,18 +753,33 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         make_deck(&mut rng, SectionKind::Drop, diff),
     ];
     let mut palette = rng.below(N_PALETTES as usize) as u8;
+    // A phase keeps its palette: when a part of the song returns, so does its look.
+    let mut phase_palette: [Option<u8>; 16] = [None; 16];
+    let mut has = [false; N_LAYERS];
+    for (k, h) in has.iter_mut().enumerate() {
+        *h = an.layers.get(k).is_some_and(|l| !l.spans.is_empty());
+    }
+    let plan = direct(an, &norm, seed, diff, &has);
     let mut last_orbs = t_start;
     let mut last_heal = t_start;
     let wave_lead = (2.0 * beat_len).clamp(1.1, 1.6);
     for (idx, s) in an.sections.iter().enumerate() {
-        if idx > 0 {
-            palette = (palette + 1 + rng.below(N_PALETTES as usize - 1) as u8) % N_PALETTES;
+        let slot = (s.phase as usize).min(phase_palette.len() - 1);
+        match phase_palette[slot] {
+            Some(p) => palette = p,
+            None => {
+                if idx > 0 {
+                    palette = (palette + 1 + rng.below(N_PALETTES as usize - 1) as u8) % N_PALETTES;
+                }
+                phase_palette[slot] = Some(palette);
+            }
         }
         ev.push(LevelEvent {
             t: s.t0,
             lead: 0.0,
             ev: Ev::Section { idx: idx as u16, kind: s.kind, intensity: s.intensity, palette },
         });
+        ev.push(LevelEvent { t: s.t0, lead: 0.0, ev: Ev::Layers { armed: plan[idx].mask() } });
         if idx == 0 || s.t0 < grace {
             continue;
         }
@@ -644,6 +807,12 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
     let kind_at = |t: f32| -> SectionKind { an.sections.get(section_index(t)).map(|s| s.kind).unwrap_or(SectionKind::Normal) };
     let level_i = |t: f32| -> f32 { norm.at(an.intensity_at(t)) };
     let calm_mul = |k: SectionKind| -> f32 { if k == SectionKind::Calm { 0.6 } else { 1.0 } };
+    // A family attacks only where the director armed its layer and the layer is playing.
+    let armed = |t: f32, k: LayerKind| -> bool {
+        let ki = k as usize;
+        plan.get(section_index(t)).is_some_and(|p| p.armed[ki]) && (k == LayerKind::Beat || !has[ki] || an.layers[ki].active(t))
+    };
+    let dens = |t: f32| -> f32 { plan.get(section_index(t)).map_or(1.0, |p| p.dens) };
 
     // ---- Heart pulses: kicks first, the beat grid fills any hole the drums leave ----
     // Candidates in time order: (time, strength, is_kick).
@@ -660,14 +829,14 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         let i = kick_times.partition_point(|&k| k <= t + 0.02);
         i < kick_times.len() && kick_times[i] - t < within
     };
-    let lead_p = pulse_lead(beat_len);
+    let lead_p = pulse_lead(beat_len, diff);
     let mut bullets = Bucket::new(BULLETS_PER_SEC * diff, 2.4);
     let mut last_pulse = -10.0f32;
     let mut phase = [rng.angle(), rng.angle(), rng.angle(), rng.angle()];
     let mut uses = [[0u32; 8]; 4];
     let mut soft_n = [0u32; 4];
     for &(t, strength, is_kick) in &cand {
-        if t < grace || an.in_silence(t) {
+        if t < grace || an.in_silence(t) || !armed(t, LayerKind::Beat) {
             continue;
         }
         let kind = kind_at(t);
@@ -683,7 +852,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
             continue;
         }
         let i = level_i(t);
-        bullets.fill(t, BULLETS_PER_SEC * diff * energy(i) * calm_mul(kind));
+        bullets.fill(t, BULLETS_PER_SEC * diff * energy(i) * calm_mul(kind) * dens(t));
         let deck = &kind_decks[ki];
         // Which half-beat of the bar is this? That picks the move.
         let bp = beat_pos(&an.beats, t) - an.downbeat as f32;
@@ -700,7 +869,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
             soft_n[ki] += 1;
             soft_n[ki] % deck.soft_every == 0
         };
-        let speed = pulse_speed(pattern, i, kind, diff);
+        let speed = beat_speed(pulse_speed(pattern, i, kind, diff), beat_len);
         ev.push(LevelEvent { t, lead: lead_p, ev: Ev::Pulse { pattern, count, speed, rot, soft } });
     }
 
@@ -717,11 +886,11 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
     let mut last_spawn = -10.0f32;
     let spawn_lead = beat_len.clamp(0.5, 0.9);
     for &(t, strength, is_snare) in &ecand {
-        if t < grace + 2.0 || an.in_silence(t) || t > an.duration - 4.0 {
+        if t < grace + 2.0 || an.in_silence(t) || t > an.duration - 4.0 || !armed(t, LayerKind::Snare) {
             continue;
         }
         let kind = kind_at(t);
-        foes.fill(t, ENEMY_POINTS_PER_SEC * diff * energy(level_i(t)) * calm_mul(kind));
+        foes.fill(t, ENEMY_POINTS_PER_SEC * diff * energy(level_i(t)) * calm_mul(kind) * dens(t));
         let since = t - last_spawn;
         if is_snare {
             if since < 0.9 || strength < 0.25 {
@@ -755,7 +924,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         }
         let kind = kind_at(o.t);
         let hot = matches!(kind, SectionKind::Intense | SectionKind::Drop);
-        if hot && diff >= 0.9 && stream_bar(o.t, if kind == SectionKind::Drop || diff > 1.2 { 4 } else { 8 }) {
+        if hot && diff >= 0.9 && armed(o.t, LayerKind::Hats) && stream_bar(o.t, if kind == SectionKind::Drop || diff > 1.2 { 4 } else { 8 }) {
             if o.t - last_tick >= 0.24 / diff.sqrt() {
                 last_tick = o.t;
                 ev.push(LevelEvent { t: o.t, lead: 0.0, ev: Ev::Tick { speed: TICK_SPEED } });
@@ -775,7 +944,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
     let mut tile_n = [0u32; 4];
     let mut steps: Vec<(u32, TilePattern)> = Vec::with_capacity(8);
     for (j, &bt) in bars.iter().enumerate() {
-        if bt < next_tiles || an.in_silence(bt) || bt > an.duration - 3.0 {
+        if bt < next_tiles || an.in_silence(bt) || bt > an.duration - 3.0 || !armed(bt, LayerKind::Bass) {
             continue;
         }
         let kind = kind_at(bt);
@@ -802,7 +971,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
             ev.push(LevelEvent { t, lead: tile_lead, ev: Ev::Tiles { pattern: pat } });
         }
         busy.push((bt - tile_lead - 0.3, last_t + 0.4));
-        next_tiles = last_t + TILE_INTERVAL[ki] / diff;
+        next_tiles = last_t + TILE_INTERVAL[ki] / (diff * dens(bt));
     }
 
     // ---- lasers: sustained phrases, snapped to the beat, never while tiles are winding up ----
@@ -830,7 +999,7 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
     let phrase_soon = |t: f32, within: f32| -> bool { an.phrases.iter().any(|p| p.0 > t && p.0 - t < within) };
     for &(a, b) in &lcand {
         let t = nearest_beat(a);
-        if t < next_laser || an.in_silence(t) || t > an.duration - 4.0 {
+        if t < next_laser || an.in_silence(t) || t > an.duration - 4.0 || !armed(t, LayerKind::Lead) {
             continue;
         }
         let kind = kind_at(t);
@@ -848,10 +1017,35 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         if diff <= 1.2 && busy.iter().any(|&(x, y)| t - laser_lead < y && t + dur > x) {
             continue;
         }
-        next_laser = t + dur + LASER_INTERVAL[ki] / diff;
+        next_laser = t + dur + LASER_INTERVAL[ki] / (diff * dens(t));
         ev.push(laser_event(&mut rng, t, dur, laser_lead));
     }
     let _ = nsec;
+
+    // ---- ear candy: every piece gets its own moment, whatever the director armed ----
+    for c in &an.candy {
+        if c.t > grace && !an.in_silence(c.t) {
+            ev.push(LevelEvent { t: c.t, lead: 0.0, ev: Ev::Candy { kind: c.kind as u8, pitch: c.pitch, pitch_end: c.pitch_end, dur: c.dur } });
+        }
+    }
+
+    // ---- chimes: a sparkle for every one, and a wisp where the director armed them ----
+    let mut last_wisp = -10.0f32;
+    for c in &an.chimes {
+        if an.in_silence(c.t) {
+            continue;
+        }
+        ev.push(LevelEvent { t: c.t, lead: 0.0, ev: Ev::Chime { pitch: c.pitch, strength: c.strength } });
+        if c.t < grace + 2.0 || c.t > an.duration - 4.0 || !armed(c.t, LayerKind::Chimes) {
+            continue;
+        }
+        if c.t - last_wisp < WISP_INTERVAL / (diff.sqrt() * dens(c.t)) {
+            continue;
+        }
+        last_wisp = c.t;
+        let (x, y) = chime_point(c.pitch);
+        ev.push(LevelEvent { t: c.t, lead: 0.45, ev: Ev::Spawn { kind: EnemyKind::Wisp, x, y } });
+    }
 
     ev.push(LevelEvent { t: an.duration, lead: 0.0, ev: Ev::End });
     ev.sort_by(|a, b| a.at().partial_cmp(&b.at()).unwrap_or(std::cmp::Ordering::Equal));
@@ -864,7 +1058,218 @@ pub fn generate(an: &Analysis, user_seed: u64, diff: f32) -> Level {
         beats: an.beats.clone(),
         seed,
         active_secs: (an.duration - silent).max(1.0),
+        gun: gun_track(&an.beats, &an.onsets, an.duration),
+        mood: mood(an),
+        phases: an.sections.iter().map(|s| (s.t0, s.t1, s.kind)).collect(),
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mood: what a song looks like
+// ---------------------------------------------------------------------------------------------
+
+/// Backdrops: 0 sunset (striped sun), 1 moonrise (full moon), 2 ocean dusk (sun in the sea),
+/// 3 wire globe, 4 nebula, 5 ringed planet, 6 black hole, 7 binary sunset, 8 aurora, 9 tide
+/// (ranks of waves over the horizon), 10 prism (a striped triangle with rays).
+pub const N_SCENES: u8 = 11;
+/// Weather: 0 none, 1 rain of lines (pulses with the hats), 2 drifting dust, 3 aurora.
+pub const N_WEATHER: u8 = 4;
+/// Floor: 0 full grid, 1 open grid (every other line), 2 marks at the intersections.
+pub const N_FLOORS: u8 = 3;
+/// Horizon props: 0 none, 1 palm trees, 2 radio masts, 3 city skyline, 4 meteors.
+pub const N_PROPS: u8 = 5;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mood {
+    pub scene: u8,
+    pub weather: u8,
+    pub floor: u8,
+    pub prop: u8,
+}
+
+/// Pick a song's look from things that can be measured about it. How busy it is (drum hits per
+/// second), how bright (high band against low band) and its tempo choose a family of backdrops
+/// and props; the song's own hash picks within the family, so two similar songs still look
+/// different and the same song always looks the same.
+///
+/// Families: warm mid-tempo songs get the tropical set (palms, ocean dusk, binary sunset); dark
+/// dense ones get eclipses, the wire globe and skylines; sparse ones get wide night skies;
+/// everything else draws from the whole list.
+pub fn mood(an: &Analysis) -> Mood {
+    let (mut lo, mut hi) = (0.0f32, 0.0f32);
+    for f in an.feats.iter().step_by(4) {
+        lo += f.low;
+        hi += f.high;
+    }
+    let bright = hi / (lo + hi + 1e-6) > 0.5;
+    let density = an.onsets.len() as f32 / an.duration.max(1.0);
+    let h = an.seed;
+    let pick = |xs: &[u8], shift: u32| xs[((h >> shift) % xs.len() as u64) as usize];
+    let tropical = bright && (85.0..=128.0).contains(&an.bpm) && (3.0..=8.0).contains(&density);
+    let (scenes, props, weathers): (&[u8], &[u8], &[u8]) = if tropical {
+        (&[2, 7, 0, 9, 2], &[1, 1, 1, 0], &[0, 0, 1, 2])
+    } else if density > 7.0 && !bright {
+        (&[6, 3, 5, 0, 4, 10], &[3, 3, 0, 2, 4], &[1, 1, 0, 3])
+    } else if density > 7.0 {
+        (&[3, 0, 7, 6, 8, 10], &[3, 0, 4, 1, 0], &[0, 1, 3, 0])
+    } else if density < 3.5 {
+        (&[1, 4, 8, 5, 9, 2], &[4, 0, 2, 0, 1], &[2, 3, 0, 2])
+    } else {
+        (&[0, 1, 2, 4, 5, 6, 7, 8, 9, 10], &[0, 1, 2, 3, 4, 0], &[0, 0, 1, 2, 3])
+    };
+    Mood { scene: pick(scenes, 0), weather: pick(weathers, 8), floor: ((h >> 16) % N_FLOORS as u64) as u8, prop: pick(props, 24) }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The player's gun track
+// ---------------------------------------------------------------------------------------------
+
+/// Target seconds between the player's shots per TEMPO upgrade level. A shot's damage is
+/// proportional to the gap before it (`gun_damage`), so the level sets the DPS and the song only
+/// decides where the shots fall.
+pub const GUN_INTERVALS: [f32; 5] = [0.27, 0.21, 0.165, 0.13, 0.105];
+/// Grid step (seconds) the gun's subdivision of the beat is chosen to be nearest to.
+const GUN_GRID_STEP: f32 = 0.095;
+/// A drum hit at least this strong (kick / snare level) pulls the nearest shot onto it.
+const GUN_SYNC_FROM: f32 = 0.95;
+
+/// Damage multiplier of a shot fired `gap` seconds after the previous one at a target interval
+/// of `target` seconds: exactly proportional, so damage per second never depends on the song.
+pub fn gun_damage(gap: f32, target: f32) -> f32 {
+    (gap / target.max(1e-3)).clamp(0.3, 3.0)
+}
+
+/// Time of the continuous beat index `pos` (the inverse of `beat_pos`).
+pub fn beat_time(beats: &[f32], pos: f32) -> f32 {
+    let n = beats.len();
+    if n < 2 {
+        return pos * 0.5;
+    }
+    let last = (n - 1) as f32;
+    if pos <= 0.0 {
+        return beats[0] + pos * (beats[1] - beats[0]).max(0.05);
+    }
+    if pos >= last {
+        return beats[n - 1] + (pos - last) * (beats[n - 1] - beats[n - 2]).max(0.05);
+    }
+    let i = pos.floor() as usize;
+    beats[i] + (pos - i as f32) * (beats[i + 1] - beats[i])
+}
+
+/// Build the gun track: for every TEMPO level, the times the player's gun fires in this song.
+///
+/// The beat is cut into a fine grid (16ths at dance tempos). Slots where a drum was actually
+/// heard take that drum's exact time. Each level fires an even division of the beat (the power
+/// of two nearest its target interval), and a shot shifts to a neighbouring slot only when a
+/// strong drum hit sits there.
+pub fn gun_track(beats: &[f32], onsets: &[Onset], duration: f32) -> Vec<Vec<f32>> {
+    let mut gaps: Vec<f32> = beats.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.05).collect();
+    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let bl = if gaps.is_empty() { 0.5 } else { gaps[gaps.len() / 2] };
+    let mut div = 4i64;
+    let mut best = f32::MAX;
+    for d in [1i64, 2, 4, 8, 16] {
+        let err = (bl / d as f32 / GUN_GRID_STEP).ln().abs();
+        if err < best {
+            best = err;
+            div = d;
+        }
+    }
+    let step = bl / div as f32;
+    let p0 = (beat_pos(beats, 0.0) * div as f32).ceil() as i64;
+    let p1 = (beat_pos(beats, duration.max(0.0)) * div as f32).floor() as i64;
+    if p1 <= p0 {
+        return vec![Vec::new(); GUN_INTERVALS.len()];
+    }
+    // (time, score) per grid slot.
+    let mut slots: Vec<(f32, f32)> = (p0..=p1)
+        .map(|j| {
+            let k = j.rem_euclid(div);
+            let metric = if k == 0 {
+                0.45
+            } else if (2 * k) % div == 0 {
+                0.3
+            } else if (4 * k) % div == 0 {
+                0.18
+            } else {
+                0.0
+            };
+            (beat_time(beats, j as f32 / div as f32), metric)
+        })
+        .collect();
+    let mut strengths: Vec<f32> = onsets.iter().map(|o| o.strength).collect();
+    strengths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let norm = strengths.get(strengths.len() * 9 / 10).copied().unwrap_or(1.0).max(1e-6);
+    let mut heard = vec![0.0f32; slots.len()];
+    for o in onsets {
+        let j = (beat_pos(beats, o.t) * div as f32).round() as i64 - p0;
+        if j < 0 || j as usize >= slots.len() {
+            continue;
+        }
+        let j = j as usize;
+        let grid_t = beat_time(beats, (j as i64 + p0) as f32 / div as f32);
+        if (o.t - grid_t).abs() > 0.4 * step {
+            continue;
+        }
+        let band = if o.band == Band::Low { 0.6 } else { 1.0 };
+        let w = 0.25 + band * (o.strength / norm).min(1.5);
+        if w > heard[j] {
+            heard[j] = w;
+            slots[j].0 = o.t;
+        }
+    }
+    for (s, h) in slots.iter_mut().zip(&heard) {
+        s.1 += h;
+    }
+
+    // Every level fires an even division of the beat (1, 2, 4 ... shots per beat), the one
+    // nearest its target interval, so the gun always sounds like part of the song. A shot moves
+    // off its grid slot only to land on a strong drum hit right next to it.
+    let mut prev_k = 1i64;
+    GUN_INTERVALS
+        .iter()
+        .map(|&target| {
+            let mut k = 1i64;
+            let mut best = f32::MAX;
+            let mut c = 1i64;
+            while c <= div {
+                let err = (bl / c as f32 / target).ln().abs();
+                if err < best {
+                    best = err;
+                    k = c;
+                }
+                c *= 2;
+            }
+            // A higher TEMPO level never fires slower than the one below it.
+            let k = k.max(prev_k);
+            prev_k = k;
+            let stride = (div / k).max(1);
+            let mut out: Vec<f32> = Vec::with_capacity(slots.len() / stride as usize + 2);
+            for idx in 0..slots.len() {
+                if (idx as i64 + p0).rem_euclid(stride) != 0 {
+                    continue;
+                }
+                let mut pick = idx;
+                if stride >= 2 && heard[idx] < GUN_SYNC_FROM {
+                    let reach = (stride / 2 - (stride % 2 == 0) as i64).max(0) as usize;
+                    let lo = idx.saturating_sub(reach);
+                    let hi = (idx + reach).min(slots.len() - 1);
+                    let mut strongest = GUN_SYNC_FROM;
+                    for j in lo..=hi {
+                        if heard[j] >= strongest {
+                            strongest = heard[j];
+                            pick = j;
+                        }
+                    }
+                }
+                let t = slots[pick].0;
+                if out.last().map_or(true, |&l| t > l + 0.03) {
+                    out.push(t);
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -896,6 +1301,9 @@ pub struct LiveGen {
     uses: [u32; 8],
     shard_ang: f32,
     pub intensity: f32,
+    /// Set by the app while the live beat tracker is confident: pulses then come from predicted
+    /// beats, not from kicks as they are heard.
+    pub predicted: bool,
     rate: f32,
     last_feat_t: f32,
     pending_section: bool,
@@ -939,6 +1347,7 @@ impl LiveGen {
             uses: [0; 8],
             shard_ang: 0.0,
             intensity: 0.4,
+            predicted: false,
             rate: 0.0,
             last_feat_t: 0.0,
             pending_section: true,
@@ -954,6 +1363,44 @@ impl LiveGen {
         } else {
             (t + telegraph - self.lookahead, telegraph)
         }
+    }
+
+    /// Reactive live mode: the beat tracker is confident that a beat falls at `t_beat`, a little
+    /// in the future. Announce the pulse for it now, with a full warning.
+    pub fn on_predicted_beat(&mut self, t_beat: f32, out: &mut Vec<LevelEvent>) {
+        let lead = pulse_lead(self.beat_len, self.diff);
+        self.make_pulse(t_beat, 0.6, lead, out);
+    }
+
+    /// One Heart pulse at `t` if the motif and the bullet budget allow it.
+    fn make_pulse(&mut self, t: f32, strength: f32, lead: f32, out: &mut Vec<LevelEvent>) {
+        let i = self.intensity;
+        let ki = kind_idx(self.kind);
+        let calm = if self.kind == SectionKind::Calm { 0.6 } else { 1.0 };
+        let target = PULSE_INTERVAL[ki] / self.diff.sqrt();
+        let since = t - self.last_pulse;
+        if since < 0.62 * target || (strength < 0.3 && since < target) {
+            return;
+        }
+        self.bullets.fill(t, BULLETS_PER_SEC * self.diff * energy(i) * calm);
+        // No bar grid live: walk the motif one beat per pulse.
+        let pos = ((self.pulse_n * 2) % 8) as usize;
+        let deck = self.decks[ki];
+        let pattern = deck.moves[pos];
+        let count = self.bullets.pulse_count(pattern, self.diff);
+        if count == 0 {
+            return;
+        }
+        self.last_pulse = t;
+        self.pulse_n += 1;
+        let rot = pulse_rot(pattern, &deck, &mut self.phase, self.uses[pos]);
+        self.uses[pos] += 1;
+        let soft = pos != 0 && {
+            self.soft_n += 1;
+            self.soft_n % deck.soft_every == 0
+        };
+        let speed = beat_speed(pulse_speed(pattern, i, self.kind, self.diff), self.beat_len);
+        out.push(LevelEvent { t, lead, ev: Ev::Pulse { pattern, count, speed, rot, soft } });
     }
 
     /// Call when audio resumes after silence: forces a fresh section.
@@ -1019,29 +1466,11 @@ impl LiveGen {
         let hot = matches!(self.kind, SectionKind::Intense | SectionKind::Drop);
         match o.band {
             Band::Low => {
-                let target = PULSE_INTERVAL[ki] / self.diff.sqrt();
-                let since = o.t - self.last_pulse;
-                if since >= 0.62 * target && !(o.strength < 0.3 && since < target) {
-                    self.bullets.fill(o.t, BULLETS_PER_SEC * self.diff * energy(i) * calm);
-                    // No bar grid live: walk the motif one beat per pulse.
-                    let pos = ((self.pulse_n * 2) % 8) as usize;
-                    let deck = self.decks[ki];
-                    let pattern = deck.moves[pos];
-                    let count = self.bullets.pulse_count(pattern, self.diff);
-                    if count > 0 {
-                        self.last_pulse = o.t;
-                        self.pulse_n += 1;
-                        let rot = pulse_rot(pattern, &deck, &mut self.phase, self.uses[pos]);
-                        self.uses[pos] += 1;
-                        let soft = pos != 0 && {
-                            self.soft_n += 1;
-                            self.soft_n % deck.soft_every == 0
-                        };
-                        // Only delayed (look-ahead) live mode knows a kick early enough to announce it.
-                        let lead = if self.lookahead >= 0.5 { pulse_lead(self.beat_len) } else { 0.0 };
-                        let speed = pulse_speed(pattern, i, self.kind, self.diff);
-                        out.push(LevelEvent { t: o.t, lead, ev: Ev::Pulse { pattern, count, speed, rot, soft } });
-                    }
+                // With a confident beat and no look-ahead, pulses are announced from the predicted
+                // beat instead (`on_predicted_beat`), so they still get their warning.
+                if !self.predicted || self.lookahead >= 0.5 {
+                    let lead = if self.lookahead >= 0.5 { pulse_lead(self.beat_len, self.diff) } else { 0.0 };
+                    self.make_pulse(o.t, o.strength, lead, out);
                 }
                 if TILE_INTERVAL[ki] > 0.0 && o.t >= self.next_tiles && o.strength > 0.4 {
                     let deck = self.decks[ki];
@@ -1096,5 +1525,100 @@ impl LiveGen {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn steady(bpm: f32, secs: f32) -> (Vec<f32>, Vec<Onset>) {
+        let bl = 60.0 / bpm;
+        let beats: Vec<f32> = (0..(secs / bl) as usize).map(|i| 0.1 + i as f32 * bl).collect();
+        let mut onsets = Vec::new();
+        for (i, &b) in beats.iter().enumerate() {
+            onsets.push(Onset { t: b + 0.002, band: Band::Low, strength: 0.9 });
+            onsets.push(Onset { t: b + 0.5 * bl - 0.004, band: Band::High, strength: 0.5 });
+            if i % 2 == 1 {
+                onsets.push(Onset { t: b + 0.75 * bl + 0.003, band: Band::Mid, strength: 1.0 });
+            }
+        }
+        (beats, onsets)
+    }
+
+    #[test]
+    fn pulses_cross_the_beat_ring_on_a_half_beat() {
+        for bpm in [70.0f32, 96.0, 128.0, 174.0] {
+            let bl = 60.0 / bpm;
+            for want in [180.0f32, 240.0, 300.0, 380.0] {
+                let v = beat_speed(want, bl);
+                let halves = (BEAT_RING_R - 0.85 * 62.0) / v / (bl * 0.5);
+                assert!((halves - halves.round()).abs() < 1e-3, "{bpm} BPM, {want} px/s: {halves} half-beats");
+                assert!((v / want).ln().abs() < 0.45, "{bpm} BPM: {want} became {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn beat_time_inverts_beat_pos() {
+        let (beats, _) = steady(128.0, 20.0);
+        for k in 0..400 {
+            let t = -1.0 + k as f32 * 0.06;
+            assert!((beat_time(&beats, beat_pos(&beats, t)) - t).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn gun_track_keeps_its_rate_and_gap_bounds() {
+        for bpm in [62.0, 84.0, 110.0, 128.0, 170.0, 196.0] {
+            let (beats, onsets) = steady(bpm, 90.0);
+            let track = gun_track(&beats, &onsets, 90.0);
+            assert_eq!(track.len(), GUN_INTERVALS.len());
+            for (lv, shots) in track.iter().enumerate() {
+                let target = GUN_INTERVALS[lv];
+                let mean = (shots[shots.len() - 1] - shots[0]) / (shots.len() - 1) as f32;
+                assert!((mean / target).ln().abs() < 0.75, "{bpm} BPM level {lv}: mean gap {mean} vs {target}");
+                for w in shots.windows(2) {
+                    let g = (w[1] - w[0]) / target;
+                    assert!(g > 0.3 && g < 3.0, "{bpm} BPM level {lv}: gap {g} of target");
+                }
+                if lv > 0 {
+                    assert!(shots.len() >= track[lv - 1].len(), "{bpm} BPM: level {lv} fires slower than the one below");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gun_track_fires_on_the_drums() {
+        // At the slowest gun level there are more drum hits than shots, so nearly every shot
+        // should sit exactly on one of them instead of on an empty grid slot.
+        let (beats, onsets) = steady(128.0, 60.0);
+        let track = gun_track(&beats, &onsets, 60.0);
+        let shots = &track[0];
+        let on = shots.iter().filter(|&&t| onsets.iter().any(|o| (o.t - t).abs() < 1e-4)).count();
+        assert!(on * 10 >= shots.len() * 9, "only {on} of {} shots are on a drum hit", shots.len());
+    }
+
+    #[test]
+    fn gun_track_is_an_even_division_of_the_beat() {
+        // No drums at all: every level must fire a steady 1, 2, 4 ... shots per beat.
+        let bl = 60.0 / 128.0;
+        let beats: Vec<f32> = (0..120).map(|i| 0.1 + i as f32 * bl).collect();
+        let track = gun_track(&beats, &[], 50.0);
+        for (lv, shots) in track.iter().enumerate() {
+            let g0 = shots[11] - shots[10];
+            let per_beat = bl / g0;
+            assert!((per_beat - per_beat.round()).abs() < 0.02 && [1.0, 2.0, 4.0, 8.0].contains(&per_beat.round()), "level {lv}: {per_beat} shots per beat");
+            for w in shots[5..shots.len() - 5].windows(2) {
+                assert!(((w[1] - w[0]) - g0).abs() < 2e-3, "level {lv}: uneven gap {} vs {g0}", w[1] - w[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn gun_track_without_beats_is_still_usable() {
+        let track = gun_track(&[], &[], 30.0);
+        assert!(track.iter().all(|v| v.len() > 50));
     }
 }

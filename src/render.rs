@@ -165,9 +165,20 @@ fn v3(c: Color) -> Vec3 {
 // Low-level primitives (no heap allocation: everything goes straight into the batcher)
 // ---------------------------------------------------------------------------------------------
 
+thread_local! {
+    /// Added to every vertex: lets the Heart's layers be drawn around the origin and placed
+    /// wherever the Heart is (`set_origin`).
+    static ORIGIN: std::cell::Cell<Vec2> = const { std::cell::Cell::new(Vec2::ZERO) };
+}
+
+fn set_origin(o: Vec2) {
+    ORIGIN.with(|c| c.set(o));
+}
+
 #[inline]
 fn vtx(p: Vec2, c: Color) -> Vertex {
-    Vertex::new(p.x, p.y, 0.0, 0.0, 0.0, c)
+    let o = ORIGIN.with(|c| c.get());
+    Vertex::new(p.x + o.x, p.y + o.y, 0.0, 0.0, 0.0, c)
 }
 
 #[inline]
@@ -590,6 +601,8 @@ const CROWN_A: f32 = 0.38;
 const HEART_Z: f32 = 44.0;
 const HEART_SHELL_R: f32 = 60.0;
 const MORPH_RATE: f32 = 1.3;
+/// Seconds a sky takes to sink and the next one to rise.
+const SKY_TRANSITION: f32 = 1.8;
 /// Tile strike hammer slab start height and slam light column height.
 const SLAB_H: f32 = 150.0;
 const TILE_COL_H: f32 = 260.0;
@@ -834,10 +847,10 @@ fn build_kinds() -> Vec<Vec<[Vec3; 2]>> {
 fn kind_index(k: EnemyKind) -> usize {
     match k {
         EnemyKind::Chaser | EnemyKind::Mini => 0,
-        EnemyKind::Darter => 1,
-        EnemyKind::Orbiter => 2,
-        EnemyKind::Splitter => 3,
-        EnemyKind::Elite => 4,
+        EnemyKind::Darter | EnemyKind::Wisp => 1,
+        EnemyKind::Orbiter | EnemyKind::Bomber => 2,
+        EnemyKind::Splitter | EnemyKind::Turret => 3,
+        EnemyKind::Elite | EnemyKind::Sprite => 4,
     }
 }
 
@@ -886,6 +899,18 @@ fn pulse_dirs(pattern: Pattern, aim: f32, rot: f32, count: usize, mut f: impl Fn
                     let fr = if per > 1 { k as f32 / (per - 1) as f32 - 0.5 } else { 0.0 };
                     f(aim + side * PINCER_OFFSET + fr * PINCER_SPREAD, 1.0);
                 }
+            }
+        }
+        Pattern::Comb => {
+            for tooth in 0..5 {
+                f(aim + (tooth as f32 - 2.0) * COMB_STEP, 1.0);
+            }
+        }
+        Pattern::Sweep => {
+            let side = if rot >= 0.0 { 1.0 } else { -1.0 };
+            for k in 0..count {
+                let fr = if count > 1 { k as f32 / (count - 1) as f32 } else { 0.5 };
+                f(aim + side * (fr * 2.0 - 1.0) * SWEEP_HALF, 1.0 - 0.38 * fr);
             }
         }
         Pattern::Flower => {
@@ -962,6 +987,14 @@ uniform vec3 u_c1;
 uniform vec3 u_grid;
 uniform vec3 u_sunA;
 uniform vec3 u_sunB;
+// x = backdrop (0 sunset, 1 night, 2 ocean, 3 vortex, 4 starfield), y = weather (0 none, 1 rain, 2 dust, 3 aurora)
+uniform vec3 u_mood;
+// x = horizon prop (0 none, 1 palms, 2 pyramids, 3 skyline, 4 meteors), y = hat envelope, z = kick envelope
+uniform vec3 u_mood2;
+// sky transition: x = progress 0..1 (1 = settled), y = the backdrop being left, z = the prop being left
+uniform vec3 u_tr;
+// x = chime envelope, y = its pitch 0..1, z = ear-candy envelope
+uniform vec3 u_fx;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
@@ -976,6 +1009,17 @@ float stars(vec2 p, float cell, float dens) {
     return smoothstep(0.07, 0.0, d) * tw;
 }
 
+// One layer of falling rain. `g` is x across (aspect-corrected) and y down the screen; streaks
+// are brightest at the falling tip and fade up their tail.
+float rainLayer(vec2 g, float cols, float speed, float len, float seed) {
+    g.x += g.y * (0.16 + 0.05 * sin(u_time * 0.31));
+    float cx = g.x * cols;
+    float h = hash(vec2(floor(cx), seed));
+    float fall = fract(g.y * (1.0 + h) - u_time * speed * (0.8 + 0.5 * h) + h * 17.0);
+    float tail = fall < len ? fall / len : 0.0;
+    return step(0.4, h) * smoothstep(0.5, 0.1, abs(fract(cx) - 0.5) * 2.0) * tail * tail;
+}
+
 // In-game: calm deep space under a floating platform. q = world position on the z = 0 plane.
 vec3 topdown(vec2 q) {
     vec3 col = mix(u_c0 * 0.55, u_c1 * 0.42, clamp(uv.y * 0.8 + 0.1, 0.0, 1.0));
@@ -987,8 +1031,65 @@ vec3 topdown(vec2 q) {
     float yy = sp.y / sr;
     float band = yy < -0.15 ? 1.0 : step(0.08 + 0.42 * (yy + 0.15), fract(yy * 7.0 - u_time * 0.04));
     vec3 scol = mix(u_sunA, u_sunB, clamp(yy * 0.5 + 0.5, 0.0, 1.0));
-    col += scol * band * 0.12 * smoothstep(1.0, 0.985, d);
-    col += u_sunB * 0.05 * exp(-d * d * 1.2) * (1.0 + 0.6 * u_swell);
+    float sc = u_mood.x;
+    if (sc > 4.5) {
+        if (sc < 5.5) {
+            // ringed planet, seen from above
+            float pd = length(sp - vec2(-420.0, -200.0)) / (sr * 0.55);
+            vec2 rq = (sp - vec2(-420.0, -200.0)) * vec2(1.0, 2.6) / (sr * 0.55);
+            float rl = length(rq);
+            col += mix(u_sunA, u_sunB, 0.5) * 0.10 * smoothstep(1.0, 0.98, pd);
+            col += u_sunA * 0.07 * smoothstep(1.3, 1.36, rl) * smoothstep(2.1, 2.0, rl) * (0.6 + 0.4 * sin(rl * 30.0));
+        } else if (sc < 6.5) {
+            // black hole: a dark well with a hot ring that breathes with the kick
+            col *= 1.0 - 0.6 * smoothstep(0.62, 0.5, d);
+            float er = abs(d - 0.64);
+            col += mix(vec3(1.0, 0.6, 0.3), vec3(1.0), 0.4) * 0.2 * exp(-er * (30.0 - 10.0 * u_mood2.z));
+        } else if (sc < 7.5) {
+            // twin suns
+            col += scol * band * 0.11 * smoothstep(0.8, 0.79, d);
+            float d2 = length(sp - vec2(1500.0, -700.0)) / (sr * 0.45);
+            col += mix(u_grid, vec3(1.0), 0.4) * 0.10 * smoothstep(1.0, 0.98, d2);
+        } else if (sc < 8.5) {
+            // aurora ribbons under the floor
+            float ax = sp.x / 500.0 + sin(sp.y / 700.0 - u_time * 0.2) * 1.2;
+            float cur = pow(sin(ax + sin(ax * 0.4 + u_time * 0.1) * 2.0) * 0.5 + 0.5, 3.0);
+            col += mix(u_grid, u_sunA, sin(sp.y / 900.0) * 0.5 + 0.5) * cur * 0.09 * (1.0 + 0.6 * u_swell);
+        } else {
+            // tide: crests rolling under the platform, lit on the kick
+            float wy = sp.y / 170.0 + sin(sp.x / 380.0 + u_time * 0.3) * 1.3 - u_time * 0.6;
+            float crest = smoothstep(0.82, 1.0, sin(wy * 6.2832));
+            col += mix(vec3(1.0, 0.35, 0.75), vec3(0.25, 0.85, 1.0), sin(sp.y / 800.0) * 0.5 + 0.5) * crest * (0.07 + 0.10 * u_mood2.z) * (1.0 + 0.5 * u_swell);
+        }
+    } else if (sc < 0.5) {
+        // sunset: far striped sun
+        col += scol * band * 0.12 * smoothstep(1.0, 0.985, d);
+        col += u_sunB * 0.05 * exp(-d * d * 1.2) * (1.0 + 0.6 * u_swell);
+    } else if (sc < 1.5) {
+        // night: a pale moon with a bitten edge
+        float md = length(sp - vec2(520.0, -260.0)) / (sr * 0.5);
+        float bite = length(sp - vec2(760.0, -380.0)) / (sr * 0.5);
+        col += mix(u_sunB, vec3(1.0), 0.55) * 0.11 * smoothstep(1.0, 0.98, md) * smoothstep(0.86, 0.9, bite);
+        col += u_sunB * 0.04 * exp(-md * md * 0.8);
+    } else if (sc < 2.5) {
+        // ocean: long swells rolling under the platform
+        float wy = sp.y / 150.0;
+        float wv = sin(wy * 6.2832 + sin(sp.x / 420.0 + u_time * 0.25) * 1.4 - u_time * 0.5);
+        col += mix(u_sunB, u_grid, 0.5) * 0.07 * smoothstep(0.86, 1.0, wv) * (1.0 + 0.5 * u_swell);
+        col += u_sunB * 0.04 * exp(-d * d * 0.8);
+    } else if (sc < 3.5) {
+        // vortex: rings falling away under the Heart
+        float rr = length((q - u_cam * 0.72) / 0.28) / 900.0;
+        float ring = smoothstep(0.42, 0.5, abs(fract(rr * 2.2 - u_time * 0.12) - 0.5));
+        col += mix(u_sunA, u_sunB, clamp(rr * 0.4, 0.0, 1.0)) * ring * 0.10 * exp(-rr * 0.55) * (1.0 + 0.6 * u_swell);
+    } else {
+        // starfield: a slow nebula
+        vec2 np = (q - u_cam * 0.8) / 1400.0;
+        float n1 = sin(np.x * 3.1 + sin(np.y * 2.3 + u_time * 0.03) * 2.0) * 0.5 + 0.5;
+        float n2 = sin(np.y * 2.7 - sin(np.x * 1.9 - u_time * 0.02) * 2.0) * 0.5 + 0.5;
+        col += mix(u_sunA, u_sunB, n1) * 0.085 * n1 * n2;
+        col += vec3(0.8, 0.85, 1.0) * stars((q - u_cam * 0.75) / 0.25, 60.0, 0.16) * 0.4;
+    }
     // star layer
     float sT = 0.33;
     vec2 tp = (q - u_cam * (1.0 - sT)) / sT;
@@ -1004,6 +1105,30 @@ vec3 topdown(vec2 q) {
     // kick ripple: a band of brighter grid travelling outward from the Heart
     float rd = (length(q) - u_ripple.x) / u_ripple.z;
     col += u_grid * ln * u_ripple.y * exp(-rd * rd) * fog;
+    // weather, outside and under the platform
+    float we = u_mood.y;
+    if (we > 0.5 && we < 1.5) {
+        vec2 g = vec2(uv.x * u_res.x / u_res.y, uv.y);
+        float beat = 0.4 + 0.9 * u_mood2.y + 0.3 * u_swell;
+        float rn = rainLayer(g, 120.0, 1.6, 0.10, 5.5) * 0.4 + rainLayer(g, 60.0, 2.5, 0.18, 8.1) * 0.7 + rainLayer(g, 28.0, 3.6, 0.28, 2.7);
+        col += mix(u_grid, vec3(0.85, 0.92, 1.0), 0.45) * rn * 0.2 * beat;
+        // splashes on the floor plane
+        vec2 gp = q / 150.0;
+        vec2 cell = floor(gp);
+        float ph = fract(u_time * 1.2 + hash(cell) * 9.0);
+        vec2 cpos = vec2(hash(cell + 3.1), hash(cell + 7.7)) * 0.5 + 0.25;
+        float rd = length(fract(gp) - cpos);
+        float ring = smoothstep(0.03, 0.0, abs(rd - ph * 0.3)) * (1.0 - ph) * step(0.3, hash(cell + 1.9));
+        col += mix(u_grid, vec3(0.9, 0.95, 1.0), 0.5) * ring * (0.10 + 0.35 * u_mood2.y);
+    } else if (we > 1.5 && we < 2.5) {
+        vec2 dp = (q - u_cam * 0.4) / 0.6 + vec2(u_time * 22.0, u_time * 9.0);
+        col += mix(u_sunA, vec3(1.0), 0.4) * stars(dp, 130.0, 0.35) * 0.3;
+    } else if (we > 2.5) {
+        float ax = uv.x * 5.0 + u_time * 0.12;
+        float au = sin(ax + sin(ax * 2.3 - u_time * 0.2) * 1.3) * 0.5 + 0.5;
+        float edge = smoothstep(0.55, 1.0, abs(uv.y - 0.5) * 2.0);
+        col += mix(u_grid, u_sunA, au) * 0.10 * edge * (0.4 + 0.6 * au) * (1.0 + 0.5 * u_swell);
+    }
     // platform glass: the arena floor dims what is below it
     vec2 a = abs(q) - u_arena;
     float inside = 1.0 - smoothstep(-1.0, 1.0, max(a.x, a.y));
@@ -1011,28 +1136,516 @@ vec3 topdown(vec2 q) {
     return col;
 }
 
-// Drift: synthwave vista (sky, stars, sun). The grid, mountains and heartline are geometry.
+// Distance from p to the segment a-b.
+float sdSeg(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));
+}
+
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+float fbm(vec2 p) {
+    float a = 0.5;
+    float sum = 0.0;
+    for (int i = 0; i < 4; i++) {
+        sum += a * vnoise(p);
+        p = p * 2.03 + 17.1;
+        a *= 0.5;
+    }
+    return sum;
+}
+
+// The sky itself for backdrop `sc`: its own zenith and horizon colours, haze and star density.
+// Backdrop 0 (the sunset) is the palette's sky, untouched.
+vec3 skyBase(float sc, vec2 p) {
+    float hz = u_vista.x;
+    float t = clamp(p.y / hz, 0.0, 1.0);
+    vec3 pz = u_c0 * 0.5;
+    vec3 ph = mix(u_c1, u_sunB, 0.35);
+    vec3 z = pz;
+    vec3 h = ph;
+    float starD = 0.05;
+    float haze = 0.0;
+    if (sc > 0.5) {
+        haze = 0.35;
+        if (sc < 1.5) { z = vec3(0.012, 0.022, 0.075); h = vec3(0.07, 0.22, 0.42); starD = 0.10; }
+        else if (sc < 2.5) { z = vec3(0.10, 0.03, 0.22); h = vec3(0.95, 0.42, 0.26); starD = 0.02; }
+        else if (sc < 3.5) { z = u_c0 * 0.35; h = mix(u_c1, u_grid, 0.45); starD = 0.07; }
+        else if (sc < 4.5) { z = vec3(0.01, 0.01, 0.045); h = vec3(0.12, 0.06, 0.26); starD = 0.10; haze = 0.2; }
+        else if (sc < 5.5) { z = vec3(0.02, 0.012, 0.07); h = vec3(0.34, 0.12, 0.40); starD = 0.09; }
+        else if (sc < 6.5) { z = vec3(0.0, 0.0, 0.02); h = vec3(0.20, 0.07, 0.10); starD = 0.12; }
+        else if (sc < 7.5) { z = vec3(0.13, 0.03, 0.20); h = vec3(0.92, 0.36, 0.46); starD = 0.02; }
+        else if (sc < 8.5) { z = vec3(0.0, 0.02, 0.06); h = vec3(0.04, 0.17, 0.22); starD = 0.0; }
+        else if (sc < 9.5) { z = vec3(0.0, 0.02, 0.08); h = vec3(0.06, 0.20, 0.38); starD = 0.10; }
+        else { z = vec3(0.05, 0.01, 0.12); h = vec3(0.55, 0.16, 0.50); starD = 0.07; }
+        // keep some of the palette so the sky still belongs to the land in front of it
+        z = mix(z, pz, 0.25);
+        h = mix(h, ph, 0.3);
+    }
+    vec3 col = mix(z, h, pow(t, 2.0));
+    col += h * haze * exp(-(1.0 - t) * 10.0);
+    col += vec3(0.8, 0.85, 1.0) * stars(p * u_res, 9.0 * u_res.y / 1080.0, starD) * (1.0 - t) * 0.8;
+    return col;
+}
+
+// The celestial body of backdrop `sc`, drawn over the sky colour `col`. `off` moves it down the
+// screen (used to sink the old one and raise the new one during a transition).
+vec3 skyBody(float sc, vec2 p, vec3 col, float off) {
+    float hz = u_vista.x;
+    float t = p.y / hz;
+    vec2 asp = vec2(u_res.x / u_res.y, 1.0);
+    vec2 q = (p - vec2(0.5, u_vista.y + off)) * asp;
+    float r = u_vista.z * (1.0 + 0.035 * u_bass);
+    float dd = length(q);
+    float yy = q.y / r;
+    float px = 1.0 / u_res.y;
+    vec3 suncol = mix(u_sunA, u_sunB, clamp(yy * 0.6 + 0.5, 0.0, 1.0));
+    if (sc < 0.5) {
+        // sunset: the striped sun
+        float mask = yy < 0.0 ? 1.0 : step(0.1 + 0.5 * yy, fract(yy * 5.0 - u_time * 0.22));
+        col = mix(col, suncol * 0.68, smoothstep(r, r - 0.003, dd) * mask);
+        col += u_sunB * 0.16 * exp(-dd * dd * 12.0) * (1.0 + 0.6 * u_bass);
+    } else if (sc < 1.5) {
+        // moonrise: a great pale disc in the same language as the sun: a flat gradient, scan
+        // bars drifting through its lower half, a soft edge and a halo that breathes with the bass
+        float R = r * 1.08;
+        float ym = q.y / R;
+        vec3 mc = mix(vec3(0.97, 0.99, 1.0), vec3(0.52, 0.66, 1.0), clamp(ym * 0.6 + 0.5, 0.0, 1.0));
+        float bars = ym < -0.05 ? 1.0 : step(0.12 + 0.5 * (ym + 0.05), fract(ym * 6.0 - u_time * 0.18));
+        float disc = smoothstep(R, R - 0.004, dd);
+        float outm = max(dd - R, 0.0);
+        col += vec3(0.40, 0.58, 1.0) * (0.36 * exp(-outm * 9.0) + 0.14 * exp(-outm * 2.5)) * (1.0 + 0.6 * u_bass);
+        col = mix(col, mc * 0.95, disc * bars);
+        col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 40.0, 6.0 * u_res.y / 1080.0, 0.08) * (1.0 - t) * 0.7 * (1.0 - disc);
+    } else if (sc < 2.5) {
+        // ocean dusk: a huge sun going into the sea, long clouds lit from below
+        vec2 oq = (p - vec2(0.5, hz + off)) * asp;
+        float od = length(oq);
+        float R = r * 1.3 * (1.0 + 0.03 * u_bass);
+        float yo = -oq.y / R; // 0 at the horizon, 1 at the top of the sun
+        vec3 sc2 = mix(vec3(1.0, 0.30, 0.42), vec3(1.0, 0.86, 0.42), clamp(yo, 0.0, 1.0));
+        float bars = yo > 0.55 ? 1.0 : step(0.16 + 0.5 * (0.55 - yo), fract(yo * 9.0 + u_time * 0.15));
+        col += vec3(1.0, 0.5, 0.3) * (0.30 * exp(-od * od * 5.0) + 0.25 * exp(-max(od - R, 0.0) * 8.0)) * (1.0 + 0.5 * u_bass);
+        col = mix(col, sc2 * 0.92, smoothstep(R, R - 0.003, od) * bars);
+        float cl = fbm(vec2(p.x * 3.0 + u_time * 0.01, (p.y - off) * 26.0));
+        float cm = smoothstep(0.52, 0.7, cl) * smoothstep(0.15, 0.5, t) * smoothstep(1.0, 0.8, t);
+        col = mix(col, mix(vec3(0.20, 0.05, 0.22), vec3(1.0, 0.55, 0.35), smoothstep(0.6, 0.78, cl)), cm * 0.7);
+    } else if (sc < 3.5) {
+        // wire globe: a slowly turning sphere of latitude and longitude lines
+        float R = r * 1.1 * (1.0 + 0.02 * u_bass);
+        vec2 n = q / R;
+        float d2 = dot(n, n);
+        float disc = smoothstep(R, R - 0.003, dd);
+        if (d2 < 1.0) {
+            float z = sqrt(1.0 - d2);
+            vec3 sp = vec3(n.x, n.y * 0.94 - z * 0.34, n.y * 0.34 + z * 0.94);
+            float lat = asin(clamp(sp.y, -1.0, 1.0));
+            float lon = atan(sp.x, sp.z) + u_time * 0.18;
+            float gl = abs(fract(lat * 12.0 / 3.14159 + 0.5) - 0.5);
+            float go = abs(fract(lon * 16.0 / 6.28318) - 0.5) * cos(lat);
+            float wline = max(smoothstep(0.07, 0.01, gl), smoothstep(0.05, 0.005, go));
+            vec3 gc = mix(u_grid, u_sunB, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
+            col = mix(col, u_c0 * 0.3, 0.8 * disc);
+            col += gc * wline * (0.5 + 0.5 * z) * (0.9 + 0.8 * u_mood2.z) * disc;
+            col += gc * 0.14 * pow(1.0 - z, 2.0) * disc;
+        }
+        float outg = max(dd - R, 0.0);
+        col += mix(u_grid, u_sunB, 0.5) * (0.5 * exp(-outg * 22.0) + 0.14 * exp(-outg * 4.0)) * (1.0 - disc);
+    } else if (sc < 4.5) {
+        // nebula: lit gas and dust lanes along a band of stars
+        vec2 np = q * 2.2 + vec2(u_time * 0.006, 0.0);
+        float f1 = fbm(np + fbm(np * 1.7 + 3.0) * 1.2);
+        float f2 = fbm(np * 2.3 - 7.0);
+        float across = q.y + q.x * 0.32 + 0.02;
+        float along = q.x - q.y * 0.32;
+        float bandm = exp(-pow(across / 0.3, 2.0));
+        float neb = smoothstep(0.24, 0.66, f1) * (0.3 + 0.7 * bandm);
+        vec3 nc = mix(vec3(0.10, 0.22, 0.85), vec3(0.95, 0.22, 0.75), f2);
+        nc = mix(nc, vec3(0.45, 0.95, 1.0), smoothstep(0.62, 0.85, f1) * 0.6);
+        col *= 1.0 - 0.5 * smoothstep(0.5, 0.75, f2) * bandm * (1.0 - neb);
+        col += nc * neb * (1.35 + 0.4 * u_bass);
+        // the galaxy's core: a warm bar of light along the band
+        float corev = exp(-(along * along / 0.035 + across * across / 0.008));
+        float coreh = exp(-(along * along / 0.5 + across * across / 0.035));
+        col += vec3(1.0, 0.86, 0.72) * (corev * 0.5 + coreh * 0.3) * (0.6 + 0.8 * f1);
+        col += vec3(0.9, 0.93, 1.0) * stars(p * u_res + 90.0, 6.0 * u_res.y / 1080.0, 0.28) * (1.0 - t * 0.5) * (0.5 + 0.8 * bandm);
+        for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            vec2 s2 = q - vec2(-0.42 + fi * 0.37, -0.20 + 0.11 * sin(fi * 2.4));
+            float tw = 0.7 + 0.3 * sin(u_time * (1.3 + fi) + fi * 2.0);
+            float fl = exp(-abs(s2.x) * 260.0) * exp(-abs(s2.y) * 22.0) + exp(-abs(s2.y) * 260.0) * exp(-abs(s2.x) * 22.0);
+            col += vec3(0.85, 0.92, 1.0) * (fl * 0.8 + exp(-dot(s2, s2) * 4000.0) * 1.5) * tw;
+        }
+    } else if (sc < 5.5) {
+        // ringed planet: a flat gradient disc with scan bars like the sun's, inside three glowing
+        // rings that brighten on the kick
+        float R = r * 0.95;
+        vec2 c = q - vec2(0.0, -0.02);
+        float d = length(c);
+        float yp = c.y / R;
+        vec3 pc = mix(vec3(1.0, 0.84, 0.46), vec3(0.96, 0.30, 0.62), clamp(yp * 0.6 + 0.5, 0.0, 1.0));
+        float bars = yp < 0.0 ? 1.0 : step(0.1 + 0.5 * yp, fract(yp * 5.0 - u_time * 0.22));
+        vec2 rq = vec2(c.x * 0.94 - c.y * 0.34, (c.y * 0.94 + c.x * 0.34) * 3.8) / R;
+        float rl = length(rq);
+        float aa = 12.0 * px / R;
+        float b1 = smoothstep(1.34, 1.34 + aa, rl) * smoothstep(1.60, 1.60 - aa, rl);
+        float b2 = smoothstep(1.70, 1.70 + aa, rl) * smoothstep(2.00, 2.00 - aa, rl);
+        float b3 = smoothstep(2.12, 2.12 + aa, rl) * smoothstep(2.24, 2.24 - aa, rl);
+        float ring = b1 * 0.7 + b2 * 1.0 + b3 * 0.5;
+        // light runs round the rings
+        float run = 0.85 + 0.15 * sin(atan(rq.y, rq.x) * 2.0 - u_time * 0.8);
+        vec3 rc = mix(vec3(1.0, 0.86, 0.62), vec3(0.80, 0.50, 1.0), smoothstep(1.3, 2.25, rl)) * run * (0.85 + 0.6 * u_mood2.z);
+        float disc = smoothstep(R, R - 0.004, d);
+        float front = step(0.0, rq.y);
+        float outp = max(d - R, 0.0);
+        col += vec3(1.0, 0.45, 0.65) * (0.26 * exp(-outp * 9.0) + 0.10 * exp(-outp * 2.5)) * (1.0 + 0.6 * u_bass);
+        col += rc * 0.10 * exp(-pow((rl - 1.8) / 0.55, 2.0)) * (1.0 - disc);
+        col = mix(col, rc * 0.8, ring * (1.0 - front) * (1.0 - disc) * 0.9);
+        col = mix(col, pc * 0.9, disc * bars);
+        col = mix(col, rc * 1.1, ring * front * 0.97);
+        col += rc * ring * 0.3 * (1.0 - disc * (1.0 - front));
+    } else if (sc < 6.5) {
+        // black hole: a clean shadow with a photon ring, lensed light around it and an accretion
+        // disc crossing in front
+        float R = r * 0.62;
+        vec2 dn = q / max(dd, 0.0001);
+        float outc = dd - R;
+        float streak = 0.7 + 0.3 * fbm(dn * 5.0 + vec2(u_time * 0.08, 3.0) + dd * 3.0);
+        float dop = 0.62 - 0.38 * dn.x;
+        float halo = exp(-max(outc, 0.0) * 9.0) * dop * streak;
+        vec3 hot = mix(vec3(1.0, 0.93, 0.80), vec3(1.0, 0.45, 0.22), smoothstep(0.0, 0.22, outc));
+        col += hot * halo * (0.85 + 0.5 * u_mood2.z);
+        col += vec3(1.0, 0.4, 0.3) * 0.16 * exp(-max(outc, 0.0) * 2.4);
+        col = mix(col, vec3(0.0), smoothstep(R + px, R - px, dd));
+        float ringw = 2.2 * px;
+        col += vec3(1.0, 0.95, 0.85) * exp(-pow((outc - ringw) / ringw, 2.0)) * 1.2;
+        float ax = q.x / R;
+        float ay = (q.y - 0.012 - 0.035 * q.x) / R;
+        float thick = 0.04 + 0.022 * abs(ax);
+        float bandd = exp(-pow(ay / thick, 2.0)) * smoothstep(3.1, 1.3, abs(ax));
+        float flow = 0.62 + 0.38 * vnoise(vec2(ax * 9.0 - u_time * 1.3, 2.0));
+        vec3 dc = mix(vec3(1.0, 0.96, 0.86), vec3(1.0, 0.5, 0.2), smoothstep(0.3, 2.6, abs(ax)));
+        col += dc * bandd * flow * (0.75 - 0.3 * clamp(ax * 0.6, -1.0, 1.0)) * 1.3;
+    } else if (sc < 7.5) {
+        // binary sunset: the striped sun, and a small white-hot companion over its shoulder
+        vec2 q1 = q - vec2(-0.07, 0.02);
+        float d1 = length(q1);
+        float y1 = q1.y / r;
+        float m1 = y1 < 0.0 ? 1.0 : step(0.1 + 0.5 * y1, fract(y1 * 5.0 - u_time * 0.22));
+        vec2 q2 = q - vec2(0.25, -0.15);
+        float r2 = r * 0.4;
+        float d2b = length(q2);
+        float y2 = q2.y / r2;
+        vec3 c2 = mix(vec3(1.0, 0.98, 0.92), vec3(1.0, 0.55, 0.7), clamp(y2 * 0.5 + 0.5, 0.0, 1.0));
+        float m2 = y2 < 0.25 ? 1.0 : step(0.2 + 0.5 * (y2 - 0.25), fract(y2 * 3.0 - u_time * 0.3));
+        col += vec3(1.0, 0.7, 0.75) * (0.30 * exp(-max(d2b - r2, 0.0) * 12.0) + 0.14 * exp(-d2b * d2b * 18.0));
+        col = mix(col, c2, smoothstep(r2, r2 - 0.003, d2b) * m2);
+        vec3 c1 = mix(u_sunA, u_sunB, clamp(y1 * 0.6 + 0.5, 0.0, 1.0));
+        col = mix(col, c1 * 0.72, smoothstep(r, r - 0.003, d1) * m1);
+        col += u_sunB * 0.18 * exp(-d1 * d1 * 12.0) * (1.0 + 0.6 * u_bass);
+    } else if (sc < 8.5) {
+        // aurora: three ribbons, each a wavy hem with rays streaming up from it
+        float x = (p.x - 0.5) * asp.x;
+        float yv = (hz - p.y) / hz + off; // 0 at the horizon, 1 at the top
+        col += vec3(0.85, 0.9, 1.0) * stars(p * u_res + 13.0, 6.0 * u_res.y / 1080.0, 0.12) * (1.0 - t) * 0.6;
+        for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            float hem = 0.30 + 0.17 * fi + 0.07 * sin(x * (2.1 + fi * 0.7) + u_time * (0.16 + 0.05 * fi) + fi * 2.0) + 0.035 * sin(x * (5.3 + fi) - u_time * 0.23);
+            float up = yv - hem;
+            float body = smoothstep(-0.012, 0.0, up) * exp(-max(up, 0.0) * (5.5 - fi));
+            float rays = 0.55 + 0.45 * vnoise(vec2(x * 46.0 + fi * 13.0 + sin(u_time * 0.2 + fi) * 2.0, fi));
+            float fold = 0.6 + 0.4 * sin(x * (3.0 + fi) + u_time * 0.3 + fi);
+            vec3 ac = mix(vec3(0.15, 1.0, 0.55), vec3(0.55, 0.3, 1.0), clamp(up * 3.2, 0.0, 1.0));
+            col += ac * body * rays * fold * (0.42 - 0.08 * fi) * (1.0 + 0.5 * u_bass);
+            col += vec3(0.6, 1.0, 0.8) * smoothstep(0.012, 0.0, abs(up)) * 0.25 * fold;
+        }
+    } else if (sc > 9.5) {
+        // prism: a great striped triangle in the sun's colours, a thin frame of light around
+        // it that flares on the kick, and three rays fanning out behind
+        float R = r * 1.25 * (1.0 + 0.035 * u_bass);
+        vec2 c = q - vec2(0.0, 0.10 * R);
+        // distance to an upright triangle: apex at the top, base below
+        float k = 1.7320508;
+        vec2 tq = vec2(abs(c.x) - R, -c.y + R / k);
+        if (tq.x + k * tq.y > 0.0) tq = vec2(tq.x - k * tq.y, -k * tq.x - tq.y) * 0.5;
+        tq.x -= clamp(tq.x, -2.0 * R, 0.0);
+        float d = -length(tq) * sign(tq.y);
+        float yp = (c.y + R * 0.2) / R;
+        vec3 pc = mix(u_sunA, u_sunB, clamp(yp * 0.7 + 0.5, 0.0, 1.0));
+        float bars = yp < 0.0 ? 1.0 : step(0.1 + 0.5 * yp, fract(yp * 6.0 - u_time * 0.22));
+        for (int i = 0; i < 3; i++) {
+            float a = -1.5708 + (float(i) - 1.0) * 0.55 + 0.05 * sin(u_time * 0.4 + float(i));
+            vec2 dv = vec2(cos(a), sin(a));
+            float along = dot(c, dv);
+            float off2 = abs(dot(c, vec2(-dv.y, dv.x)));
+            col += mix(u_sunA, vec3(1.0), 0.3) * 0.10 * smoothstep(0.05 + 0.10 * along, 0.0, off2) * step(0.0, along) * exp(-along * 2.2) * (1.0 + 0.8 * u_mood2.z);
+        }
+        col += u_sunB * (0.22 * exp(-max(d, 0.0) * 14.0) + 0.10 * exp(-max(d, 0.0) * 3.0)) * (1.0 + 0.6 * u_bass) * step(0.0, d);
+        col = mix(col, pc * 0.72, smoothstep(0.003, 0.0, d) * bars);
+        float frame = abs(d - 0.022);
+        col += mix(u_grid, vec3(1.0), 0.4) * smoothstep(0.004 + px, 0.004 - px, frame) * (0.55 + 0.9 * u_mood2.z);
+    } else {
+        // tide: rank on rank of waves standing up over the horizon under a small moon; they
+        // swell with the bass and their crests light on the kick
+        float x = (p.x - 0.5) * asp.x;
+        float yv = (hz - p.y) / hz + off; // 0 at the horizon, 1 at the top
+        vec2 mq = q - vec2(0.30, -0.17);
+        float mr = r * 0.34;
+        float mdisc = smoothstep(mr + px, mr - px, length(mq));
+        col = mix(col, vec3(0.95, 0.97, 1.0), mdisc * 0.95);
+        col += vec3(0.45, 0.65, 1.0) * 0.25 * exp(-max(length(mq) - mr, 0.0) * 10.0) * (1.0 - mdisc);
+        float found = 0.0;
+        for (int i = 0; i < 9; i++) {
+            float fi = float(i); // 0 = the nearest wave
+            float sp = 0.5 - 0.04 * fi;
+            float amp = (0.050 - 0.0035 * fi) * (1.0 + 0.8 * u_bass);
+            float w = sin(x * (2.6 + fi * 0.55) + u_time * sp + fi * 1.9) + 0.45 * sin(x * (6.1 + fi) - u_time * sp * 1.4 + fi * 0.7);
+            // peaked crests, like waves about to break
+            w = w * 0.6 + 0.8 * (1.0 - abs(sin(x * (1.3 + fi * 0.27) + u_time * sp * 0.5 + fi))) - 0.4;
+            float cy = 0.07 + 0.065 * fi + amp * w;
+            if (found < 0.5 && yv < cy) {
+                found = 1.0;
+                vec3 lc = mix(vec3(1.0, 0.35, 0.75), vec3(0.25, 0.85, 1.0), fi / 8.0);
+                float crest = smoothstep(0.011, 0.0, cy - yv);
+                float body = exp(-(cy - yv) * 16.0);
+                col = mix(u_c0 * 0.3, lc * 0.5, body * 0.55) + lc * crest * (0.85 + 0.7 * u_mood2.z);
+            }
+        }
+    }
+    return col;
+}
+
+// Horizon props: silhouettes standing on the horizon, in front of the sky.
+vec3 skyProp(float pr, vec2 p, vec3 col, float off) {
+    float hz = u_vista.x;
+    float px = 1.0 / u_res.y;
+    vec2 asp = vec2(u_res.x / u_res.y, 1.0);
+    vec2 q = vec2((p.x - 0.5) * asp.x, hz + off - p.y); // x from the centre, y up from the horizon
+    vec3 dark = u_c0 * 0.22;
+    if (pr > 0.5 && pr < 1.5) {
+        // palm trees: slim curved trunks and long feather fronds (a spine with fine leaflets)
+        float sil = 0.0;
+        for (int i = 0; i < 4; i++) {
+            float fi = float(i);
+            float side = mod(fi, 2.0) < 0.5 ? -1.0 : 1.0;
+            float far = floor(fi * 0.5);
+            vec2 base = vec2(side * (0.52 + 0.20 * far), -0.01);
+            float h = 0.33 - 0.09 * far;
+            float lean = -side * (0.08 + 0.03 * far);
+            float sway = sin(u_time * 0.7 + fi * 1.9) * 0.006;
+            vec2 m1 = base + vec2(lean * 0.12, h * 0.35);
+            vec2 m2 = base + vec2(lean * 0.50, h * 0.72);
+            vec2 top = base + vec2(lean + sway, h);
+            float td = min(min(sdSeg(q, base, m1), sdSeg(q, m1, m2)), sdSeg(q, m2, top));
+            float tw = mix(0.0065, 0.0035, clamp(q.y / h, 0.0, 1.0));
+            sil = max(sil, smoothstep(tw + px, tw - px, td));
+            for (int f = 0; f < 9; f++) {
+                float ff = float(f);
+                float a = -0.55 + ff * 0.53 + sway * 4.0;
+                vec2 dirv = vec2(cos(a), sin(a));
+                float L = h * (0.52 + 0.10 * sin(ff * 2.3 + fi));
+                // the frond rises a little, arches over, then hangs
+                vec2 p1 = top + dirv * L * 0.36 + vec2(0.0, L * 0.05);
+                vec2 p2 = p1 + normalize(dirv + vec2(0.0, -0.55)) * L * 0.36;
+                vec2 p3 = p2 + normalize(dirv + vec2(0.0, -1.7)) * L * 0.32;
+                // nearest point on the spine, and how far along it (0 crown .. 1 tip)
+                vec2 ba = p1 - top; float h0 = clamp(dot(q - top, ba) / dot(ba, ba), 0.0, 1.0); float d0 = length(q - top - ba * h0);
+                ba = p2 - p1; float h1 = clamp(dot(q - p1, ba) / dot(ba, ba), 0.0, 1.0); float d1 = length(q - p1 - ba * h1);
+                ba = p3 - p2; float h2 = clamp(dot(q - p2, ba) / dot(ba, ba), 0.0, 1.0); float d2 = length(q - p2 - ba * h2);
+                float fd = d0; float u = h0 / 3.0;
+                if (d1 < fd) { fd = d1; u = (1.0 + h1) / 3.0; }
+                if (d2 < fd) { fd = d2; u = (2.0 + h2) / 3.0; }
+                // leaflets: thin teeth either side of the spine, longest mid-frond
+                float reach = L * 0.11 * sin(3.14159 * pow(u, 0.7)) + 0.0012;
+                float teeth = smoothstep(0.34, 0.26, abs(fract(u * 26.0) - 0.5));
+                float leaf = smoothstep(reach, reach * 0.55, fd) * teeth;
+                float spine = smoothstep(0.0018 + px, 0.0018 - px, fd);
+                sil = max(sil, max(leaf, spine));
+            }
+            sil = max(sil, smoothstep(0.010 + px, 0.010 - px, length(q - top + vec2(0.0, 0.004))));
+        }
+        col = mix(col, dark, sil * step(0.0, q.y));
+    } else if (pr > 1.5 && pr < 2.5) {
+        // radio masts: glowing lattice towers; the beacons on top fire on the kick and a ring
+        // of signal leaves them
+        for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            float cx = -0.66 + fi * 0.62 + (fi == 1.0 ? 0.20 : 0.0);
+            float h = 0.30 - 0.05 * fi + (fi == 1.0 ? 0.08 : 0.0);
+            float bw = h * 0.16;
+            vec2 top = vec2(cx, h);
+            float d = min(sdSeg(q, vec2(cx - bw, 0.0), top), sdSeg(q, vec2(cx + bw, 0.0), top));
+            for (int k = 0; k < 6; k++) {
+                float k0 = float(k) / 6.0;
+                float k1 = float(k + 1) / 6.0;
+                vec2 l0 = vec2(cx - bw * (1.0 - k0), h * k0);
+                vec2 r0 = vec2(cx + bw * (1.0 - k0), h * k0);
+                vec2 l1 = vec2(cx - bw * (1.0 - k1), h * k1);
+                vec2 r1 = vec2(cx + bw * (1.0 - k1), h * k1);
+                d = min(d, min(sdSeg(q, l0, r1), sdSeg(q, r0, l1)));
+                d = min(d, sdSeg(q, l0, r0));
+            }
+            d = min(d, sdSeg(q, top, top + vec2(0.0, h * 0.14)));
+            float vis = step(0.0, q.y);
+            col = mix(col, dark, smoothstep(0.004, 0.002, d) * vis);
+            col += mix(u_grid, u_sunB, 0.4) * (smoothstep(0.0022 + px, 0.0022 - px, d) * 0.55 + exp(-d * 260.0) * 0.12) * vis;
+            vec2 bp = q - (top + vec2(0.0, h * 0.14));
+            float bl = length(bp);
+            col += vec3(1.0, 0.22, 0.34) * (smoothstep(0.007, 0.002, bl) * (0.6 + 1.8 * u_mood2.z) + exp(-bl * 60.0) * 0.5 * u_mood2.z);
+            float sig = fract(u_time * 0.5 + fi * 0.33);
+            col += vec3(1.0, 0.3, 0.45) * smoothstep(0.004, 0.0, abs(bl - sig * 0.22)) * (1.0 - sig) * 0.35 * step(bp.y, 0.02 + bl);
+        }
+    } else if (pr > 2.5 && pr < 3.5) {
+        // city: a hazy far row and a near row of towers with a lit front and a dark side wall,
+        // outlined in light like the mountains. The windows work as a level meter: each tower's
+        // lit floors rise and fall with the bass, flare on the hats, and the masts blink on the kick.
+        for (int layer = 0; layer < 2; layer++) {
+            float fl = float(layer); // 0 = far, 1 = near
+            float cw = mix(0.085, 0.064, fl);
+            float xx = q.x + fl * 0.031;
+            float id = floor(xx / cw);
+            float fx = fract(xx / cw);
+            float h1 = hash(vec2(id, 9.1 + fl * 4.0));
+            float h2 = hash(vec2(id, 2.3 + fl * 7.0));
+            float town = 0.55 + 0.45 * cos(clamp(q.x * 1.4, -3.1, 3.1));
+            float tall = (mix(0.17, 0.10, fl) + mix(0.15, 0.24, fl) * h1 * h1) * town;
+            float wid = 0.50 + 0.32 * h2;
+            float lo = 0.5 - wid * 0.5;
+            float hi = 0.5 + wid * 0.5;
+            float sidew = 0.13;                       // the side wall, as a share of the lot
+            float ex = px / cw;
+            // front face
+            float inx = smoothstep(lo - ex, lo + ex, fx) * smoothstep(hi + ex, hi - ex, fx);
+            float front = inx * smoothstep(tall + px, tall - px, q.y);
+            // side wall: to the right of the front, its roof line slanting back
+            float sx = (fx - hi) / sidew;
+            float sroof = tall - sx * 0.022;
+            float side = step(0.0, sx) * step(sx, 1.0) * smoothstep(sroof + px, sroof - px, q.y) * step(sx * 0.022, q.y + 0.022);
+            float mast = step(0.8, h1) * smoothstep(0.0016 + px, 0.0016 - px, abs((fx - 0.5) * cw)) * step(q.y, tall * 1.36) * step(tall, q.y);
+            float vis = step(0.0, q.y);
+            vec3 haze = mix(u_c1, u_sunB, 0.3) * 0.5;
+            vec3 fcol = mix(haze, mix(dark, u_c1 * 0.55, 0.35 + 0.4 * q.y / max(tall, 0.01)), fl);
+            vec3 scol2 = mix(haze * 0.8, dark * 0.6, fl);
+            col = mix(col, scol2, side * vis * mix(0.8, 1.0, fl));
+            col = mix(col, fcol, max(front, mast) * vis * mix(0.8, 1.0, fl));
+            // outline: roof and both edges of the front face glow
+            float de = min(min(abs(fx - lo), abs(fx - hi)) * cw, abs(q.y - tall));
+            float edge = smoothstep(0.0022 + px, 0.0022 - px, de) * step(q.y, tall + 0.003) * step(lo - 0.02, fx) * step(fx, hi + 0.02) * vis;
+            col += mix(u_grid, u_sunB, 0.5) * edge * mix(0.18, 0.55, fl);
+            // windows as a level meter
+            float ncol = 3.0 + floor(h2 * 3.0);
+            vec2 wv = vec2((fx - lo) / wid * ncol, q.y / 0.0135);
+            vec2 wf = fract(wv);
+            float wm = smoothstep(0.2, 0.28, wf.x) * smoothstep(0.8, 0.72, wf.x) * smoothstep(0.24, 0.34, wf.y) * smoothstep(0.72, 0.62, wf.y);
+            float level = tall * (0.25 + 0.75 * clamp(u_bass * (0.6 + 0.8 * h1) + 0.18 * sin(u_time * (1.5 + h2 * 2.0) + id * 1.7), 0.0, 1.0));
+            float below = step(q.y, level);
+            float stray = step(0.82, hash(floor(wv) + vec2(id * 13.0, fl * 50.0)));
+            vec3 wc = mix(vec3(1.0, 0.82, 0.45), vec3(0.45, 0.9, 1.0), step(0.6, h2));
+            wc = mix(wc, vec3(1.0, 0.35, 0.6), smoothstep(0.7, 1.0, q.y / max(tall, 0.01)));
+            col += wc * front * wm * (below * (0.55 + 0.6 * u_mood2.y) + stray * 0.25) * mix(0.3, 1.0, fl);
+            float tip = smoothstep(0.005, 0.0015, length(vec2((fx - 0.5) * cw, q.y - tall * 1.36))) * step(0.8, h1) * fl;
+            col += vec3(1.0, 0.2, 0.3) * tip * (0.5 + 1.6 * u_mood2.z);
+        }
+    } else if (pr > 3.5) {
+        // meteors: a few streaks falling across the sky
+        for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            float slot = floor(u_time * 0.35 + fi * 0.37);
+            float hs = hash(vec2(slot, fi * 3.7));
+            float ph = fract(u_time * 0.35 + fi * 0.37);
+            vec2 a = vec2(-0.7 + 1.4 * hs, 0.5 + 0.12 * fi) + vec2(0.55, -0.3) * ph * 1.6;
+            vec2 bq = a - vec2(0.55, -0.3) * 0.16;
+            float d = sdSeg(q, a, bq);
+            float fade = smoothstep(0.0, 0.1, ph) * smoothstep(0.7, 0.4, ph) * step(0.35, hs);
+            col += mix(u_sunA, vec3(1.0), 0.6) * smoothstep(0.004, 0.0, d) * fade * smoothstep(0.0, 0.16, length(q - bq)) * 0.9;
+        }
+    }
+    return col;
+}
+
+// Drift: synthwave vista (sky, body, props). The grid, mountains and heartline are geometry.
 vec3 vista(vec2 p) {
     float hz = u_vista.x;
     vec3 col;
     if (p.y < hz) {
         float t = p.y / hz;
-        col = mix(u_c0 * 0.5, mix(u_c1, u_sunB, 0.35), pow(t, 2.0));
-        col += vec3(0.8, 0.85, 1.0) * stars(p * u_res, 9.0 * u_res.y / 1080.0, 0.05) * (1.0 - t) * 0.8;
-        vec2 q = (p - vec2(0.5, u_vista.y)) * vec2(u_res.x / u_res.y, 1.0);
-        float r = u_vista.z * (1.0 + 0.035 * u_bass);
-        float dd = length(q);
-        float yy = q.y / r;
-        float mask = yy < 0.0 ? 1.0 : step(0.1 + 0.5 * yy, fract(yy * 5.0 - u_time * 0.22));
-        vec3 suncol = mix(u_sunA, u_sunB, clamp(yy * 0.6 + 0.5, 0.0, 1.0));
-        col = mix(col, suncol * 0.68, smoothstep(r, r - 0.003, dd) * mask);
-        col += u_sunB * 0.16 * exp(-dd * dd * 12.0) * (1.0 + 0.6 * u_bass);
+        float k = u_tr.x;
+        if (k >= 0.999) {
+            col = skyProp(u_mood2.x, p, skyBody(u_mood.x, p, skyBase(u_mood.x, p), 0.0), 0.0);
+        } else {
+            // Transition: the old sky sinks behind the horizon while the new one rises out of it.
+            float ko = smoothstep(0.0, 0.55, k);
+            float kn = smoothstep(0.3, 1.0, k);
+            vec3 oldc = skyProp(u_tr.z, p, skyBody(u_tr.y, p, skyBase(u_tr.y, p), ko * ko * 0.75), ko * 0.45);
+            vec3 newc = skyProp(u_mood2.x, p, skyBody(u_mood.x, p, skyBase(u_mood.x, p), (1.0 - kn) * (1.0 - kn) * 0.75), (1.0 - kn) * 0.45);
+            col = mix(oldc, newc, smoothstep(0.35, 0.65, k));
+            // a band of light sweeps up the sky, and scan lines race along it
+            float bell = sin(k * 3.14159);
+            float sweep = exp(-pow((t - (1.0 - k) * 1.2) * 7.0, 2.0));
+            float lines = step(0.55, hash(vec2(floor(p.y * u_res.y / 3.0), floor(u_time * 30.0))));
+            col += mix(u_sunB, vec3(1.0), 0.5) * sweep * bell * (0.35 + 0.45 * lines * smoothstep(0.0, 1.0, abs(fract(p.x * 3.0 - u_time * 2.0) - 0.5) * 2.0));
+            col += u_sunB * bell * 0.5 * exp(-(hz - p.y) * 14.0);
+        }
+        // a chime lights a star where its note sits in pitch (low notes left, high notes right);
+        // ear candy sends a shimmer through the whole sky
+        if (u_fx.x > 0.01) {
+            vec2 sq = (p - vec2(0.12 + 0.76 * u_fx.y, 0.07 + 0.16 * fract(u_fx.y * 7.3))) * vec2(u_res.x / u_res.y, 1.0);
+            float fl = exp(-abs(sq.x) * 240.0) * exp(-abs(sq.y) * 20.0) + exp(-abs(sq.y) * 240.0) * exp(-abs(sq.x) * 20.0);
+            col += mix(u_sunA, vec3(1.0), 0.6) * (fl * 0.9 + exp(-dot(sq, sq) * 3000.0) * 1.6) * u_fx.x;
+        }
+        if (u_fx.z > 0.01) {
+            col += vec3(0.9, 0.95, 1.0) * stars(p * u_res + 5.0, 5.0 * u_res.y / 1080.0, 0.35) * u_fx.z * (1.0 - t);
+            col += u_sunA * 0.25 * u_fx.z * exp(-(hz - p.y) * 10.0);
+        }
+        // rain: three depths of streaks. It thickens with the song's energy and every hat
+        // brightens it; a little mist hangs on the horizon.
+        if (u_mood.y > 0.5 && u_mood.y < 1.5) {
+            vec2 g = vec2(p.x * u_res.x / u_res.y, p.y);
+            float beat = 0.45 + 0.9 * u_mood2.y + 0.3 * u_swell;
+            float rn = rainLayer(g, 150.0, 1.5, 0.10, 5.5) * 0.35 + rainLayer(g, 80.0, 2.3, 0.16, 8.1) * 0.6 + rainLayer(g, 34.0, 3.4, 0.26, 2.7) * 1.0;
+            col += mix(u_grid, vec3(0.85, 0.92, 1.0), 0.55) * rn * 0.34 * beat;
+            col = mix(col, u_c1 * 0.6 + vec3(0.05), 0.22 * exp(-(hz - p.y) * 9.0));
+        }
         col += u_sunB * 0.35 * exp(-(hz - p.y) * 30.0);
     } else {
         float y = (p.y - hz) / (1.0 - hz);
         col = mix(u_c0 * 0.4, u_c1 * 0.45, y);
         col += u_sunB * 0.22 * exp(-y * 6.0) * exp(-abs(p.x - 0.5) * 3.0);
         col += u_sunB * 0.25 * exp(-y * 40.0);
+        // the ground takes the sky's colour near the horizon, and the body throws a path of light
+        float sett = step(0.999, u_tr.x);
+        vec3 hcol = vec3(0.0);
+        float pathw = 0.0;
+        if (u_mood.x > 0.5 && u_mood.x < 1.5) { hcol = vec3(0.45, 0.65, 1.0); pathw = 0.6; }
+        else if (u_mood.x > 1.5 && u_mood.x < 2.5) { hcol = vec3(1.0, 0.55, 0.32); pathw = 1.0; }
+        else if (u_mood.x > 4.5 && u_mood.x < 5.5) { hcol = vec3(0.9, 0.6, 0.8); pathw = 0.5; }
+        else if (u_mood.x > 6.5 && u_mood.x < 7.5) { hcol = vec3(1.0, 0.5, 0.55); pathw = 0.7; }
+        else if (u_mood.x > 7.5) { hcol = vec3(0.2, 0.9, 0.6); pathw = 0.0; }
+        col += hcol * 0.16 * exp(-y * 7.0) * sett;
+        if (pathw > 0.0) {
+            float wpath = (0.03 + 0.28 * y) * pathw;
+            float path = exp(-pow((p.x - 0.5) / wpath, 2.0));
+            float dash = smoothstep(0.5, 0.9, sin(26.0 / (y + 0.09) + u_time * 1.8 + sin(p.x * 40.0 + u_time) * 1.2));
+            col += hcol * path * (0.08 + 0.5 * dash) * (1.0 - y * 0.7) * sett;
+        }
+        if (u_mood.y > 0.5 && u_mood.y < 1.5) {
+            // splashes: rings opening on the ground, in perspective
+            vec2 gp = vec2((p.x - 0.5) / (y + 0.06) * 2.2, 0.9 / (y + 0.06));
+            vec2 cell = floor(gp);
+            float ph = fract(u_time * 1.3 + hash(cell) * 9.0);
+            vec2 cpos = vec2(hash(cell + 3.1), hash(cell + 7.7)) * 0.5 + 0.25;
+            float rd = length(fract(gp) - cpos);
+            float ring = smoothstep(0.05, 0.0, abs(rd - ph * 0.3)) * (1.0 - ph) * step(0.35, hash(cell + 1.9));
+            col += mix(u_grid, vec3(0.9, 0.95, 1.0), 0.5) * ring * (0.16 + 0.4 * u_mood2.y) * smoothstep(0.0, 0.08, y);
+            vec2 g = vec2(p.x * u_res.x / u_res.y, p.y);
+            col += mix(u_grid, vec3(0.85, 0.92, 1.0), 0.55) * rainLayer(g, 34.0, 3.4, 0.26, 2.7) * 0.2 * (0.45 + 0.9 * u_mood2.y);
+        }
+        col += u_sunB * sin(u_tr.x * 3.14159) * 0.3 * exp(-y * 9.0) * step(u_tr.x, 0.999);
     }
     return col;
 }
@@ -1234,6 +1847,10 @@ pub struct Renderer {
     heart_key: (usize, usize),
     heart_from: (Edges, Edges),
     heart_mt: f32,
+    /// The look being shown, the one it replaced, and the 0..1 transition between them.
+    mood_cur: Mood,
+    mood_old: Mood,
+    mood_k: f32,
     broken_t: f32,
     // pulse layer (see the consts at the top)
     /// Reactive amplitude scale from the VISUALS setting (1 / 0.45 / 0).
@@ -1309,6 +1926,10 @@ impl Renderer {
                 ("u_grid", UniformType::Float3),
                 ("u_sunA", UniformType::Float3),
                 ("u_sunB", UniformType::Float3),
+                ("u_mood", UniformType::Float3),
+                ("u_mood2", UniformType::Float3),
+                ("u_tr", UniformType::Float3),
+                ("u_fx", UniformType::Float3),
             ],
             &[],
             PipelineParams::default(),
@@ -1390,6 +2011,9 @@ impl Renderer {
             heart_key: start,
             heart_from,
             heart_mt: 1.0,
+            mood_cur: Mood::default(),
+            mood_old: Mood::default(),
+            mood_k: 1.0,
             broken_t: 0.0,
             fx: 1.0,
             kick: 0.0,
@@ -1717,18 +2341,162 @@ impl Renderer {
 
     /// Draw the whole scene (background, world, drift visuals) and post-process it to the screen.
     pub fn draw_scene(&mut self, world: &World, dt: f32, idle: f32, progress: f32) {
-        self.scene_pass(world, dt, idle, progress, None);
+        self.scene_pass(world, dt, idle, progress, None, None);
     }
 
     /// Rally mode: the same scene and music layer (`music` has no enemies or bullets), with the
     /// Rally avatars, orbs and end-line ridges in place of the combat entities, then the score HUD.
     /// `me` is the local player (0 = host / left).
     pub fn draw_rally(&mut self, r: &Rally, music: &World, me: usize, dt: f32) {
-        self.scene_pass(music, dt, 0.0, 0.0, Some((r, me & 1)));
+        self.scene_pass(music, dt, 0.0, 0.0, Some((r, me & 1)), None);
         self.draw_rally_hud(r, me & 1);
     }
 
-    fn scene_pass(&mut self, world: &World, dt: f32, idle: f32, progress: f32, rally: Option<(&Rally, usize)>) {
+    /// Highway mode: the menu vista with the road and everything on it drawn into the scene.
+    pub fn draw_runner(&mut self, r: &crate::runner::Runner, music: &World, dt: f32, progress: f32) {
+        self.scene_pass(music, dt, 1.0, progress, None, Some(r));
+    }
+
+    /// The Highway road, in the vista's own perspective: a point `x` across (in road units) and
+    /// `z` ahead (0 = the player's line, 1 = a note that has just appeared) lands where the
+    /// floor grid would put it.
+    fn draw_runner_world(&self, r: &crate::runner::Runner, w: &World) {
+        use crate::runner::{NoteKind, LEAD};
+        const D0: f32 = 1.3;
+        // A gentle perspective: notes are readable for their whole approach.
+        const DZ: f32 = 6.5;
+        const LANE: f32 = 0.22;
+        let pal = &self.pal;
+        let px = self.view.sh / self.view.scale / 1080.0;
+        let proj = |x: f32, z: f32, lift: f32| -> (Vec2, f32) {
+            let d = D0 + z.max(-0.05) * DZ;
+            let s = D0 / d;
+            (self.vs(0.5 + x / d, HZ + (1.05 - HZ) / d - lift * s), s)
+        };
+        let edge = 1.5 * LANE;
+        // the road bed and its lane lines
+        let (nl, _) = proj(-edge, 0.0, 0.0);
+        let (nr, _) = proj(edge, 0.0, 0.0);
+        let (fl, _) = proj(-edge, 1.0, 0.0);
+        let (fr, _) = proj(edge, 1.0, 0.0);
+        quad4([nl, nr, fr, fl], [alpha(pal.bg0, 0.82), alpha(pal.bg0, 0.82), alpha(pal.bg0, 0.45), alpha(pal.bg0, 0.45)]);
+        gl_use_material(&self.add_mat);
+        for k in 0..4 {
+            let x = (k as f32 - 1.5) * LANE;
+            let outer = k == 0 || k == 3;
+            let (a, _) = proj(x, 0.0, 0.0);
+            let (b, _) = proj(x, 1.0, 0.0);
+            // in a surge or a drop the road's edges burn in the accent colour and pulse harder
+            let hot = r.hot();
+            let c = if outer { if hot { mixc(pal.accent, pal.danger, 0.5 + 0.5 * (self.time * 6.0).sin()) } else { pal.primary } } else { pal.grid };
+            let wd = if outer { if hot { 5.0 + 3.0 * w.beat_pulse } else { 3.5 } } else { 2.0 };
+            seg(a, b, wd * px, alpha(c, 0.9 + 0.1 * w.beat_pulse), alpha(c, if hot && outer { 0.4 } else { 0.12 }));
+        }
+        // beat lines rolling toward the player
+        let i0 = r.beats.partition_point(|&b| b < r.t);
+        for (k, &b) in r.beats.iter().enumerate().skip(i0).take_while(|(_, &b)| b < r.t + LEAD) {
+            let z = (b - r.t) / LEAD;
+            let down = k >= r.downbeat && (k - r.downbeat) % 4 == 0;
+            let (a, s) = proj(-edge, z, 0.0);
+            let (c, _) = proj(edge, z, 0.0);
+            line(a, c, (if down { 2.5 } else { 1.2 }) * px * (0.4 + 0.6 * s), alpha(pal.grid, (if down { 0.55 } else { 0.22 }) * (0.3 + 0.7 * s)));
+        }
+        gl_use_default_material();
+        // notes, far to near
+        let lo = r.notes.partition_point(|n| n.t < r.t - 0.12);
+        let hi = r.notes.partition_point(|n| n.t < r.t + LEAD);
+        for n in r.notes[lo..hi].iter().rev() {
+            if n.state == 1 {
+                continue;
+            }
+            let z = (n.t - r.t) / LEAD;
+            let fade = (1.0 - z).clamp(0.0, 1.0).powf(0.35) * if z < 0.0 { 0.5 } else { 1.0 };
+            let x = n.lane as f32 * LANE;
+            match n.kind {
+                NoteKind::Wall => {
+                    let col = if n.state == 2 { WHITE } else { pal.danger };
+                    let (bl, s) = proj(x - 0.44 * LANE, z, 0.0);
+                    let (br, _) = proj(x + 0.44 * LANE, z, 0.0);
+                    let (tl, _) = proj(x - 0.44 * LANE, z, 0.17);
+                    let (tr, _) = proj(x + 0.44 * LANE, z, 0.17);
+                    quad4([bl, br, tr, tl], [alpha(pal.bg0, 0.85 * fade), alpha(pal.bg0, 0.85 * fade), alpha(col, 0.45 * fade), alpha(col, 0.45 * fade)]);
+                    gl_use_material(&self.add_mat);
+                    let wd = 3.0 * px * (0.4 + 0.6 * s);
+                    for (p, q) in [(bl, br), (br, tr), (tr, tl), (tl, bl)] {
+                        line(p, q, wd, alpha(col, fade));
+                    }
+                    // scan bars, like the sun's
+                    for k in 1..4 {
+                        let f = k as f32 / 4.0;
+                        line(bl.lerp(tl, f), br.lerp(tr, f), wd * 0.6, alpha(col, 0.5 * fade));
+                    }
+                    gl_use_default_material();
+                }
+                NoteKind::Bar => {
+                    let col = if n.state == 2 { WHITE } else { pal.accent };
+                    let (gl, s) = proj(-edge, z, 0.0);
+                    let (gr, _) = proj(edge, z, 0.0);
+                    let (a, _) = proj(-edge, z, 0.04);
+                    let (b, _) = proj(edge, z, 0.04);
+                    line(gl, gr, 5.0 * px * s, alpha(pal.bg0, 0.7 * fade));
+                    gl_use_material(&self.add_mat);
+                    line(a, b, 7.0 * px * (0.3 + 0.7 * s), alpha(col, fade));
+                    line(a, b, 2.5 * px * (0.3 + 0.7 * s), alpha(WHITE, fade));
+                    line(gl, a, 3.0 * px * s, alpha(col, 0.8 * fade));
+                    line(gr, b, 3.0 * px * s, alpha(col, 0.8 * fade));
+                    gl_use_default_material();
+                }
+                NoteKind::Gem | NoteKind::Star => {
+                    if n.state == 2 {
+                        continue;
+                    }
+                    let star = n.kind == NoteKind::Star;
+                    let (c, s) = proj(x, z, 0.035 + 0.008 * (self.time * 5.0 + n.t * 9.0).sin());
+                    let rr = (if star { 20.0 } else { 12.0 }) * px * (0.25 + 0.75 * s);
+                    gl_use_material(&self.add_mat);
+                    disc2(c, rr * 2.2, 12, alpha(if star { WHITE } else { pal.accent }, 0.3 * fade), alpha(pal.accent, 0.0));
+                    diamond(c, rr, 2.5 * px * s.max(0.4), alpha(if star { WHITE } else { pal.accent }, fade));
+                    if star {
+                        line(c - vec2(rr * 1.8, 0.0), c + vec2(rr * 1.8, 0.0), 1.5 * px, alpha(WHITE, fade));
+                        line(c - vec2(0.0, rr * 1.8), c + vec2(0.0, rr * 1.8), 1.5 * px, alpha(WHITE, fade));
+                    }
+                    gl_use_default_material();
+                    diamond_fill(c, rr * 0.45, alpha(WHITE, fade));
+                }
+            }
+        }
+        // the craft
+        let hgt = r.height();
+        let cx = r.lane_x * LANE;
+        let (ground, _) = proj(cx, 0.0, 0.0);
+        let bob = 0.006 * w.beat_pulse;
+        let (c, _) = proj(cx, 0.0, 0.03 + bob + 0.15 * hgt);
+        let blink = if r.invuln > 0.0 { 0.4 + 0.6 * ((self.time * 30.0).sin() * 0.5 + 0.5) } else { 1.0 };
+        disc2(ground, 52.0 * px * (1.0 - 0.4 * hgt), 16, alpha(BLACK, 0.6), alpha(BLACK, 0.0));
+        let nose = c + vec2(0.0, -52.0) * px;
+        let l = c + vec2(-42.0, 24.0) * px;
+        let rr = c + vec2(42.0, 24.0) * px;
+        let tail = c + vec2(0.0, 9.0) * px;
+        quad4([nose, rr, tail, l], [alpha(pal.bg0, 0.9 * blink); 4]);
+        gl_use_material(&self.add_mat);
+        let col = mixc(pal.primary, WHITE, r.glow);
+        for (p, q) in [(nose, rr), (rr, tail), (tail, l), (l, nose)] {
+            line(p, q, 3.0 * px, alpha(col, blink));
+        }
+        // engine: a flame that kicks with the beat and stretches in a jump
+        let flame = (18.0 + 26.0 * w.beat_pulse + 30.0 * hgt) * px;
+        seg(tail, tail + vec2(0.0, flame), 9.0 * px, alpha(pal.accent, 0.9 * blink), alpha(pal.secondary, 0.0));
+        if r.glow > 0.02 {
+            arc(c, (40.0 + 50.0 * (1.0 - r.glow)) * px, 0.0, TAU, 3.0 * px, alpha(pal.accent, r.glow));
+        }
+        if r.flash > 0.02 {
+            arc(c, (30.0 + 90.0 * (1.0 - r.flash)) * px, 0.0, TAU, 4.0 * px, alpha(pal.danger, r.flash));
+        }
+        gl_use_default_material();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scene_pass(&mut self, world: &World, dt: f32, idle: f32, progress: f32, rally: Option<(&Rally, usize)>, runner: Option<&crate::runner::Runner>) {
         self.resize_if_needed();
         self.time += dt;
         if self.pal_t < 1.0 {
@@ -1736,6 +2504,13 @@ impl Renderer {
             self.pal = lerp_pal(&self.pal_from, &palette(self.pal_to), ease(self.pal_t));
         }
         self.update_music(world, dt, idle);
+        // A new look arrives as a transition: the old sky sinks, the new one rises.
+        if world.mood != self.mood_cur {
+            self.mood_old = self.mood_cur;
+            self.mood_cur = world.mood;
+            self.mood_k = if self.time < 0.5 { 1.0 } else { 0.0 };
+        }
+        self.mood_k = (self.mood_k + dt / SKY_TRANSITION).min(1.0);
         let pal = self.pal;
         let view = self.view;
         self.cam = view.center;
@@ -1777,6 +2552,21 @@ impl Renderer {
         m.set_uniform("u_grid", v3(pal.grid));
         m.set_uniform("u_sunA", v3(pal.accent));
         m.set_uniform("u_sunB", v3(pal.secondary));
+        // In play the weather and floor also follow the section: calm parts drift with dust,
+        // drops bring the rain if the song has no weather of its own.
+        let weather = if lv > 0.5 {
+            match world.section_kind {
+                SectionKind::Calm => 2,
+                SectionKind::Drop if self.mood_cur.weather == 0 => 1,
+                _ => self.mood_cur.weather,
+            }
+        } else {
+            self.mood_cur.weather
+        };
+        m.set_uniform("u_mood", vec3(self.mood_cur.scene as f32, weather as f32, self.mood_cur.floor as f32));
+        m.set_uniform("u_mood2", vec3(self.mood_cur.prop as f32, world.hit[2] * self.fx.min(1.0), world.hit[0] * self.fx.min(1.0)));
+        m.set_uniform("u_tr", vec3(ease(self.mood_k), self.mood_old.scene as f32, self.mood_old.prop as f32));
+        m.set_uniform("u_fx", vec3(world.chime * self.fx.min(1.0), world.chime_pitch, world.candy * self.fx.min(1.0)));
         gl_use_material(m);
         draw_rectangle(0.0, 0.0, 1.0, 1.0, WHITE);
         gl_use_default_material();
@@ -1804,9 +2594,13 @@ impl Renderer {
         gl_use_material(&self.add_mat);
         self.draw_floor(world, e, armed_k);
         self.draw_rim(world, e);
+        // The Heart's layers are drawn around the origin and shifted to where it stands.
+        let hp = world.heart.pos * lv;
         if lv > 0.003 {
+            set_origin(hp);
             self.draw_crown(world, lv);
             self.draw_scope(world, lv);
+            set_origin(Vec2::ZERO);
         }
         gl_use_default_material();
         if lv > 0.003 && rally.is_none() {
@@ -1815,16 +2609,21 @@ impl Renderer {
         }
         gl_use_material(&self.add_mat);
         if !(self.menu && e > 0.5) {
+            set_origin(hp);
             self.draw_heart(world, e, progress);
+            set_origin(Vec2::ZERO);
         }
         gl_use_default_material();
         if let Some((r, me)) = rally {
             self.draw_rally_world(r, world, me, tscale);
         } else if lv > 0.003 {
+            self.draw_heart_move(world, lv);
+            set_origin(hp);
             self.draw_heart_rings(world, lv, progress);
             for p in &world.pulses {
                 self.draw_pulse(world, p, lv);
             }
+            set_origin(Vec2::ZERO);
         }
         if rally.is_none() {
             self.draw_pickups(world, tscale);
@@ -1841,6 +2640,9 @@ impl Renderer {
         self.draw_particles(world);
         gl_use_default_material();
         self.draw_texts(world, tscale);
+        if let Some(rn) = runner {
+            self.draw_runner_world(rn, world);
+        }
 
         // ---- bloom ----
         let (hw, hh) = ((self.pw / 2) as f32, (self.ph / 2) as f32);
@@ -1884,17 +2686,39 @@ impl Renderer {
     fn draw_floor(&self, w: &World, e: f32, armed_k: f32) {
         let pal = &self.pal;
         let lv = 1.0 - e;
-        let ga = (FLOOR_A + FLOOR_ARMED_A * armed_k + FLOOR_SWELL_A * self.swell + KICK_GRID * self.kick * self.fx) * lv;
+        // In purgatory the floor all but falls away.
+        let ga = (FLOOR_A + FLOOR_ARMED_A * armed_k + FLOOR_SWELL_A * self.swell + KICK_GRID * self.kick * self.fx) * lv * (1.0 - 0.75 * w.purg);
         let va = VISTA_GRID_A * (1.0 + 0.5 * w.hit[0]) * e;
         let gw = 1.6 + 1.2 * e;
         let vp = self.vs(0.5, HZ);
+        // Floor style (in play only; the vista always shows the full grid):
+        // 1 = open grid, inner lines alternate strong and faint; 2 = faint lines, marks on the crossings.
+        let style = if e < 0.5 { (w.mood.floor + w.palette) % 3 } else { 0 };
+        let line_k = |i: usize, n: usize| -> f32 {
+            match style {
+                1 if i % 2 == 1 && i != n => 0.3,
+                2 if i != 0 && i != n => 0.35,
+                _ => 1.0,
+            }
+        };
         for i in 0..=COLS {
             let x = -HALF_W + i as f32 * TILE;
             let v1 = self.vs(0.5 + (x / HALF_W) * VISTA_FAN, 1.05);
             let v0 = vp + (v1 - vp) * 0.03;
             let p0 = vec2(x, -HALF_H).lerp(v0, e);
             let p1 = vec2(x, HALF_H).lerp(v1, e);
-            seg(p0, p1, gw, alpha(pal.grid, ga + va * 0.05), alpha(pal.grid, ga + va));
+            let k = line_k(i, COLS);
+            seg(p0, p1, gw, alpha(pal.grid, ga * k + va * 0.05), alpha(pal.grid, ga * k + va));
+        }
+        if style == 2 && lv > 0.5 {
+            let ma = (ga * 2.6).min(0.5);
+            for i in 1..COLS {
+                for j in 1..ROWS {
+                    let c = vec2(-HALF_W + i as f32 * TILE, -HALF_H + j as f32 * TILE);
+                    line(c - vec2(9.0, 0.0), c + vec2(9.0, 0.0), 1.6, alpha(pal.grid, ma));
+                    line(c - vec2(0.0, 9.0), c + vec2(0.0, 9.0), 1.6, alpha(pal.grid, ma));
+                }
+            }
         }
         let phase = self.scroll.fract();
         for j in 0..=ROWS {
@@ -1905,7 +2729,7 @@ impl Renderer {
             let fade = smooth(0.0, 0.12, fy - HZ);
             let p0 = vec2(-HALF_W, y).lerp(self.vs(0.5 - hs, fy), e);
             let p1 = vec2(HALF_W, y).lerp(self.vs(0.5 + hs, fy), e);
-            line(p0, p1, gw, alpha(pal.grid, ga + va * fade));
+            line(p0, p1, gw, alpha(pal.grid, ga * line_k(j, ROWS) + va * fade));
         }
         if lv > 0.01 && self.fx > 0.0 {
             self.draw_floor_pulse(lv);
@@ -2005,6 +2829,20 @@ impl Renderer {
     /// Heartline around the arena rim (spikes on kicks/snares, travels clockwise). In drift it
     /// straightens out into the ECG trace across the vista.
     fn draw_rim(&self, w: &World, e: f32) {
+        // Depth: one more frame of danger-coloured light around the arena for every song deep
+        // the run is (up to four), breathing with the bar.
+        let depth = (w.song_idx as usize).min(4);
+        if depth > 0 && e < 0.99 {
+            let lv = 1.0 - e;
+            for d in 0..depth {
+                let o = 22.0 + 15.0 * d as f32;
+                let a = (0.30 - 0.05 * d as f32) * lv * (0.7 + 0.3 * w.bar_pulse);
+                let c = [vec2(-HALF_W - o, -HALF_H - o), vec2(HALF_W + o, -HALF_H - o), vec2(HALF_W + o, HALF_H + o), vec2(-HALF_W - o, HALF_H + o)];
+                for k in 0..4 {
+                    line(c[k], c[(k + 1) % 4], 2.0, alpha(self.pal.danger, a));
+                }
+            }
+        }
         let pal = &self.pal;
         let lv = 1.0 - e;
         let bright = 0.65 + (0.35 * w.bar_pulse + SNARE_RIM * self.snare * self.fx) * lv;
@@ -2277,6 +3115,7 @@ impl Renderer {
         }
         // Shockwaves: hot ring with a wall; the safe gaps are framed by cool posts
         for wv in &w.waves {
+            set_origin(wv.origin);
             let n = wv.gaps.max(1);
             let half = 0.36;
             if t < wv.t0 {
@@ -2346,6 +3185,7 @@ impl Renderer {
                 seg(p.pos, e, 2.0, alpha(pal.accent, 0.45 * k * lv), alpha(pal.accent, 0.0));
             }
         }
+        set_origin(Vec2::ZERO);
     }
 
     /// Announced Heart attack: an approach ring descending and closing onto the Heart (lands on
@@ -2492,8 +3332,17 @@ impl Renderer {
         let flash = h.flash * lv;
         let c_out = mixc(mixc(pal.primary, WHITE, flash * 0.8 + 0.25 * punch), mixc(pal.accent, WHITE, 0.3), e);
         let c_in = mixc(mixc(pal.secondary, WHITE, flash * 0.6), pal.secondary, e);
-        let base_a = if broken { 0.5 } else { 0.95 } * lv + 0.15 * e;
+        // Purgatory: the Heart is a pale ghost of itself, its shell drifting apart.
+        let ghost = w.purg * lv * if broken { 0.0 } else { 1.0 };
+        let c_out = mixc(c_out, alpha(WHITE, 0.75), ghost);
+        let c_in = mixc(c_in, alpha(pal.accent, 0.8), ghost);
+        // Overdrive burns hot; a hurt Heart flickers.
+        let hot = if h.form == HeartForm::Overdrive { lv * (1.0 - ghost) } else { 0.0 };
+        let c_out = mixc(c_out, mixc(pal.danger, pal.accent, 0.5 + 0.5 * (t * 9.0).sin()), 0.55 * hot);
+        let hurt = (1.0 - w.phase_frac()) * lv * (1.0 - ghost) * if w.phases.is_empty() { 0.0 } else { 1.0 };
+        let base_a = (if broken { 0.5 } else { 0.95 } * lv + 0.15 * e) * (1.0 - 0.45 * ghost);
         let shatter = (self.broken_t * 55.0).min(190.0);
+        let drift = 26.0 * ghost;
         for (shell, (from, to), m, rad, col, wdt) in [
             (0, (&self.heart_from.0, &self.solids[self.heart_key.0]), mo, r_out, c_out, 2.6),
             (1, (&self.heart_from.1, &self.solids[self.heart_key.1]), mi, r_in, c_in, 2.0),
@@ -2507,6 +3356,22 @@ impl Renderer {
                     let sr = Mat3::from_rotation_z(self.broken_t * (0.5 + (kk % 5) as f32 * 0.3));
                     a = mid + off + sr * ((a - mid) * 0.8);
                     b = mid + off + sr * ((b - mid) * 0.8);
+                } else if drift > 0.1 {
+                    // ghost: every edge floats a little way out and bobs on its own
+                    let mid = (a + b) * 0.5;
+                    let off = mid.normalize_or_zero() * drift * (1.0 + 0.4 * (t * 1.3 + kk as f32 * 1.7).sin());
+                    a = mid + off + (a - mid) * 0.82;
+                    b = mid + off + (b - mid) * 0.82;
+                } else if hurt > 0.25 && shell == 0 {
+                    // cracks: as the phase runs down, more of the shell's edges jitter loose
+                    let loose = ((kk * 7 + 3) % ME) as f32 / ME as f32;
+                    if loose < hurt - 0.25 {
+                        let j = (t * 23.0 + kk as f32 * 5.1).sin() * 5.0 * hurt;
+                        let mid = (a + b) * 0.5;
+                        let off = mid.normalize_or_zero() * j;
+                        a += off;
+                        b += off;
+                    }
                 }
                 self.edge3(pos, z, a, b, wdt * (1.0 + 0.6 * e), col, base_a, rad);
             }
@@ -2525,11 +3390,82 @@ impl Renderer {
                     prev = cur;
                 }
             }
-            // core
+            // core: a beating light. It is dark while the shell is shut, a hollow ring in purgatory.
             let core = self.pj(pos, z);
             let cr = (5.0 + 8.0 * punch + 3.0 * self.low_s) * (1.0 + 0.6 * e);
-            disc2(core, cr * 3.0, 20, alpha(mixc(pal.primary, WHITE, 0.5), 0.35 * lv + 0.1 * e), alpha(pal.primary, 0.0));
-            disc(core, cr, 16, alpha(WHITE, (0.6 + 0.4 * punch) * (lv + 0.25 * e)));
+            let lit = (0.25 + 0.75 * h.open) * (1.0 - ghost);
+            let core_col = mixc(mixc(pal.primary, WHITE, 0.5), mixc(pal.danger, pal.accent, 0.5), hot);
+            disc2(core, cr * (3.0 + 2.5 * hot), 20, alpha(core_col, (0.35 * lv + 0.1 * e) * (0.4 + 0.6 * lit)), alpha(pal.primary, 0.0));
+            disc(core, cr, 16, alpha(WHITE, (0.6 + 0.4 * punch) * (lv + 0.25 * e) * lit));
+            if hot > 0.01 {
+                // overdrive: spikes of light thrown out on every kick
+                for k in 0..10 {
+                    let a = k as f32 * TAU / 10.0 + t * 0.6;
+                    let len = r_out * (0.9 + 0.9 * punch + 0.25 * (t * 7.0 + k as f32 * 2.1).sin());
+                    seg(core + dir(a) * cr * 1.2, core + dir(a) * len, 3.0, alpha(pal.accent, 0.7 * hot), alpha(pal.danger, 0.0));
+                }
+            }
+            if h.form == HeartForm::Valve && lv > 0.5 {
+                // valve: six iris blades that swing shut and open with the bar
+                let shut = 1.0 - h.open;
+                for k in 0..6 {
+                    let a = k as f32 * TAU / 6.0 + t * 0.25;
+                    let tip = core + dir(a + 1.1 * shut) * r_out * (0.25 + 0.6 * h.open);
+                    seg(core + dir(a) * r_out * 0.98, tip, 2.5, alpha(pal.secondary, 0.85 * lv), alpha(pal.accent, 0.5 * lv));
+                }
+            }
+            if ghost > 0.01 {
+                // purgatory: a hollow halo, a clock that drains, and embers circling the void
+                let left = (w.purg_until - w.t).min(w.phase_left()).max(0.0);
+                let frac = (left / 9.0).clamp(0.0, 1.0);
+                disc2(core, r_out * 0.75, 22, alpha(pal.bg0, 0.85 * ghost), alpha(pal.bg0, 0.0));
+                arc(core, r_out * 0.55, 0.0, TAU, 2.0, alpha(WHITE, 0.55 * ghost));
+                arc(core, r_out * 1.75, -PI * 0.5, -PI * 0.5 + TAU * frac, 4.0, alpha(pal.accent, 0.9 * ghost));
+                arc(core, r_out * 1.75, 0.0, TAU, 1.0, alpha(WHITE, 0.2 * ghost));
+                for k in 0..9 {
+                    let a = k as f32 * TAU / 9.0 - t * (0.5 + 0.07 * k as f32);
+                    let rr = r_out * (1.25 + 0.2 * (t * 1.1 + k as f32).sin());
+                    let q = core + dir(a) * rr;
+                    poly_lines(q, 4, 5.0, a, 1.5, alpha(pal.accent, 0.8 * ghost));
+                    seg(q, core + dir(a + 0.25) * rr, 1.5, alpha(pal.accent, 0.4 * ghost), alpha(pal.accent, 0.0));
+                }
+            }
+        }
+    }
+
+    /// A relocation: the destination is ringed and a dashed path runs to it, from the moment it
+    /// is announced until the Heart arrives.
+    fn draw_heart_move(&self, w: &World, lv: f32) {
+        let h = &w.heart;
+        if !h.relocating(w.t) || h.move_to.distance(h.pos) < 2.0 {
+            return;
+        }
+        let pal = &self.pal;
+        if h.charging {
+            // a charge: the whole lane it will cross is lit, brightening until it goes
+            let d = h.move_to - h.pos;
+            let n = d.normalize_or_zero();
+            let side = vec2(-n.y, n.x) * (HEART_R + 16.0);
+            let go = (1.0 - (h.move_t0 - w.t).max(0.0) / 0.7).clamp(0.2, 1.0);
+            let c0 = alpha(pal.danger, 0.34 * go * lv);
+            let c1 = alpha(pal.danger, 0.10 * go * lv);
+            quad4([h.pos + side, h.move_to + side, h.move_to - side, h.pos - side], [c0, c1, c1, c0]);
+            line(h.pos + side, h.move_to + side, 2.5, alpha(pal.danger, 0.9 * go * lv));
+            line(h.pos - side, h.move_to - side, 2.5, alpha(pal.danger, 0.9 * go * lv));
+        }
+        let wait = ((h.move_t0 - w.t) / (h.move_t1 - h.move_t0).max(0.1)).clamp(0.0, 1.0);
+        let a = lv * (0.9 - 0.3 * wait);
+        let pulse = 0.8 + 0.2 * (self.time * 10.0).sin();
+        disc2(h.move_to, HEART_R + 18.0, 24, alpha(pal.danger, 0.14 * a), alpha(pal.danger, 0.0));
+        arc(h.move_to, HEART_R + PLAYER_R, 0.0, TAU, 3.0, alpha(pal.danger, a * pulse));
+        arc(h.move_to, HEART_R * 0.45, self.time * 2.0, self.time * 2.0 + PI * 1.3, 2.0, alpha(WHITE, 0.7 * a));
+        let d = h.move_to - h.pos;
+        let len = d.length();
+        let n = d / len.max(1.0);
+        let mut s = HEART_R + 10.0 + (self.time * 180.0) % 36.0;
+        while s < len - HEART_R - 6.0 {
+            line(h.pos + n * s, h.pos + n * (s + 16.0).min(len - HEART_R), 2.5, alpha(pal.danger, 0.75 * a));
+            s += 36.0;
         }
     }
 
@@ -2545,11 +3481,67 @@ impl Renderer {
         arc(Vec2::ZERO, HEART_R, 0.0, TAU, 2.0, alpha(pal.primary, 0.4 * lv));
         let top = self.pj(Vec2::ZERO, HEART_Z - 20.0);
         seg(Vec2::ZERO, top, 2.0, alpha(pal.primary, 0.35 * lv), alpha(pal.primary, 0.0));
+        // The beat ring: every pulse is timed to cross it on a beat. It lights with the beat and
+        // carries a tick for each beat of the bar.
+        let br = BEAT_RING_R;
+        arc(Vec2::ZERO, br, 0.0, TAU, 1.5, alpha(WHITE, (0.06 + 0.22 * w.beat_pulse) * lv));
+        arc(Vec2::ZERO, br, 0.0, TAU, 5.0, alpha(pal.primary, 0.10 * w.beat_pulse * lv));
+        for k in 0..16 {
+            let a = k as f32 * TAU / 16.0;
+            let long = k % 4 == 0;
+            let d = dir(a);
+            line(d * (br - if long { 9.0 } else { 4.0 }), d * (br + if long { 9.0 } else { 4.0 }), 1.5, alpha(WHITE, (0.10 + 0.25 * w.beat_pulse) * lv));
+        }
         arc(Vec2::ZERO, 132.0, 0.0, TAU, 1.5, alpha(WHITE, 0.12 * lv));
         arc(Vec2::ZERO, 132.0, -PI * 0.5, -PI * 0.5 + TAU * progress.clamp(0.0, 1.0), 3.0, alpha(pal.accent, 0.9 * lv));
         if !h.broken {
-            let frac = (h.hp / h.max_hp.max(1.0)).clamp(0.0, 1.0);
+            // The arc under the Heart is the current phase (the whole Heart when there are none).
+            let frac = if w.phases.is_empty() { (h.hp / h.max_hp.max(1.0)).clamp(0.0, 1.0) } else { w.phase_frac() };
             arc(Vec2::ZERO, 144.0, PI * 0.5 - PI * frac, PI * 0.5 + PI * frac, 4.0, alpha(mixc(pal.danger, WHITE, h.flash), 0.85 * lv));
+            // Shell: a ring that closes over the Heart; it parts into four plates as it opens.
+            let shut = (1.0 - h.open) * lv * (1.0 - w.purg);
+            if shut > 0.02 {
+                let r = HEART_R + 12.0;
+                let gap = 0.35 * h.open;
+                for q in 0..4 {
+                    let a0 = self.time * 0.3 + q as f32 * TAU / 4.0 + gap;
+                    arc(Vec2::ZERO, r, a0, a0 + TAU / 4.0 - 2.0 * gap - 0.04, 5.0, alpha(pal.secondary, 0.9 * shut));
+                }
+                disc2(Vec2::ZERO, r, 24, alpha(pal.secondary, 0.16 * shut), alpha(pal.secondary, 0.05 * shut));
+            } else if h.form == HeartForm::Valve || h.form == HeartForm::Overdrive {
+                let k = 0.5 + 0.5 * (self.time * 8.0).sin();
+                arc(Vec2::ZERO, HEART_R + 12.0, 0.0, TAU, 2.0, alpha(pal.accent, (0.35 + 0.3 * k) * lv * h.open));
+            }
+            // Nodes: shield nodes (Shell) or linked cores (Split).
+            let lit = h.lit_node();
+            let n = h.nodes.len();
+            for k in 0..n {
+                let nd = &h.nodes[k];
+                if nd.hp <= 0.0 {
+                    continue;
+                }
+                let p = h.node_pos(k) - h.pos;
+                let live = h.form == HeartForm::Shell || lit == Some(k);
+                let col = mixc(if live { pal.accent } else { alpha(WHITE, 0.45) }, WHITE, nd.flash);
+                // tether to the Heart
+                let d = p.normalize_or_zero();
+                seg(d * (HEART_R + 14.0), p - d * NODE_R, if live { 2.0 } else { 1.0 }, alpha(col, 0.1 * lv), alpha(col, if live { 0.55 } else { 0.25 } * lv));
+                if h.form == HeartForm::Split {
+                    let q = h.node_pos((k + 1) % n) - h.pos;
+                    if h.nodes[(k + 1) % n].hp > 0.0 {
+                        line(p, q, 1.0, alpha(WHITE, 0.18 * lv));
+                    }
+                }
+                disc2(p, NODE_R * 1.3, 16, alpha(pal.bg0, 0.6 * lv), alpha(pal.bg0, 0.0));
+                arc(p, NODE_R, 0.0, TAU, if live { 2.5 } else { 1.5 }, alpha(col, 0.85 * lv));
+                let spin = self.time * if live { 2.2 } else { 0.6 } + k as f32;
+                poly_lines(p, 4, NODE_R * 0.72 * (1.0 + 0.2 * nd.flash), spin, 2.5, alpha(col, lv));
+                if live {
+                    poly_lines(p, 4, NODE_R * 0.36, -spin, 2.0, alpha(WHITE, 0.9 * lv));
+                    let f = (nd.hp / nd.max_hp.max(1e-3)).clamp(0.0, 1.0);
+                    arc(p, NODE_R + 7.0, -PI * 0.5, -PI * 0.5 + TAU * f, 3.0, alpha(pal.danger, 0.9 * lv));
+                }
+            }
         }
     }
 
@@ -2564,33 +3556,106 @@ impl Renderer {
             let spin = self.time * 3.0 + s.pos.x * 0.01;
             if s.heal {
                 let c = alpha(pal.primary, fade);
+                let beat = 1.0 + 0.18 * w.beat_pulse;
+                disc2(s.pos, 30.0 * beat, 18, alpha(pal.primary, 0.28 * fade), alpha(pal.primary, 0.0));
                 rquad(s.pos, vec2(11.0, 3.5), 0.0, c);
                 rquad(s.pos, vec2(3.5, 11.0), 0.0, c);
-                poly_lines(s.pos, 4, 18.0 + 2.0 * (self.time * 5.0).sin(), PI * 0.25, 2.0, alpha(WHITE, fade * 0.8));
+                rquad(s.pos, vec2(7.0, 1.4), 0.0, alpha(WHITE, fade));
+                rquad(s.pos, vec2(1.4, 7.0), 0.0, alpha(WHITE, fade));
+                arc(s.pos, 19.0 * beat, 0.0, TAU, 2.0, alpha(WHITE, fade * 0.85));
+                arc(s.pos, 25.0 * beat, self.time * 2.0, self.time * 2.0 + PI * 0.6, 2.0, alpha(pal.primary, fade));
+                arc(s.pos, 25.0 * beat, self.time * 2.0 + PI, self.time * 2.0 + PI * 1.6, 2.0, alpha(pal.primary, fade));
+                seg(s.pos, self.pj(s.pos, 46.0), 2.0, alpha(pal.primary, 0.5 * fade), alpha(pal.primary, 0.0));
             } else {
-                let d = rot2(vec2(7.0, 0.0), spin);
-                quad4([s.pos + d, s.pos + vec2(-d.y, d.x), s.pos - d, s.pos - vec2(-d.y, d.x)], [alpha(pal.accent, fade); 4]);
-                disc(s.pos, 2.5, 6, alpha(WHITE, fade));
+                // A crystal: a tall diamond turning on its axis (its width breathes as it turns),
+                // a bright facet line, a floor glint.
+                let turn = spin.cos();
+                let (hw, hh) = (2.0 + 5.0 * turn.abs(), 9.5);
+                let top = s.pos + vec2(0.0, -hh);
+                let bot = s.pos + vec2(0.0, hh);
+                let (l, r) = (s.pos + vec2(-hw, 0.0), s.pos + vec2(hw, 0.0));
+                let c0 = alpha(pal.accent, fade);
+                let c1 = alpha(mixc(pal.accent, WHITE, 0.65), fade);
+                disc2(s.pos, 15.0, 10, alpha(pal.accent, 0.22 * fade), alpha(pal.accent, 0.0));
+                quad4([top, r, bot, l], [c1, c0, c0, c1]);
+                line(top, bot, 1.2, alpha(WHITE, 0.9 * fade));
+                if turn > 0.92 {
+                    let g = (turn - 0.92) / 0.08;
+                    line(s.pos - vec2(13.0 * g, 0.0), s.pos + vec2(13.0 * g, 0.0), 1.5, alpha(WHITE, g * fade));
+                    line(s.pos - vec2(0.0, 15.0 * g), s.pos + vec2(0.0, 15.0 * g), 1.5, alpha(WHITE, g * fade));
+                }
             }
+        }
+        // The charge: a bright prism on a beam, with a pointer toward the Heart
+        if let Some(f) = w.fork {
+            let pulse = 1.0 + 0.15 * w.beat_pulse;
+            disc2(f, 70.0, 22, alpha(pal.accent, 0.22), alpha(pal.accent, 0.0));
+            seg(f, self.pj(f, 150.0), 20.0, alpha(pal.accent, 0.22), alpha(pal.accent, 0.0));
+            poly_lines(f, 3, 24.0 * pulse, self.time * 2.0, 3.0, WHITE);
+            poly_lines(f, 3, 24.0 * pulse, self.time * 2.0 + PI, 3.0, pal.accent);
+            arc(f, 40.0 * pulse, 0.0, TAU, 2.0, alpha(pal.accent, 0.8));
+            let d = (w.heart.pos - f).normalize_or_zero();
+            seg(f + d * 50.0, f + d * 120.0, 3.0, alpha(pal.accent, 0.8), alpha(pal.accent, 0.0));
+            wtext("CHARGE", f + vec2(0.0, -58.0), 20.0, pal.accent, tscale);
+        }
+        if w.carrying {
+            // carried: the ring to reach is drawn round the Heart, with a line to it
+            let p = w.player.pos;
+            let h = w.heart.pos;
+            let rr = HEART_R + FORK_DELIVER_R;
+            let pulse = 0.6 + 0.4 * (self.time * 8.0).sin();
+            arc(h, rr, 0.0, TAU, 3.0, alpha(pal.accent, pulse));
+            disc2(h, rr, 28, alpha(pal.accent, 0.0), alpha(pal.accent, 0.10));
+            let d = (h - p).normalize_or_zero();
+            let len = (p.distance(h) - rr).max(0.0);
+            let mut s0 = 34.0 + (self.time * 160.0) % 30.0;
+            while s0 < len {
+                line(p + d * s0, p + d * (s0 + 14.0).min(len), 2.5, alpha(pal.accent, 0.7));
+                s0 += 30.0;
+            }
+            poly_lines(p, 3, 34.0, -self.time * 3.0, 2.5, alpha(pal.accent, 0.95));
+        }
+        // Ear-candy comets: a bright head with a ring, on the floor plane.
+        for p in &w.painters {
+            let tw = 0.7 + 0.3 * (self.time * 18.0).sin();
+            disc2(p.pos, 34.0, 18, alpha(pal.accent, 0.35 * tw), alpha(pal.accent, 0.0));
+            disc(p.pos, 7.0, 12, WHITE);
+            poly_lines(p.pos, 4, 16.0, self.time * 6.0, 2.5, pal.accent);
+            poly_lines(p.pos, 4, 24.0, -self.time * 4.0, 1.5, alpha(WHITE, 0.7));
         }
         for o in &w.orbs {
             let fade = (o.life / 2.0).min(1.0) * (o.age * 3.0).min(1.0);
-            let pulse = 1.0 + 0.08 * (self.time * 5.0 + o.pos.x).sin();
-            disc(o.pos, 30.0, 20, alpha(pal.bg0, 0.6 * fade));
-            poly_lines(o.pos, 6, 38.0 * pulse, -self.time * 0.5, 1.5, alpha(pal.primary, fade * 0.7));
+            let pulse = 1.0 + 0.08 * (self.time * 5.0 + o.pos.x).sin() + 0.06 * w.beat_pulse;
+            let col = if o.rare { mixc(pal.danger, WHITE, 0.25) } else { pal.accent };
+            // floor: glow, a slowly turning hexagon and the time left
+            disc2(o.pos, 62.0, 24, alpha(col, 0.20 * fade), alpha(col, 0.0));
+            disc(o.pos, 30.0, 20, alpha(pal.bg0, 0.7 * fade));
+            poly_lines(o.pos, 6, 40.0 * pulse, -self.time * 0.5, 2.0, alpha(pal.primary, fade * 0.8));
+            poly_lines(o.pos, 6, 46.0 * pulse, self.time * 0.3, 1.0, alpha(col, fade * 0.5));
+            arc(o.pos, 54.0, -PI * 0.5, -PI * 0.5 + TAU * (o.life / 14.0).clamp(0.0, 1.0), 2.5, alpha(WHITE, 0.6 * fade));
+            // a column of light, and the upgrade's emblem floating in it
+            let top = self.pj(o.pos, 120.0);
+            seg(o.pos, top, 26.0, alpha(col, 0.16 * fade), alpha(col, 0.0));
+            seg(o.pos, top, 3.0, alpha(WHITE, 0.35 * fade), alpha(col, 0.0));
+            let c = self.pj(o.pos, 30.0 + 5.0 * (self.time * 2.4 + o.pos.x).sin());
             let m = Mat3::from_rotation_z(self.time * 0.7 + o.pos.x) * Mat3::from_rotation_x(0.6) * Mat3::from_rotation_y(self.time * 0.9);
-            let sc = 24.0 * pulse;
-            for ed in self.solids[SH_ICOSA].iter() {
-                self.edge3(o.pos, 18.0, m * (ed[0] * sc), m * (ed[1] * sc), 2.0, pal.accent, fade, sc);
+            let sc = 31.0 * pulse;
+            for ed in self.solids[if o.rare { SH_STELLA } else { SH_ICOSA }].iter() {
+                self.edge3(o.pos, 30.0, m * (ed[0] * sc), m * (ed[1] * sc), 1.2, col, fade * 0.45, sc);
             }
-            arc(o.pos, 48.0, -PI * 0.5, -PI * 0.5 + TAU * (o.life / 14.0).clamp(0.0, 1.0), 2.0, alpha(WHITE, 0.5 * fade));
-            wtext(o.up.name(), o.pos + vec2(0.0, -66.0), 28.0, alpha(pal.accent, fade), tscale);
-            wtext(o.up.desc(), o.pos + vec2(0.0, 72.0), 18.0, alpha(WHITE, fade * 0.9), tscale);
+            upgrade_emblem(o.up, c, 15.0 * pulse, 2.6, alpha(WHITE, fade), alpha(col, fade), self.time);
+            if o.rare {
+                poly_lines(o.pos, 3, 60.0 * pulse, self.time * 0.9, 2.5, alpha(pal.danger, fade));
+                poly_lines(o.pos, 3, 60.0 * pulse, self.time * 0.9 + PI, 2.5, alpha(pal.danger, fade * 0.7));
+                wtext("RARE", o.pos + vec2(0.0, -96.0), 16.0, alpha(pal.danger, fade), tscale);
+            }
+            wtext(o.up.name(), o.pos + vec2(0.0, -70.0), 28.0, alpha(if o.rare { WHITE } else { pal.accent }, fade), tscale);
+            wtext(o.up.desc(), o.pos + vec2(0.0, 76.0), 18.0, alpha(WHITE, fade * 0.9), tscale);
             let lvl = w.player.up(o.up);
             if lvl > 0 {
-                wtext(&format!("lv {} > {}", lvl, lvl + 1), o.pos + vec2(0.0, 94.0), 16.0, alpha(WHITE, fade * 0.8), tscale);
+                wtext(&format!("lv {} > {}", lvl, lvl + 1), o.pos + vec2(0.0, 98.0), 16.0, alpha(WHITE, fade * 0.8), tscale);
             } else {
-                wtext("new", o.pos + vec2(0.0, 94.0), 16.0, alpha(WHITE, fade * 0.8), tscale);
+                wtext("new", o.pos + vec2(0.0, 98.0), 16.0, alpha(WHITE, fade * 0.8), tscale);
             }
         }
     }
@@ -2604,8 +3669,13 @@ impl Renderer {
             let col = match e.kind {
                 EnemyKind::Chaser | EnemyKind::Mini | EnemyKind::Splitter => pal.secondary,
                 EnemyKind::Darter => pal.accent,
+                EnemyKind::Wisp => mixc(pal.accent, WHITE, 0.5),
+                EnemyKind::Sprite => mixc(pal.accent, WHITE, 0.5 + 0.5 * (self.time * 9.0).sin()),
+                EnemyKind::Turret => mixc(pal.danger, pal.accent, 0.35),
+                EnemyKind::Bomber => if e.state > 0.0 { mixc(pal.danger, WHITE, 0.5 + 0.5 * (self.time * 22.0).sin()) } else { pal.accent },
                 EnemyKind::Orbiter => pal.primary,
-                EnemyKind::Elite => pal.danger,
+                // Gunner in the danger colour, Summoner in the secondary, Leaper in the accent
+                EnemyKind::Elite => if e.state == ELITE_SUMMONER { mixc(pal.secondary, pal.danger, 0.3) } else if e.state == ELITE_LEAPER { mixc(pal.accent, pal.danger, 0.3) } else { pal.danger },
             };
             let colw = mixc(col, WHITE, e.flash);
             // ground: shadow + exact hitbox ring
@@ -2616,6 +3686,10 @@ impl Renderer {
             let m = match e.kind {
                 EnemyKind::Chaser | EnemyKind::Mini => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 3.0),
                 EnemyKind::Darter => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 5.0),
+                EnemyKind::Wisp => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_y(e.age * 4.0),
+                EnemyKind::Sprite => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 3.0),
+                EnemyKind::Turret => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(0.35),
+                EnemyKind::Bomber => Mat3::from_rotation_z(e.rot) * Mat3::from_rotation_x(e.age * 2.0),
                 EnemyKind::Orbiter => Mat3::from_rotation_z(e.age * 1.2) * Mat3::from_rotation_x(0.6) * Mat3::from_rotation_y(e.age * 0.9),
                 EnemyKind::Splitter => Mat3::from_rotation_z(e.age * 0.6) * Mat3::from_rotation_x(0.35),
                 EnemyKind::Elite => Mat3::from_rotation_z(e.age * 0.5) * Mat3::from_rotation_x(e.age * 0.7),
@@ -2646,6 +3720,32 @@ impl Renderer {
                 EnemyKind::Chaser => {
                     let eye = self.pj(e.pos + dir(e.rot) * sc * 0.6, z);
                     disc(eye, 3.0, 8, alpha(WHITE, a));
+                }
+                EnemyKind::Turret => {
+                    // a ring that fills through the bar: it fires when the ring closes
+                    let f = w.bar_phase();
+                    arc(e.pos, e.r + 9.0, 0.0, TAU, 1.0, alpha(WHITE, 0.2 * a));
+                    arc(e.pos, e.r + 9.0, -PI * 0.5, -PI * 0.5 + TAU * f, 3.5, alpha(pal.danger, (0.5 + 0.5 * f) * a));
+                    // its three lanes, brightening as the downbeat comes
+                    for off in [-0.24f32, 0.0, 0.24] {
+                        let d = dir(e.rot + off);
+                        seg(e.pos + d * (e.r + 12.0), e.pos + d * (e.r + 70.0 + 120.0 * f), 2.0, alpha(pal.danger, 0.55 * f * f * a), alpha(pal.danger, 0.0));
+                    }
+                }
+                EnemyKind::Bomber => {
+                    if e.state > 0.0 {
+                        // armed: a closing ring and the spokes its bullets will fly along
+                        let beats = e.state.ceil();
+                        let rr = e.r + 14.0 + 22.0 * (e.state - (beats - 1.0));
+                        arc(e.pos, rr, 0.0, TAU, 3.0, alpha(pal.danger, a));
+                        disc2(e.pos, 46.0, 16, alpha(pal.danger, 0.22 * a), alpha(pal.danger, 0.0));
+                        for k in 0..10 {
+                            let d = dir(e.rot + k as f32 * TAU / 10.0);
+                            seg(e.pos + d * (e.r + 6.0), e.pos + d * 120.0, 1.5, alpha(pal.danger, 0.45 * a), alpha(pal.danger, 0.0));
+                        }
+                    } else {
+                        arc(e.pos, e.r + 7.0, self.time * 3.0, self.time * 3.0 + PI, 1.5, alpha(pal.accent, 0.6 * a));
+                    }
                 }
                 _ => {}
             }
@@ -2702,6 +3802,27 @@ impl Renderer {
             return;
         }
         let blink = if p.invuln > 0.0 && p.dash_t <= 0.0 { 0.45 + 0.55 * ((self.time * 30.0).sin() * 0.5 + 0.5) } else { 1.0 };
+        // Resonance: rings pulse out from the player on every beat
+        if w.res_t > 0.0 {
+            let fade = (w.res_t / 0.6).min(1.0);
+            for k in 0..2 {
+                let ph = (1.0 - w.beat_pulse + k as f32 * 0.5).fract();
+                arc(p.pos, 26.0 + 70.0 * ph, 0.0, TAU, 2.5, alpha(pal.accent, 0.7 * (1.0 - ph) * fade));
+            }
+            poly_lines(p.pos, 6, 30.0, self.time * 2.0, 2.0, alpha(WHITE, 0.6 * fade));
+        }
+        // ORBIT blades: turning crescents with a faint ring showing their path
+        if p.blades() > 0 {
+            arc(p.pos, BLADE_ORBIT_R, 0.0, TAU, 1.0, alpha(pal.accent, 0.12));
+            for k in 0..p.blades() {
+                let bp = p.blade_pos(k);
+                let a = self.time * 14.0 + k as f32;
+                poly_lines(bp, 3, 13.0, a, 2.5, alpha(WHITE, 0.95));
+                poly_lines(bp, 3, 18.0, -a * 0.7, 1.5, alpha(pal.accent, 0.7));
+                let tail = p.pos + (bp - p.pos).rotate(dir(0.35));
+                seg(bp, tail, 4.0, alpha(pal.accent, 0.5), alpha(pal.accent, 0.0));
+            }
+        }
         for k in 0..p.drones() {
             let dp = p.drone_pos(k);
             diamond_fill(dp, 5.5, alpha(pal.accent, 0.95));
@@ -3003,6 +4124,12 @@ impl Renderer {
         let s = r.score();
         vtext(&s[0].to_string(), cx - 44.0 * u, y, 64.0 * u, cols[0], 1);
         vtext("-", cx, y - 8.0 * u, 36.0 * u, alpha(WHITE, 0.6), 0);
+        // rally length, once it is long enough to have sped up
+        if r.heat >= 4 {
+            let hot = (r.heat / 4).min(6) as f32 / 6.0;
+            let pulse = 0.75 + 0.25 * (self.time * (6.0 + 8.0 * hot)).sin();
+            vtext(&format!("RALLY {}", r.heat), cx, y + 64.0 * u, 20.0 * u, alpha(mixc(self.pal.accent, self.pal.danger, hot), pulse), 0);
+        }
         vtext(&s[1].to_string(), cx + 44.0 * u, y, 64.0 * u, cols[1], -1);
         for i in 0..2 {
             let x = cx + rally::fwd(i) * -44.0 * u;
@@ -3031,6 +4158,16 @@ impl Renderer {
         let u = sh / 1080.0;
         let m = 34.0 * u;
         let hud_a = if info.show_combat { 1.0 } else { 0.0 };
+        // Purgatory washes the whole scene in the accent colour, strongest at the edges.
+        if w.purg > 0.01 && info.show_combat {
+            let c = alpha(pal.accent, 0.07 * w.purg);
+            draw_rectangle(0.0, 0.0, sw, sh, c);
+            let e = alpha(pal.accent, 0.22 * w.purg);
+            let z = alpha(pal.accent, 0.0);
+            let band = sh * 0.16;
+            quad4([vec2(0.0, 0.0), vec2(sw, 0.0), vec2(sw, band), vec2(0.0, band)], [e, e, z, z]);
+            quad4([vec2(0.0, sh - band), vec2(sw, sh - band), vec2(sw, sh), vec2(0.0, sh)], [z, z, e, e]);
+        }
 
         if info.show_combat {
             // Score + multiplier + combo
@@ -3043,6 +4180,14 @@ impl Renderer {
             line(vec2(cx, cy), vec2(cx + cw, cy), 1.0 * u, alpha(WHITE, 0.25));
             line(vec2(cx, cy), vec2(cx + cw * cf, cy), 3.0 * u, mc);
             line(vec2(cx + cw, cy - 5.0 * u), vec2(cx + cw, cy + 5.0 * u), 1.0 * u, alpha(WHITE, 0.35));
+            // Resonance: the meter, or the time left while it rings
+            let ry = cy + 20.0 * u;
+            let ringing = w.res_t > 0.0;
+            let rf = if ringing { w.res_t / RESONANCE_SECS } else { w.resonance.clamp(0.0, 1.0) };
+            let rc = if ringing { mixc(pal.accent, WHITE, 0.5 + 0.5 * (self.time * 12.0).sin()) } else { alpha(pal.secondary, 0.9) };
+            line(vec2(cx, ry), vec2(cx + cw, ry), 1.0 * u, alpha(WHITE, 0.2));
+            line(vec2(cx, ry), vec2(cx + cw * rf, ry), if ringing { 4.0 } else { 2.5 } * u, rc);
+            vtext(if ringing { "RESONANCE" } else { "RES" }, cx + cw + 10.0 * u, ry + 6.0 * u, 13.0 * u, alpha(rc, 0.95), -1);
 
             // HP diamonds
             let y = sh - m - 14.0 * u;
@@ -3081,7 +4226,20 @@ impl Renderer {
                 }
             }
 
-            // Heart integrity
+            // Run modifiers of this depth, above the upgrades
+            for (k, md) in MODS.iter().enumerate() {
+                if w.mods >> k & 1 == 1 {
+                    text_shadow(md.0, sw - m, uy, 18.0 * u, alpha(pal.danger, 0.9), 1);
+                    uy -= 20.0 * u;
+                }
+            }
+
+            // Heart integrity (DODGE has no Heart to break: it shows its own line instead)
+            if w.pacifist {
+                vtext("DODGE", sw * 0.5, m + 60.0 * u, 20.0 * u, alpha(pal.accent, 0.9), 0);
+                text_shadow(&format!("{} grazes", w.stats.grazes), sw * 0.5, m + 84.0 * u, 20.0 * u, alpha(WHITE, 0.8), 0);
+            }
+            if !w.pacifist {
             let bw = 520.0 * u;
             let bx = sw * 0.5 - bw * 0.5;
             let by = m + 54.0 * u;
@@ -3096,13 +4254,53 @@ impl Renderer {
                 line(vec2(bx, by), vec2(bx + bw * frac, by), 4.0 * u, hc);
                 diamond_fill(vec2(bx + bw * frac, by), 5.0 * u, WHITE);
                 vtext("HEART", bx - 12.0 * u, by + 7.0 * u, 16.0 * u, alpha(pal.danger, 0.9), 1);
+                // One notch per phase still ahead: the bar stops at the next one until the song moves on.
+                for (i, ph) in w.phases.iter().enumerate() {
+                    if i + 1 < w.phases.len() && ph.floor > 0.0 {
+                        let fx = bx + bw * (ph.floor / w.heart.max_hp.max(1.0)).clamp(0.0, 1.0);
+                        let next = i == w.phase_i;
+                        line(vec2(fx, by - 6.0 * u), vec2(fx, by + 6.0 * u), if next { 2.5 } else { 1.0 } * u, alpha(if next { pal.accent } else { WHITE }, if next { 0.95 } else { 0.4 }));
+                    }
+                }
+                if w.rage > 0 {
+                    vtext(&format!("RAGE {}", roman(w.rage as u8)), bx + bw + 12.0 * u, by + 27.0 * u, 15.0 * u, alpha(pal.danger, 0.95), -1);
+                }
+                if w.purgatory {
+                    let pulse = 0.75 + 0.25 * (self.time * 5.0).sin();
+                    let left = w.phase_left().min((w.purg_until - w.t).max(0.0));
+                    vtext(&format!("PURGATORY  {:.0}", left.ceil()), sw * 0.5, by + 28.0 * u, 20.0 * u, alpha(pal.accent, pulse), 0);
+                } else if w.heart.form != HeartForm::Core {
+                    vtext(w.heart.form.name(), bx + bw + 12.0 * u, by + 7.0 * u, 16.0 * u, alpha(pal.accent, 0.9), -1);
+                    if w.form_banner > 0.0 {
+                        let a = (w.form_banner * 5.0).min(1.0);
+                        text_shadow(w.heart.form.hint(), sw * 0.5, by + 26.0 * u, 20.0 * u, alpha(WHITE, 0.9 * a), 0);
+                    }
+                }
+            }
+
             }
 
             // Section label
             let label = section_label(w.section_kind);
             vtext(label, sw - m, m + 26.0 * u, 26.0 * u, pal.secondary, 1);
             if info.bpm > 1.0 {
-                text_shadow(&format!("{:.0} BPM", info.bpm), sw - m, m + 52.0 * u, 20.0 * u, alpha(WHITE, 0.6), 1);
+                let depth = if w.song_idx > 0 { format!("DEPTH {}   ", w.song_idx + 1) } else { String::new() };
+                text_shadow(&format!("{depth}{:.0} BPM", info.bpm), sw - m, m + 52.0 * u, 20.0 * u, alpha(WHITE, 0.6), 1);
+            }
+            // Musical layers driving attacks right now: lit = armed.
+            if w.armed != 0 {
+                const NAMES: [&str; 6] = ["BEAT", "BASS", "SNARE", "HATS", "LEAD", "CHIME"];
+                let mut x = sw - m;
+                for k in (0..NAMES.len()).rev() {
+                    let g = w.layer_glow[k];
+                    let col = mixc(alpha(WHITE, 0.22), pal.accent, g);
+                    text_shadow(NAMES[k], x, m + 78.0 * u, 16.0 * u, col, 1);
+                    let tw = text_w(NAMES[k], 16.0 * u);
+                    if g > 0.05 {
+                        line(vec2(x - tw, m + 84.0 * u), vec2(x, m + 84.0 * u), 2.0 * u, alpha(pal.accent, g));
+                    }
+                    x -= tw + 14.0 * u;
+                }
             }
             if w.section_banner > 0.0 && idle < 0.5 {
                 let k = (w.section_banner / 2.4).clamp(0.0, 1.0);
@@ -3373,6 +4571,147 @@ impl Renderer {
         draw_rectangle(x, y, w, h, Color::new(0.0, 0.0, 0.05, 0.55));
         rect_lines(x, y, w, h, 1.0 * u, alpha(self.pal.secondary, 0.45));
         brackets(x - 5.0 * u, y - 5.0 * u, w + 10.0 * u, h + 10.0 * u, 18.0 * u, 2.0 * u, alpha(self.pal.accent, 0.8));
+    }
+}
+
+/// Each upgrade's emblem, drawn with lines around `c` at half-size `r`.
+pub fn upgrade_emblem(up: UpgradeId, c: Vec2, r: f32, th: f32, col: Color, col2: Color, time: f32) {
+    let p = |x: f32, y: f32| c + vec2(x, y) * r;
+    let l = |a: Vec2, b: Vec2| line(a, b, th, col);
+    match up {
+        // TEMPO: two chevrons racing right
+        UpgradeId::Tempo => {
+            for x in [-0.6, 0.15] {
+                l(p(x, -0.8), p(x + 0.6, 0.0));
+                l(p(x + 0.6, 0.0), p(x, 0.8));
+            }
+        }
+        // CHORD: three shots in a fan
+        UpgradeId::Chord => {
+            for a in [-0.45f32, 0.0, 0.45] {
+                let d = vec2(a.sin(), -a.cos());
+                l(c + d * r * 0.2, c + d * r);
+                disc(c + d * r, th * 1.1, 8, col2);
+            }
+        }
+        // GAIN: an arrow pointing up out of a bar
+        UpgradeId::Gain => {
+            l(p(0.0, 0.9), p(0.0, -0.9));
+            l(p(-0.6, -0.3), p(0.0, -0.9));
+            l(p(0.6, -0.3), p(0.0, -0.9));
+            line(p(-0.7, 0.9), p(0.7, 0.9), th, col2);
+        }
+        // PIERCE: an arrow through a ring
+        UpgradeId::Pierce => {
+            arc(c, r * 0.55, 0.0, TAU, th, col2);
+            l(p(-1.0, 0.0), p(1.0, 0.0));
+            l(p(0.55, -0.4), p(1.0, 0.0));
+            l(p(0.55, 0.4), p(1.0, 0.0));
+        }
+        // SUSTAIN: a cross
+        UpgradeId::Sustain => {
+            rquad(c, vec2(r * 0.9, r * 0.28), 0.0, col);
+            rquad(c, vec2(r * 0.28, r * 0.9), 0.0, col);
+        }
+        // GLIDE: three speed lines behind a dot
+        UpgradeId::Glide => {
+            disc(p(0.6, 0.0), r * 0.3, 10, col);
+            for (y, x0) in [(-0.55, -0.9), (0.0, -1.1), (0.55, -0.9)] {
+                line(p(x0, y), p(0.1, y), th, col2);
+            }
+        }
+        // PHASE: a broken circle (the dash)
+        UpgradeId::Phase => {
+            for k in 0..4 {
+                let a0 = time * 1.5 + k as f32 * TAU / 4.0;
+                arc(c, r * 0.85, a0, a0 + TAU / 4.0 - 0.5, th, col);
+            }
+            disc(c, r * 0.22, 10, col2);
+        }
+        // MAGNET: a horseshoe
+        UpgradeId::Magnet => {
+            arc(c + vec2(0.0, -r * 0.1), r * 0.7, PI, TAU, th * 1.4, col);
+            line(p(-0.7, -0.1), p(-0.7, 0.9), th * 1.4, col);
+            line(p(0.7, -0.1), p(0.7, 0.9), th * 1.4, col);
+            line(p(-0.95, 0.9), p(-0.45, 0.9), th * 1.4, col2);
+            line(p(0.45, 0.9), p(0.95, 0.9), th * 1.4, col2);
+        }
+        // ECHO: a dot with a moon circling it
+        UpgradeId::Echo => {
+            disc(c, r * 0.3, 10, col);
+            arc(c, r * 0.85, 0.0, TAU, th * 0.6, col2);
+            disc(c + dir(time * 3.0) * r * 0.85, r * 0.2, 8, col);
+        }
+        // ENCORE: a shield
+        UpgradeId::Encore => {
+            let pts = [p(-0.8, -0.8), p(0.8, -0.8), p(0.8, 0.1), p(0.0, 1.0), p(-0.8, 0.1)];
+            for k in 0..5 {
+                l(pts[k], pts[(k + 1) % 5]);
+            }
+            line(p(0.0, -0.45), p(0.0, 0.45), th, col2);
+        }
+        // RICOCHET: a shot bouncing off a wall
+        UpgradeId::Ricochet => {
+            line(p(-1.0, 0.95), p(1.0, 0.95), th, col2);
+            l(p(-0.9, -0.8), p(-0.1, 0.9));
+            l(p(-0.1, 0.9), p(0.8, -0.6));
+            l(p(0.8, -0.6), p(0.35, -0.5));
+            l(p(0.8, -0.6), p(0.75, -0.1));
+        }
+        // DOWNBEAT: a bar line with the heavy first beat
+        UpgradeId::Downbeat => {
+            line(p(-0.7, -0.9), p(-0.7, 0.9), th * 2.4, col);
+            for x in [-0.1, 0.4, 0.9] {
+                line(p(x, -0.5), p(x, 0.5), th * 0.8, col2);
+            }
+        }
+        // TRANSPOSE: a round bullet turning into a square note
+        UpgradeId::Transpose => {
+            arc(p(-0.55, 0.0), r * 0.38, 0.0, TAU, th, col2);
+            l(p(-0.05, 0.0), p(0.25, 0.0));
+            poly_lines(p(0.68, 0.0), 4, r * 0.48, PI * 0.25, th, col);
+        }
+        // ORBIT: two blades on a ring
+        UpgradeId::Orbit => {
+            arc(c, r * 0.8, 0.0, TAU, th * 0.6, col2);
+            for k in 0..2 {
+                let q = c + dir(time * 3.0 + k as f32 * PI) * r * 0.8;
+                poly_lines(q, 3, r * 0.34, time * 6.0, th, col);
+            }
+            disc(c, r * 0.16, 8, col);
+        }
+        // NOVA: a burst of rays
+        UpgradeId::Nova => {
+            for k in 0..8 {
+                let d = dir(k as f32 * TAU / 8.0);
+                let far = if k % 2 == 0 { 1.0 } else { 0.65 };
+                line(c + d * r * 0.3, c + d * r * far, th, if k % 2 == 0 { col } else { col2 });
+            }
+        }
+        // CRESCENDO: the hairpin, opening to the right
+        UpgradeId::Crescendo => {
+            l(p(-0.9, 0.0), p(0.9, -0.7));
+            l(p(-0.9, 0.0), p(0.9, 0.7));
+        }
+        // ACCENT: the accent mark over a note
+        UpgradeId::Accent => {
+            l(p(-0.8, -0.9), p(0.7, -0.45));
+            l(p(0.7, -0.45), p(-0.8, 0.0));
+            disc(p(0.0, 0.6), r * 0.3, 10, col2);
+        }
+        // CODA: the coda sign
+        UpgradeId::Coda => {
+            arc(c, r * 0.6, 0.0, TAU, th, col);
+            line(p(0.0, -1.0), p(0.0, 1.0), th, col2);
+            line(p(-1.0, 0.0), p(1.0, 0.0), th, col2);
+        }
+        // SYNCOPE: a dash leaving a beat tick
+        UpgradeId::Syncope => {
+            line(p(-0.8, -0.7), p(-0.8, 0.7), th * 1.6, col2);
+            l(p(-0.4, 0.0), p(0.9, 0.0));
+            l(p(0.45, -0.4), p(0.9, 0.0));
+            l(p(0.45, 0.4), p(0.9, 0.0));
+        }
     }
 }
 

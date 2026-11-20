@@ -11,8 +11,10 @@ mod net;
 mod rally;
 mod render;
 mod rng;
+mod runner;
 mod synth;
 mod tools;
+mod ui;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -29,6 +31,7 @@ use game::{Input, UpgradeId, World};
 use level::{Ev, Level, LevelEvent, LiveGen, Timeline};
 use rally::{Character, FxKind, Rally, RallyInput, RallyMusic};
 use render::{text_center, text_left, text_shadow, text_w, HudInfo, Renderer};
+use ui::Icon;
 
 // ---------------------------------------------------------------------------------------------
 // Command line
@@ -52,6 +55,11 @@ pub struct Args {
     live: bool,
     give: u32,
     wall: bool,
+    mood: Option<(u8, u8, u8, u8)>,
+    mood_to: Option<(u8, u8, u8, u8)>,
+    purgatory: bool,
+    mode: usize,
+    mutators: u8,
     mortal: bool,
     /// Debug: keep the drift (idle) scene up while the song plays, with no attacks.
     drift: bool,
@@ -89,6 +97,26 @@ fn parse_args() -> Args {
             "--secs" => a.secs = val().parse().unwrap_or(30.0),
             "--start" => a.start = val().parse().unwrap_or(0.0),
             "--seed" => a.seed = val().parse().unwrap_or(0),
+            // Debug: start in a run mode (index into `SETUP_MODES`: 3 = DROP RUSH, 4 = DODGE).
+            "--mode" => a.mode = val().parse().unwrap_or(0),
+            // Debug: mutator bits (`game::MOD_*`).
+            "--mutators" => a.mutators = val().parse().unwrap_or(0),
+            // Debug: force the look, as "scene,weather,floor,prop" (see `level::Mood`).
+            "--mood" => {
+                let v: Vec<u8> = val().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if v.len() == 4 {
+                    a.mood = Some((v[0], v[1], v[2], v[3]));
+                }
+            }
+            // Debug: hold the Heart in purgatory, to look at it.
+            "--purgatory" => a.purgatory = true,
+            // Debug: switch to this look after 3 s, to watch the sky transition.
+            "--mood-to" => {
+                let v: Vec<u8> = val().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if v.len() == 4 {
+                    a.mood_to = Some((v[0], v[1], v[2], v[3]));
+                }
+            }
             "--ss" => a.ss = val().parse().ok(),
             "--give" => a.give = val().parse().unwrap_or(0),
             "--sim" => a.sim = true,
@@ -145,6 +173,34 @@ fn parse_args() -> Args {
 }
 
 /// Expand folders into the audio files they contain (sorted, recursive, capped).
+fn is_playlist(p: &Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("m3u") || e.eq_ignore_ascii_case("m3u8")).unwrap_or(false)
+}
+
+/// Read an .m3u / .m3u8 playlist: one path per line, `#` lines are comments, relative paths are
+/// resolved against the playlist's own folder. Only existing audio files are kept, in order.
+fn read_playlist(p: &Path) -> Vec<PathBuf> {
+    let Ok(bytes) = std::fs::read(p) else { return Vec::new() };
+    let text = String::from_utf8_lossy(&bytes);
+    let base = p.parent().unwrap_or(Path::new("."));
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with('#') || out.len() > 5000 {
+            continue;
+        }
+        let line = line.strip_prefix("file:///").unwrap_or(line);
+        let mut f = PathBuf::from(line);
+        if f.is_relative() {
+            f = base.join(f);
+        }
+        if decode::is_audio_file(&f) && f.is_file() {
+            out.push(f);
+        }
+    }
+    out
+}
+
 fn expand_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
         if depth > 4 || out.len() > 2000 {
@@ -165,6 +221,8 @@ fn expand_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     for p in paths {
         if p.is_dir() {
             walk(p, &mut out, 0);
+        } else if is_playlist(p) {
+            out.extend(read_playlist(p));
         } else if decode::is_audio_file(p) {
             out.push(p.clone());
         }
@@ -260,6 +318,16 @@ fn spawn_loader(idx: usize, path: PathBuf, seed: u64, diff: f32) -> Loader {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Menu,
+    /// Settings sub-screen of the menu (volumes, sync offset, visuals, display).
+    Options,
+    /// Run setup, reached from PLAY: mode, difficulty, starting track, other sources.
+    Setup,
+    /// Highway: the three-lane side mode (`runner.rs`).
+    Runner,
+    /// Codex: what everything in the game is, and the best scores.
+    Codex,
+    /// Track list: pick the starting track from the whole library (opened from run setup).
+    Tracks,
     LiveSetup,
     /// LAN Rally: host/join, lobby, countdown, match and results (`App::lan` holds the stage).
     Lan,
@@ -276,6 +344,19 @@ enum Phase {
     Dying(f32),
 }
 
+/// One Highway run.
+struct RunSession {
+    r: runner::Runner,
+    an: Arc<Analysis>,
+    title: String,
+    /// The cosmetic level events (beats, hits, sections, chimes) that make the vista react.
+    events: Vec<LevelEvent>,
+    cursor: usize,
+    key: String,
+    saved: bool,
+    best: bool,
+}
+
 struct Song {
     track: Arc<Track>,
     an: Arc<Analysis>,
@@ -283,6 +364,8 @@ struct Song {
     timeline: Arc<Timeline>,
     cursor: usize,
     last_t: f32,
+    /// The song is cut off here (DROP RUSH); `f32::MAX` plays it to the end.
+    end_t: f32,
 }
 
 struct LiveRun {
@@ -297,6 +380,10 @@ struct LiveRun {
     last_beat_t: f32,
     beat_n: u32,
     last_clock: f32,
+    /// Difficulty multiplier the generator was built with.
+    gen_diff: f32,
+    /// Capture-timeline time of the last beat a pulse was announced for (reactive live mode).
+    last_pred: f32,
     delay: f32,
     hearts: u32,
     /// Estimated seconds per beat (median of recent kick-to-kick gaps).
@@ -306,6 +393,115 @@ struct LiveRun {
 
 /// Menu music plays at this fraction of the in-run music volume.
 const MENU_MUSIC_GAIN: f32 = 0.5;
+// Rows of the title menu: (icon, label, tooltip).
+const M_PLAY: usize = 0;
+const M_HIGHWAY: usize = 1;
+const M_LAN: usize = 2;
+const M_CODEX: usize = 3;
+const M_LIBRARY: usize = 4;
+const M_OPTIONS: usize = 5;
+const M_QUIT: usize = 6;
+const CODEX_TABS: [&str; 6] = ["THE HEART", "ENEMIES", "UPGRADES", "THE MUSIC", "RECORDS", "MILESTONES"];
+/// Milestones: (id kept in the scores file, name, how to earn it).
+const MILESTONES: [(&str, &str, &str); 12] = [
+    ("heart", "HEARTBREAKER", "Break a Heart."),
+    ("depth3", "GOING DEEPER", "Reach depth 3 in one run."),
+    ("depth5", "THE ABYSS", "Reach depth 5 in one run."),
+    ("clean", "UNTOUCHED", "Clear a track without taking a hit."),
+    ("graze", "PAPER THIN", "Graze 150 bullets in one run."),
+    ("breaker", "IMPATIENT", "Break five Heart phases early in one run."),
+    ("resonant", "IN TUNE", "Set resonance ringing three times in one run."),
+    ("glass", "GLASS CANNON", "Clear a track with the GLASS mutator on."),
+    ("flatline", "FLATLINER", "Clear a track on FLATLINE."),
+    ("dodge", "PACIFIST", "Finish a track in DODGE."),
+    ("road", "ROAD WARRIOR", "Finish a Highway road with rank A or S."),
+    ("jumps", "PERFECT TIMING", "Land 20 perfect jumps in one Highway road."),
+];
+const CODEX_HEART: [(&str, &str); 10] = [
+    ("CHARGE", "While the body of the Heart can be hurt, a charge appears far from it. Carry it into the ring around the Heart to take a fifth of the phase at once. A hit knocks it loose."),
+    ("SHELL", "Calm sections. The Heart is immune: break the three shield nodes circling the arena."),
+    ("VALVE", "Groove sections. It opens for the first half of every bar; while shut, shots do a fifth."),
+    ("SPLIT", "Surge sections. Three linked cores orbit it and only the lit one can be hurt. Break them in order."),
+    ("OVERDRIVE", "Drops. Exposed, taking half again as much damage, and it charges down a lit lane: step out of it."),
+    ("FINALE", "The last section of a song. Every pulse has an echo half a beat later, made of shootable notes."),
+    ("PURGATORY", "Break a phase before its section ends and everything becomes shootable for up to nine seconds."),
+    ("RAGE", "Each early break grows what is left of the Heart and adds a tenth to the pressure for that song."),
+    ("RELOCATION", "From PULSE up it moves on bar lines. A ring shows where; it holds its fire on the way."),
+    ("BEAT RING", "The ticked ring around the Heart. Every pulse is timed to cross it on a beat."),
+];
+const CODEX_ENEMIES: [(&str, &str); 9] = [
+    ("CHASER", "Walks at you. Arrives on the snare."),
+    ("DARTER", "Flies straight through where you were when it appeared, then leaves."),
+    ("ORBITER", "Circles the arena and shoots at you every few beats."),
+    ("SPLITTER", "Slow and tough; breaks into three fast minis."),
+    ("METRONOME", "Plants itself and fires a three-shot fan on every downbeat. Its ring fills through the bar."),
+    ("CYMBAL", "Drifts in, arms when close, and bursts into a ring two beats later. Kill it first."),
+    ("WISP", "Appears on the song's chimes, where the note sits in pitch. Light, weaving, fades if ignored."),
+    ("ELITE", "Arrives with a drop, with a lot of health. Gunners (red) fire rings; from depth 2 Summoners (pink) call minis; from depth 3 Leapers (gold) blink at you on the downbeat."),
+    ("SPRITE", "Ear candy made visible. Harmless and golden: catch it for a heal."),
+];
+const CODEX_MUSIC: [(&str, &str); 10] = [
+    ("BEAT", "The kick drives the Heart's pulses."),
+    ("BASS", "A sustained low end brings tile strikes: pillars that rise for a bar, then slam on the beat."),
+    ("SNARE", "Snares open the portals enemies arrive through."),
+    ("HATS", "Hi-hats leave shards to collect, and dart streams in the hottest bars."),
+    ("LEAD", "Sustained notes sweep laser walls across the floor."),
+    ("CHIMES", "Pitched hits high in the mix send wisps."),
+    ("EAR CANDY", "A flourish the song rarely plays: a comet trailing shards, a keypad of shards, or a sprite."),
+    ("GRAZE", "Slip past a bullet at close range without being hit: score, combo, and it feeds resonance. Dash straight through one for a THREAD, worth three."),
+    ("RESONANCE", "The meter under the combo bar. Full, it rings for eight seconds: more damage, double score."),
+    ("GRADES", "Calm sections, purgatory and a cleared track grade you from C to S. Better grades offer more, and rarer, upgrades."),
+];
+const MENU_ROWS: [(Icon, &str, &str); 7] = [
+    (Icon::Play, "PLAY", "Set up a run: endless or a single track, the difficulty, the starting song. Live audio and loose files are in there too."),
+    (Icon::Road, "HIGHWAY", "A side mode on this track: race down the grid. Switch lanes around the walls (kicks), jump the bars (snares), collect the gems (hats). Uses the difficulty chosen in PLAY."),
+    (Icon::Lan, "LAN RALLY", "A beat-locked paddle duel against a second PC on your network. The host picks the song."),
+    (Icon::Files, "CODEX", "What everything is: the Heart's forms, the enemies, every upgrade, how the music becomes the level, and your best scores."),
+    (Icon::Library, "MUSIC LIBRARY", "The folder or .m3u playlist that runs and this menu draw from. ENTER picks a folder, SHIFT+ENTER a playlist, or drop either on this row."),
+    (Icon::Options, "OPTIONS", "Volumes, sync offset, how hard the scene pulses with the music, windowed or fullscreen."),
+    (Icon::Quit, "QUIT", "Close Heartline."),
+];
+// Rows of the run setup screen.
+const S_MODE: usize = 0;
+const S_DIFF: usize = 1;
+const S_MUT: usize = 2;
+const S_TRACK: usize = 3;
+const S_START: usize = 4;
+const S_OTHER: usize = 5;
+const SETUP_MODES: [(Icon, &str, &str); 5] = [
+    (Icon::Endless, "ENDLESS", "ENDLESS RUN: this track, then the library keeps coming. HP, upgrades and score carry over until you fall."),
+    (Icon::Single, "SINGLE", "SINGLE TRACK: just this song. You can still carry on into more songs from the results screen."),
+    (Icon::Sync, "DAILY", "DAILY SEED: an endless run on today's seed. The same songs give everyone the same levels and upgrade offers today."),
+    (Icon::Sfx, "DROP RUSH", "DROP RUSH: every track is cut down to its biggest section. Short, dense, endless."),
+    (Icon::Visuals, "DODGE", "DODGE: no gun. The Heart cannot be hurt. Score by slipping close past bullets and by staying alive."),
+];
+const MODE_DAILY: usize = 2;
+const MODE_RUSH: usize = 3;
+const MODE_DODGE: usize = 4;
+/// Score multiplier of each difficulty tier.
+const TIER_SCORE: [f32; 7] = [0.5, 0.8, 1.0, 1.25, 1.5, 1.8, 2.2];
+const SETUP_OTHER: [(Icon, &str, &str); 3] = [
+    (Icon::Files, "PLAY FILES...", "Pick audio files or an .m3u playlist and play them in order. Dropping files on the window does the same."),
+    (Icon::Folder, "PLAY FOLDER...", "Pick a folder and play everything in it."),
+    (Icon::Live, "LIVE AUDIO", "Play against whatever your PC is playing right now. The level is built on the fly."),
+];
+// Rows of the options screen: (icon, label, tooltip).
+const O_MUSIC: usize = 0;
+const O_SFX: usize = 1;
+const O_SYNC: usize = 2;
+const O_VISUALS: usize = 3;
+#[allow(dead_code)]
+const O_DISPLAY: usize = 4;
+const O_BACK: usize = 5;
+const OPTION_ROWS: [(Icon, &str, &str); 5] = [
+    (Icon::Music, "MUSIC VOLUME", "How loud the song is in a run. The menu plays it at half of this."),
+    (Icon::Sfx, "EFFECTS VOLUME", "How loud hits, pickups and menu sounds are."),
+    (Icon::Sync, "SYNC OFFSET", "Raise it if attacks land before you hear the beat (soundbar or Bluetooth lag); lower it if they land late."),
+    (Icon::Visuals, "VISUALS", "How hard the scene pulses with the music: zoom punches, flashes, rings. SUBTLE or OFF for comfort."),
+    (Icon::Display, "DISPLAY", "Windowed or borderless fullscreen. F11 switches anywhere."),
+];
+/// How long the menu stays on one track before cross-fading to the next.
+const MENU_TRACK_SECS: f32 = 75.0;
 
 /// Difficulty tiers: (budget multiplier, name, what changes). Steps are small on purpose.
 /// Tier 0 is no-fail; the last tier starts with a single life (see `App::apply_diff_rules`).
@@ -329,6 +525,8 @@ struct App {
     screen: Screen,
     phase: Phase,
     queue: Vec<PathBuf>,
+    /// The run keeps drawing tracks from the library after its queue is used up.
+    endless: bool,
     qi: usize,
     loader: Option<Loader>,
     ready: Option<(usize, Loaded)>,
@@ -344,11 +542,35 @@ struct App {
     offset_ms: f32,
     music_dir: Option<PathBuf>,
     juke: Jukebox,
+    /// Where endless runs are up to in the library list.
+    juke_seq: usize,
     autofire: bool,
     fullscreen: bool,
     /// Index into `VISUALS`.
     visuals: usize,
     menu_sel: usize,
+    /// Pause menu: QUIT was pressed once and needs a second press.
+    quit_armed: bool,
+    /// Run setup: ENDLESS RUN (true) or SINGLE TRACK, and the focused button of the last row.
+    /// Index into `SETUP_MODES`.
+    setup_mode: usize,
+    /// Track list: the highlighted row.
+    track_sel: usize,
+    /// Remix number chosen in run setup: added to the seed, so the same song deals a different
+    /// level (0 = the song's own).
+    remix: u64,
+    /// Mutators chosen in run setup (`game::MOD_*` bits), and the focused one.
+    mutators: u8,
+    mut_col: usize,
+    /// Best scores, keyed by `score_key`: (score, depth reached).
+    scores: std::collections::HashMap<String, (u64, u32)>,
+    /// The key this run will be recorded under, and whether it has been.
+    run_key: String,
+    run_saved: bool,
+    run_best: bool,
+    /// The seed from the command line (DAILY SEED replaces `args.seed` for one run).
+    base_seed: u64,
+    setup_col: usize,
     dialog: Option<Receiver<Vec<PathBuf>>>,
     /// True when the open folder dialog is choosing the music library (not starting a run).
     dialog_library: bool,
@@ -368,6 +590,8 @@ struct App {
     max_bullets: usize,
     max_enemies: usize,
     log: Vec<String>,
+    /// Highway session (Some while `screen == Screen::Runner`).
+    runner: Option<Box<RunSession>>,
     /// LAN Rally session (Some while `screen == Screen::Lan`).
     lan: Option<Box<Lan>>,
 }
@@ -402,11 +626,33 @@ struct Jukebox {
     last_t: f32,
     playing: bool,
     fails: u32,
+    /// Seconds the current menu track has been playing (the menu moves on by itself).
+    played: f32,
 }
 
 // ---------------------------------------------------------------------------------------------
 // Settings (heartline.cfg next to the exe)
 // ---------------------------------------------------------------------------------------------
+
+fn scores_path() -> Option<PathBuf> {
+    std::env::current_exe().ok().map(|e| e.with_file_name("heartline-scores.txt"))
+}
+
+/// Best scores: one `key<TAB>score<TAB>depth` line each.
+fn load_scores() -> std::collections::HashMap<String, (u64, u32)> {
+    let mut m = std::collections::HashMap::new();
+    if let Some(text) = scores_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        for line in text.lines() {
+            let mut it = line.split('\t');
+            if let (Some(k), Some(s), Some(d)) = (it.next(), it.next(), it.next()) {
+                if let (Ok(s), Ok(d)) = (s.parse(), d.parse()) {
+                    m.insert(k.to_string(), (s, d));
+                }
+            }
+        }
+    }
+    m
+}
 
 fn settings_path() -> Option<PathBuf> {
     std::env::current_exe().ok().map(|e| e.with_file_name("heartline.cfg"))
@@ -558,6 +804,7 @@ impl App {
             self.diff, self.volume, self.sfx_volume, self.offset_ms, self.autofire as u8, self.fullscreen as u8
         );
         text.push_str(&format!("visuals={}\n", self.visuals));
+        text.push_str(&format!("mutators={}\n", self.mutators));
         if let Some(d) = &self.music_dir {
             text.push_str(&format!("music_dir={}\n", d.display()));
         }
@@ -574,7 +821,48 @@ impl App {
         }
         let first_theme = rng.below(synth::THEME_COUNT);
         lib.extend((0..synth::THEME_COUNT).map(|k| theme_path((first_theme + k) % synth::THEME_COUNT)));
-        self.juke = Jukebox { list: lib, idx: 0, loaded: None, loader: None, cursor: 0, last_t: -1.0, playing: false, fails: 0 };
+        self.juke = Jukebox { list: lib, idx: 0, loaded: None, loader: None, cursor: 0, last_t: -1.0, playing: false, fails: 0, played: 0.0 };
+    }
+
+    /// What the menu jukebox is playing: (title, hint line).
+    fn juke_title(&self) -> (String, String) {
+        let (title, hint) = match (&self.juke.loaded, self.juke.list.get(self.juke.idx)) {
+            (_, None) => ("no music found".to_string(), "choose MUSIC LIBRARY or drop files on the window".to_string()),
+            (Some((p, l)), Some(want)) if p == want => (l.track.name.clone(), "Q / E  change track".to_string()),
+            (_, Some(want)) => (track_title(want), "reading the music...".to_string()),
+        };
+        let title: String = if title.chars().count() > 38 { title.chars().take(35).chain("...".chars()).collect() } else { title };
+        (title, hint)
+    }
+
+    /// Ask for audio files or a playlist to play (the answer arrives through `dialog`).
+    fn open_files_dialog(&mut self) {
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let mut exts: Vec<&str> = decode::AUDIO_EXTS.to_vec();
+            exts.extend(["m3u", "m3u8"]);
+            let r = rfd::FileDialog::new().set_title("Heartline - choose songs or a playlist").add_filter("Audio and playlists", &exts).pick_files();
+            let _ = tx.send(r.unwrap_or_default());
+        });
+        self.dialog = Some(rx);
+        self.dialog_library = false;
+    }
+
+    /// Ask for a folder to play, or (with `library`) for the music library: a folder, or an
+    /// .m3u playlist when `playlist` is set.
+    fn open_folder_dialog(&mut self, library: bool, playlist: bool) {
+        let (tx, rx) = channel();
+        let start_dir = self.music_dir.clone().map(|d| if d.is_dir() { d } else { d.parent().map(Path::to_path_buf).unwrap_or(d) });
+        std::thread::spawn(move || {
+            let mut d = rfd::FileDialog::new().set_title(if library { "Heartline - choose your music library folder" } else { "Heartline - choose a music folder to play" });
+            if let Some(sd) = start_dir {
+                d = d.set_directory(sd);
+            }
+            let picked = if playlist { d.add_filter("Playlist", &["m3u", "m3u8"]).pick_file() } else { d.pick_folder() };
+            let _ = tx.send(picked.map(|p| vec![p]).unwrap_or_default());
+        });
+        self.dialog = Some(rx);
+        self.dialog_library = library;
     }
 
     fn juke_next(&mut self, dir: i32) {
@@ -601,6 +889,7 @@ impl App {
             match res {
                 Ok(loaded) => {
                     if self.juke.list.get(self.juke.idx) == Some(&path) {
+                        self.world.mood = loaded.level.mood;
                         self.juke.loaded = Some((path, loaded));
                         self.juke.playing = false;
                         self.juke.fails = 0;
@@ -628,9 +917,18 @@ impl App {
                 let start = if theme_index(path).is_some() { 0.0 } else { preview_start(&loaded.an) };
                 self.audio.play_ex(loaded.track.clone(), start as f64, true, 0.9);
                 self.juke.playing = true;
+                self.juke.played = 0.0;
                 self.juke.last_t = -1.0;
                 self.world.warp = 1.0;
                 self.world.beat_len = if loaded.level.bpm > 1.0 { 60.0 / loaded.level.bpm } else { 0.5 };
+            }
+        }
+        // The menu is a radio, not a loop: move to the next track after a while.
+        if self.juke.playing {
+            self.juke.played += dt;
+            if self.juke.played > MENU_TRACK_SECS && self.juke.list.len() > 1 && self.juke.loader.is_none() && self.dialog.is_none() {
+                self.juke.idx = (self.juke.idx + 1) % self.juke.list.len();
+                self.juke.played = 0.0;
             }
         }
         let mut feat = Feat::default();
@@ -653,7 +951,10 @@ impl App {
                 while self.juke.cursor < ev.len() && ev[self.juke.cursor].at() <= t {
                     let e = ev[self.juke.cursor];
                     self.juke.cursor += 1;
-                    if matches!(e.ev, Ev::Beat { .. } | Ev::Hit { .. } | Ev::Section { .. }) {
+                    if let Ev::Candy { .. } = e.ev {
+                        self.world.candy = 1.0;
+                    }
+                    if matches!(e.ev, Ev::Beat { .. } | Ev::Hit { .. } | Ev::Section { .. } | Ev::Chime { .. }) {
                         self.world.apply(&e);
                     }
                 }
@@ -669,7 +970,7 @@ impl App {
     }
 
     /// Start a run with the track the menu is playing, plus `extra` more from the playlist.
-    fn start_from_juke(&mut self, extra: usize) {
+    fn start_from_juke(&mut self, extra: usize, endless: bool) {
         let n = self.juke.list.len();
         if n == 0 {
             self.say("no music found - choose a MUSIC LIBRARY folder or drop files on the window");
@@ -684,6 +985,8 @@ impl App {
         }
         // The menu already analysed this track: reuse it so the level starts instantly.
         let reuse = self.juke.loaded.as_ref().filter(|(p, _)| *p == paths[0]).map(|(_, l)| (l.track.clone(), l.an.clone()));
+        self.endless = endless;
+        self.juke_seq = self.juke.idx % n;
         self.start_run(paths);
         if let Some((track, an)) = reuse {
             let level = level::generate(&an, self.args.seed, self.diff());
@@ -692,7 +995,153 @@ impl App {
         }
     }
 
+    /// Earn a milestone (once): it is kept with the scores and announced.
+    fn earn(&mut self, id: &str) {
+        let key = format!("ACH|{id}");
+        if self.scores.contains_key(&key) || self.args.selftest.is_some() {
+            return;
+        }
+        self.scores.insert(key, (1, 0));
+        self.save_scores();
+        if let Some(m) = MILESTONES.iter().find(|m| m.0 == id) {
+            self.say(format!("MILESTONE   {}", m.1));
+            self.audio.sfx(Sfx::Upgrade, 0.9, 0.0);
+        }
+    }
+
+    /// At the end of a run: which milestones did it earn?
+    fn check_milestones(&mut self) {
+        let st = self.world.stats;
+        let cleared = st.songs >= 1;
+        let depth = self.world.song_idx + 1;
+        let mut got: Vec<&str> = Vec::new();
+        if st.hearts_broken >= 1 { got.push("heart"); }
+        if depth >= 3 { got.push("depth3"); }
+        if depth >= 5 { got.push("depth5"); }
+        if cleared && st.hits == 0 { got.push("clean"); }
+        if st.grazes >= 150 { got.push("graze"); }
+        if st.phases_broken >= 5 { got.push("breaker"); }
+        if st.resonances >= 3 { got.push("resonant"); }
+        if cleared && self.world.base_mods & game::MOD_GLASS != 0 { got.push("glass"); }
+        if cleared && self.diff == DIFFS.len() - 1 { got.push("flatline"); }
+        if cleared && self.world.pacifist { got.push("dodge"); }
+        for id in got {
+            self.earn(id);
+        }
+    }
+
+    fn save_scores(&self) {
+        if let Some(path) = scores_path() {
+            let mut text = String::new();
+            for (k, v) in &self.scores {
+                text.push_str(&format!("{k}\t{}\t{}\n", v.0, v.1));
+            }
+            let _ = std::fs::write(path, text);
+        }
+    }
+
+    /// Start Highway on the track the menu is playing (it is already analysed).
+    fn start_highway(&mut self) {
+        let Some((path, loaded)) = self.juke.loaded.as_ref().filter(|(p, _)| Some(p) == self.juke.list.get(self.juke.idx)) else {
+            self.say("still reading the music: try again in a moment");
+            return;
+        };
+        let title = track_title(path);
+        let events: Vec<LevelEvent> = loaded.level.events.iter().copied().filter(|e| matches!(e.ev, Ev::Beat { .. } | Ev::Hit { .. } | Ev::Section { .. } | Ev::Chime { .. })).collect();
+        let sess = RunSession {
+            r: runner::Runner::new(&loaded.an, self.diff()),
+            an: loaded.an.clone(),
+            key: format!("{}|{}|HIGHWAY", title.replace(['\t', '\n', '|'], " "), DIFFS[self.diff].1),
+            title,
+            events,
+            cursor: 0,
+            saved: false,
+            best: false,
+        };
+        let (track, mood, bpm) = (loaded.track.clone(), loaded.level.mood, loaded.level.bpm);
+        self.world = World::new(self.diff(), true);
+        self.world.mood = mood;
+        self.world.beat_len = if bpm > 1.0 { 60.0 / bpm } else { 0.5 };
+        self.audio.play_ex(track, 0.0, false, 0.35);
+        self.juke.playing = false;
+        self.juke.last_t = -1.0;
+        self.runner = Some(Box::new(sess));
+        self.screen = Screen::Runner;
+    }
+
+    /// One frame of Highway. Returns 0..1 through the song.
+    fn step_highway(&mut self, dt: f32) -> f32 {
+        let auto = self.args.selftest.is_some();
+        let t = (self.audio.song_time() as f32 - self.offset_ms / 1000.0).max(0.0);
+        let finished = self.audio.finished();
+        let Some(s) = self.runner.as_mut() else {
+            self.to_menu();
+            return 0.0;
+        };
+        while s.cursor < s.events.len() && s.events[s.cursor].at() <= t {
+            let e = s.events[s.cursor];
+            s.cursor += 1;
+            self.world.apply(&e);
+        }
+        let feat = feat_at(&s.an, t);
+        let bp = beat_pos(&s.r.beats, t);
+        self.world.t = t;
+        self.world.update(dt, t, &Input::default(), bp, &feat, s.an.intensity_at(t), false);
+        let (steer, jump) = if auto {
+            s.r.autopilot()
+        } else {
+            let right = is_key_pressed(KeyCode::D) || is_key_pressed(KeyCode::Right);
+            let left = is_key_pressed(KeyCode::A) || is_key_pressed(KeyCode::Left);
+            (right as i32 - left as i32, is_key_pressed(KeyCode::Space) || is_key_pressed(KeyCode::W) || is_key_pressed(KeyCode::Up))
+        };
+        let was_done = s.r.done;
+        let mut earned: Vec<&str> = Vec::new();
+        s.r.step(dt, t, steer, jump);
+        if finished && t > 3.0 {
+            s.r.done = true;
+        }
+        for fx in s.r.fx.clone() {
+            let (sfx, gain) = match fx {
+                runner::RunFx::Gem => (Sfx::Shard, 0.5),
+                runner::RunFx::Star => (Sfx::Upgrade, 0.6),
+                runner::RunFx::Clear => (Sfx::NoteShot, 0.7),
+                runner::RunFx::Perfect => (Sfx::Shield, 0.6),
+                runner::RunFx::Hit => (Sfx::Hurt, 1.0),
+                runner::RunFx::Jump => (Sfx::Dash, 0.4),
+                runner::RunFx::Lane => (Sfx::UiMove, 0.4),
+            };
+            self.audio.sfx(sfx, gain, s.r.lane_x * 0.6);
+        }
+        if s.r.done && !was_done {
+            if s.r.dead {
+                self.audio.fade_out(0.8);
+            }
+            if !s.saved && !auto {
+                if matches!(s.r.rank(), "S" | "A") {
+                    earned.push("road");
+                }
+                if s.r.perfects >= 20 {
+                    earned.push("jumps");
+                }
+                s.saved = true;
+                if s.r.score > 0 && self.scores.get(&s.key).map_or(true, |b| s.r.score > b.0) {
+                    s.best = true;
+                    self.scores.insert(s.key.clone(), (s.r.score, 1));
+                }
+            }
+        }
+        let p = t / s.r.duration.max(0.1);
+        if self.runner.as_ref().is_some_and(|s| s.best && s.saved) {
+            self.save_scores();
+        }
+        for id in earned {
+            self.earn(id);
+        }
+        p
+    }
+
     fn to_menu(&mut self) {
+        self.runner = None;
         self.juke.playing = false;
         self.audio.stop();
         self.audio.stop_live();
@@ -705,11 +1154,48 @@ impl App {
         self.rend.set_palette(0);
     }
 
+    /// Tier and mutator score multiplier of the run being set up.
+    fn score_mult(&self) -> f32 {
+        TIER_SCORE[self.diff.min(TIER_SCORE.len() - 1)] * (1.0 + game::MUTATOR_SCORE * self.mutators.count_ones() as f32)
+    }
+
+    /// Best scores are kept per starting track, tier and mode.
+    fn score_key(&self, title: &str) -> String {
+        format!("{}|{}|{}", title.replace(['\t', '\n', '|'], " "), DIFFS[self.diff].1, SETUP_MODES[self.setup_mode.min(SETUP_MODES.len() - 1)].1)
+    }
+
+    /// At the end of a run: record the score if it is the best for its key.
+    fn record_score(&mut self) {
+        if self.run_saved {
+            return;
+        }
+        self.run_saved = true;
+        if self.args.selftest.is_some() || self.run_key.is_empty() || self.live.is_some() {
+            return;
+        }
+        self.check_milestones();
+        let (score, depth) = (self.world.score, self.world.song_idx + 1);
+        if self.scores.get(&self.run_key).map_or(true, |b| score > b.0) && score > 0 {
+            self.run_best = true;
+            self.scores.insert(self.run_key.clone(), (score, depth));
+            if let Some(path) = scores_path() {
+                let mut text = String::new();
+                for (k, v) in &self.scores {
+                    text.push_str(&format!("{k}\t{}\t{}\n", v.0, v.1));
+                }
+                let _ = std::fs::write(path, text);
+            }
+        }
+    }
+
     fn start_run(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             self.say("no playable audio files found");
             return;
         }
+        self.run_key = self.score_key(&track_title(&paths[0]));
+        self.run_saved = false;
+        self.run_best = false;
         // Menu music keeps playing through the loading screen and cross-fades into the level.
         if !self.juke.playing {
             self.audio.stop();
@@ -723,7 +1209,14 @@ impl App {
         self.qi = 0;
         let god = self.args.selftest.is_some() && !self.args.mortal;
         self.world = World::new(self.diff(), self.diff == 0 || god);
+        self.world.base_mods = self.mutators;
+        self.world.score_mult = self.score_mult();
+        self.world.pacifist = self.setup_mode == MODE_DODGE;
         self.apply_diff_rules();
+        if self.mutators & game::MOD_GLASS != 0 && self.world.player.max_hp > 2 {
+            self.world.player.max_hp = 2;
+            self.world.player.hp = 2;
+        }
         for _ in 0..self.args.give {
             let up = UpgradeId::ALL[self.world.rng.below(UpgradeId::ALL.len())];
             self.world.player.ups[up as usize] = (self.world.player.ups[up as usize] + 1).min(up.max());
@@ -747,7 +1240,8 @@ impl App {
         self.song = None;
         self.world = World::new(self.diff(), self.diff == 0);
         self.apply_diff_rules();
-        self.world.begin_song(210.0, 0, 0xC0FFEE);
+        self.world.begin_song(game::LIVE_HEART_SECS, 0, 0xC0FFEE);
+        self.world.live_phases = true;
         let lookahead = if delayed { (delay - 0.25).max(0.0) } else { 0.0 };
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -765,6 +1259,8 @@ impl App {
             last_beat_t: -1.0,
             beat_n: 0,
             last_clock: 0.0,
+            gen_diff: self.diff(),
+            last_pred: -10.0,
             delay,
             hearts: 0,
             period: 0.5,
@@ -803,7 +1299,7 @@ impl App {
             }
         }
         // Keep the next track warming up in the background.
-        if self.loader.is_none() && self.screen != Screen::Menu && self.live.is_none() {
+        if self.loader.is_none() && !matches!(self.screen, Screen::Menu | Screen::Options | Screen::Setup | Screen::Codex | Screen::Tracks) && self.live.is_none() {
             let want = if self.song.is_some() && self.phase == Phase::Song { self.qi + 1 } else { self.qi };
             let have = self.ready.as_ref().map(|r| r.0);
             if want < self.queue.len() && have != Some(want) {
@@ -812,12 +1308,69 @@ impl App {
         }
     }
 
+    /// The next library track that is not already in this run (wraps around when all are used).
+    fn next_library_track(&mut self) -> Option<PathBuf> {
+        let n = self.juke.list.len();
+        for _ in 0..n {
+            self.juke_seq = (self.juke_seq + 1) % n;
+            let p = &self.juke.list[self.juke_seq];
+            if !self.queue.contains(p) {
+                return Some(p.clone());
+            }
+        }
+        self.juke.list.get(self.juke_seq).cloned()
+    }
+
+    /// Carry on after the last queued track: same build, next track from the library.
+    fn continue_run(&mut self) {
+        self.endless = true;
+        if let Some(p) = self.next_library_track() {
+            self.queue.push(p);
+            self.qi = self.queue.len() - 1;
+            self.juke.playing = false;
+            self.audio.stop();
+            self.world.spawn_reward(22.0);
+            self.screen = Screen::Play;
+            self.phase = Phase::Intermission(0.0);
+        }
+    }
+
     fn begin_song(&mut self, loaded: Loaded) {
-        let start = if self.qi == 0 { self.args.start.max(0.0) } else { 0.0 };
-        self.world.begin_song(loaded.level.active_secs, self.qi as u32, loaded.level.seed);
+        // Endless runs always have the next track queued, so it is analysed while this one plays.
+        if self.endless && self.qi + 1 >= self.queue.len() {
+            if let Some(p) = self.next_library_track() {
+                self.queue.push(p);
+            }
+        }
+        let mut start = if self.qi == 0 { self.args.start.max(0.0) } else { 0.0 };
+        let mut end_t = f32::MAX;
+        let mut active = loaded.level.active_secs;
+        if self.setup_mode == MODE_RUSH {
+            // DROP RUSH: the first drop, or failing that the most intense section, with a
+            // short run-up.
+            let secs = &loaded.an.sections;
+            let pick = secs.iter().skip(1).find(|s| s.kind == SectionKind::Drop).or_else(|| {
+                secs.iter().skip(1).max_by(|a, b| a.intensity.partial_cmp(&b.intensity).unwrap_or(std::cmp::Ordering::Equal))
+            });
+            if let Some(s) = pick {
+                start = (s.t0 - 4.0).max(0.0);
+                end_t = s.t1;
+                active = (end_t - start).max(8.0);
+            }
+        }
+        self.world.begin_song(active, self.qi as u32, loaded.level.seed);
+        self.world.gun = loaded.level.gun.clone();
+        if !self.world.pacifist {
+            self.world.set_phases(&loaded.level.phases);
+        }
+        self.world.mood = loaded.level.mood;
+        if self.qi > 0 {
+            let title = loaded.track.name.clone();
+            self.world.announce_depth(&title);
+        }
         self.world.beat_len = if loaded.level.bpm > 1.0 { 60.0 / loaded.level.bpm } else { 0.5 };
         let timeline = Arc::new(Timeline::from_analysis(&loaded.an));
-        let mut song = Song { track: loaded.track, an: loaded.an, level: loaded.level, timeline, cursor: 0, last_t: start };
+        let mut song = Song { track: loaded.track, an: loaded.an, level: loaded.level, timeline, cursor: 0, last_t: start, end_t };
         if start > 0.0 {
             // Skip what is already in the past, but keep the latest section so the look is right.
             let mut last_section = None;
@@ -932,7 +1485,7 @@ impl App {
                 hud.bpm = song.level.bpm;
                 hud.show_combat = !drift;
                 hud.timeline = Some(song.timeline.clone());
-                let finished = self.world.ended || (self.audio.finished() && t >= dur - 0.3);
+                let finished = self.world.ended || (self.audio.finished() && t >= dur - 0.3) || t >= song.end_t;
                 if self.world.dead {
                     self.phase = Phase::Dying(0.0);
                     self.audio.set_volume(if self.args.mute { 0.0 } else { self.volume * 0.35 });
@@ -945,7 +1498,7 @@ impl App {
                     self.qi += 1;
                     self.song = None;
                     if self.qi < self.queue.len() {
-                        self.world.spawn_orbs(22.0);
+                        self.world.spawn_reward(22.0);
                         self.phase = Phase::Intermission(0.0);
                     } else {
                         self.screen = Screen::Results;
@@ -994,6 +1547,32 @@ impl App {
                 (0.0, hud, 0.0)
             }
         }
+    }
+
+    /// While live mode is paused: keep the analyser's clock in step with the capture, but throw
+    /// away everything it hears.
+    fn live_discard(&mut self) {
+        let Some(live) = self.live.as_mut() else { return };
+        live.buf.clear();
+        self.audio.live_take(&mut live.buf);
+        if let Some(an) = live.an.as_mut() {
+            live.out.feats.clear();
+            live.out.onsets.clear();
+            an.push(&live.buf, &mut live.out);
+        }
+        live.pending.clear();
+    }
+
+    /// Leave the live-mode pause: nothing heard during it may fire.
+    fn live_resume(&mut self) {
+        let clock = self.audio.live_time() as f32;
+        let Some(live) = self.live.as_mut() else { return };
+        live.pending.clear();
+        live.feats.clear();
+        live.last_clock = live.last_clock.max(clock);
+        live.last_beat_t = live.last_beat_t.max(clock - live.period);
+        live.silent_for = 0.0;
+        live.gen.resume();
     }
 
     fn step_live(&mut self, dt: f32, input: &Input) -> (f32, HudInfo, f32) {
@@ -1123,6 +1702,22 @@ impl App {
         }
         let intensity = live.gen.intensity;
         // Prefer the analyser's tempo tracker once it is confident; until then follow the kicks.
+        // Reactive mode has no look-ahead, so a pulse fired on a kick as it is heard gets no
+        // warning. With a confident beat the next one can be predicted: announce its pulse a
+        // full warning ahead, and stop reacting to kicks.
+        let predict = !info.delayed && live_beat.conf > 0.4 && live_beat.period > 0.2;
+        live.gen.predicted = predict;
+        if predict && !idle_now {
+            let per = live_beat.period;
+            let next = live_beat.phase_t + ((clock - live_beat.phase_t) / per).ceil() * per;
+            let lead = level::pulse_lead(per, live.gen_diff);
+            if next - clock <= lead + 0.04 && next > live.last_pred + 0.5 * per {
+                live.last_pred = next;
+                let mut ahead: Vec<LevelEvent> = Vec::new();
+                live.gen.on_predicted_beat(next, &mut ahead);
+                live.pending.extend(ahead);
+            }
+        }
         let live_bp = if live_beat.conf > 0.4 && live_beat.period > 0.2 {
             live.period = live_beat.period;
             live.gen.beat_len = live.period;
@@ -1224,7 +1819,44 @@ struct LanMatch {
     wall0: f64,
 }
 
+/// Name of the inbound firewall rule Heartline offers to add for LAN Rally.
+const FIREWALL_RULE: &str = "Heartline LAN Rally";
+
+/// Ask Windows (read-only, no elevation) whether the Heartline firewall rule exists. The answer
+/// arrives on the channel after `delay` seconds plus however long `netsh` takes.
+fn firewall_check(delay: f32) -> Receiver<bool> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs_f32(delay));
+        let ok = std::process::Command::new("netsh")
+            .args(["advfirewall", "firewall", "show", "rule", &format!("name={FIREWALL_RULE}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let _ = tx.send(ok);
+    });
+    rx
+}
+
+/// Ask Windows to add an inbound allow rule for this exe on Private networks. This starts an
+/// elevated `netsh`, so Windows shows its administrator prompt and nothing changes unless the
+/// player approves it there. Only ever called from the button on the LAN screen.
+fn firewall_allow() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let rule = format!(
+        "advfirewall firewall add rule name=\"{FIREWALL_RULE}\" dir=in action=allow program=\"{}\" profile=private enable=yes",
+        exe.display()
+    );
+    let ps = format!("Start-Process netsh -Verb RunAs -WindowStyle Hidden -ArgumentList '{}'", rule.replace('\'', "''"));
+    let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &ps]).spawn();
+}
+
 struct Lan {
+    /// Pending answer of `firewall_check`, and the last answer.
+    firewall: Option<Receiver<bool>>,
+    firewall_ok: Option<bool>,
     host: bool,
     stage: LanStage,
     net: Option<net::Net>,
@@ -1265,6 +1897,9 @@ struct Lan {
 impl Lan {
     fn new(log_dir: Option<&Path>) -> Lan {
         Lan {
+            // Automated runs skip the firewall question.
+            firewall: if log_dir.is_none() { Some(firewall_check(0.0)) } else { None },
+            firewall_ok: if log_dir.is_none() { None } else { Some(true) },
             local: false,
             host: false,
             stage: LanStage::Choose,
@@ -1644,7 +2279,9 @@ impl App {
     fn lan_begin(&mut self, lan: &mut Lan, start_local: f64, seed: u64, chars: [u8; 2]) {
         let Some((_, l)) = &lan.loaded else { return };
         let ch = |i: u8| Character::from_index(i).unwrap_or(Character::Sub);
-        let rally = Rally::new(seed, [ch(chars[0]), ch(chars[1])]);
+        let mut rally = Rally::new(seed, [ch(chars[0]), ch(chars[1])]);
+        // The practice bot is as sharp as the chosen difficulty tier.
+        rally.bot_miss = [0.40, 0.32, 0.22, 0.16, 0.11, 0.07, 0.04][self.diff.min(6)];
         let an = l.an.clone();
         let bars: Vec<f32> = if an.beats.is_empty() { Vec::new() } else { an.beats[an.downbeat.min(an.beats.len() - 1)..].iter().step_by(4).copied().collect() };
         let beat_len = if l.level.bpm > 1.0 { 60.0 / l.level.bpm } else { 0.5 };
@@ -1929,9 +2566,32 @@ impl App {
                 ];
                 let act = menu_list(&items, &mut lan.sel, x, 260.0 * u, u, &self.rend, &self.audio);
                 let fy = sh - 150.0 * u;
-                text_left("The first time you host, Windows Firewall asks whether Heartline may use the network.", x, fy, 22.0 * u, pal.accent);
-                text_left("Allow it on Private networks. Heartline never changes firewall settings itself.", x, fy + 28.0 * u, 22.0 * u, soft);
-                text_left("Both PCs must be on the same network. Ports: TCP 47820 (game), UDP 47821 (finding hosts).", x, fy + 56.0 * u, 22.0 * u, soft);
+                // Hosting needs an inbound firewall rule. Heartline only adds one when asked to
+                // here, and Windows shows its own permission prompt before anything changes.
+                let fw = lan.firewall.as_ref().and_then(|rx| rx.try_recv().ok());
+                if let Some(ok) = fw {
+                    lan.firewall_ok = Some(ok);
+                    lan.firewall = None;
+                }
+                let (fmsg, fcol) = match lan.firewall_ok {
+                    Some(true) => ("Windows Firewall: Heartline is allowed on private networks.", pal.primary),
+                    Some(false) => ("Windows Firewall: no rule for Heartline yet, so other PCs cannot reach a match you host.", pal.accent),
+                    None => ("Windows Firewall: checking...", soft),
+                };
+                text_left(fmsg, x, fy - 62.0 * u, 22.0 * u, fcol);
+                if lan.firewall_ok == Some(false) {
+                    let (hv, click) = ui::button(x, fy - 48.0 * u, 470.0 * u, 44.0 * u, None, "ALLOW HEARTLINE (Windows will ask)", false, false, u, &pal);
+                    if hv {
+                        text_left("Adds one inbound rule for this exe on Private networks. Windows asks for administrator approval first.", x + 490.0 * u, fy - 20.0 * u, 20.0 * u, soft);
+                    }
+                    if click {
+                        firewall_allow();
+                        lan.firewall_ok = None;
+                        lan.firewall = Some(firewall_check(3.0));
+                    }
+                }
+                text_left("Both PCs must be on the same network. Ports: TCP 47820 (game), UDP 47821 (finding hosts).", x, fy + 28.0 * u, 22.0 * u, soft);
+                text_left("If hosts are not found, type the host's IP on the JOIN screen.", x, fy + 56.0 * u, 22.0 * u, soft);
                 match act {
                     Some(0) => self.lan_start_host(&mut lan, None),
                     Some(1) => {
@@ -2194,6 +2854,12 @@ fn lan_to_lobby(lan: &mut Lan, ready: bool) {
 
 /// Draws a vertical list of buttons. Returns the index that was activated (click / Enter).
 fn menu_list(items: &[String], sel: &mut usize, x: f32, y: f32, u: f32, rend: &Renderer, audio: &Audio) -> Option<usize> {
+    let ys: Vec<f32> = (0..items.len()).map(|i| y + i as f32 * 54.0 * u).collect();
+    menu_list_at(items, &ys, sel, x, u, rend, audio)
+}
+
+/// A vertical list of buttons with the top of every row given in `ys` (lets rows sit in groups).
+fn menu_list_at(items: &[String], ys: &[f32], sel: &mut usize, x: f32, u: f32, rend: &Renderer, audio: &Audio) -> Option<usize> {
     let before = *sel;
     let (mx, my) = mouse_position();
     let h = 46.0 * u;
@@ -2206,7 +2872,7 @@ fn menu_list(items: &[String], sel: &mut usize, x: f32, y: f32, u: f32, rend: &R
         *sel = (*sel + items.len() - 1) % items.len();
     }
     for (i, it) in items.iter().enumerate() {
-        let by = y + i as f32 * (h + 8.0 * u);
+        let by = ys[i];
         let hover = mx >= x && mx <= x + w && my >= by && my <= by + h;
         if hover && mouse_delta_position() != Vec2::ZERO {
             *sel = i;
@@ -2248,6 +2914,7 @@ async fn run(args: Args) {
         screen: Screen::Menu,
         phase: Phase::Loading,
         queue: Vec::new(),
+        endless: false,
         qi: 0,
         loader: None,
         ready: None,
@@ -2260,11 +2927,25 @@ async fn run(args: Args) {
         music_gain: MENU_MUSIC_GAIN,
         offset_ms: 0.0,
         music_dir: None,
-        juke: Jukebox { list: Vec::new(), idx: 0, loaded: None, loader: None, cursor: 0, last_t: -1.0, playing: false, fails: 0 },
+        juke_seq: 0,
+        juke: Jukebox { list: Vec::new(), idx: 0, loaded: None, loader: None, cursor: 0, last_t: -1.0, playing: false, fails: 0, played: 0.0 },
         autofire: true,
         fullscreen: false,
         visuals: 0,
         menu_sel: 0,
+        quit_armed: false,
+        runner: None,
+        track_sel: 0,
+        remix: 0,
+        setup_mode: 0,
+        mutators: 0,
+        mut_col: 0,
+        scores: load_scores(),
+        run_key: String::new(),
+        run_saved: false,
+        run_best: false,
+        base_seed: args.seed,
+        setup_col: 0,
         dialog: None,
         dialog_library: false,
         esc_used: false,
@@ -2294,12 +2975,17 @@ async fn run(args: Args) {
     app.offset_ms = getf("offset_ms", 0.0).clamp(-100.0, 300.0);
     app.autofire = getf("autofire", 1.0) > 0.5;
     app.visuals = (getf("visuals", 0.0).max(0.0) as usize).min(VISUALS.len() - 1);
+    app.mutators = (getf("mutators", 0.0).max(0.0) as u32 & 31) as u8;
+    if args.selftest.is_some() {
+        app.setup_mode = args.mode.min(SETUP_MODES.len() - 1);
+        app.mutators = args.mutators & 31;
+    }
     // Borderless fullscreen is remembered between launches (never for bot or sized test runs).
     if args.selftest.is_none() && args.size.is_none() && getf("fullscreen", 0.0) > 0.5 {
         app.fullscreen = true;
         display::set_borderless(true);
     }
-    app.music_dir = cfg.get("music_dir").map(PathBuf::from).filter(|p| p.is_dir()).or_else(|| music_folder().filter(|p| p.is_dir()));
+    app.music_dir = cfg.get("music_dir").map(PathBuf::from).filter(|p| p.is_dir() || is_playlist(p)).or_else(|| music_folder().filter(|p| p.is_dir()));
     app.world = World::new(app.diff(), app.diff == 0);
     app.juke_rescan();
     app.audio.set_volume(if args.mute { 0.0 } else { app.volume });
@@ -2311,6 +2997,14 @@ async fn run(args: Args) {
     if args.screen == "live" {
         app.audio.refresh_devices();
         app.screen = Screen::LiveSetup;
+    } else if args.screen == "setup" {
+        app.screen = Screen::Setup;
+        app.menu_sel = S_START;
+    } else if args.screen == "options" {
+        app.screen = Screen::Options;
+    } else if args.screen == "codex" {
+        app.screen = Screen::Codex;
+        app.menu_sel = args.mode.min(CODEX_TABS.len() - 1);
     } else if args.live {
         // Devices are enumerated on the audio thread; give it a moment.
         for _ in 0..60 {
@@ -2359,9 +3053,17 @@ async fn run(args: Args) {
 
         // ---- dropped files / dialog results ----
         let dropped: Vec<PathBuf> = get_dropped_files().into_iter().filter_map(|f| f.path).collect();
-        if !dropped.is_empty() && matches!(app.screen, Screen::Menu | Screen::Results | Screen::LiveSetup) {
-            let paths = expand_paths(&dropped);
-            app.start_run(paths);
+        if !dropped.is_empty() && matches!(app.screen, Screen::Menu | Screen::Options | Screen::Setup | Screen::Results | Screen::LiveSetup) {
+            let as_library = app.screen == Screen::Menu && app.menu_sel == M_LIBRARY && dropped.len() == 1 && (dropped[0].is_dir() || is_playlist(&dropped[0]));
+            if as_library {
+                app.music_dir = Some(dropped[0].clone());
+                app.juke_rescan();
+                app.save_settings();
+            } else {
+                let paths = expand_paths(&dropped);
+                app.endless = false;
+                app.start_run(paths);
+            }
         }
         let mut picked: Option<Vec<PathBuf>> = None;
         if let Some(rx) = &app.dialog {
@@ -2381,6 +3083,7 @@ async fn run(args: Args) {
                     app.save_settings();
                 }
             } else if !p.is_empty() {
+                app.endless = false;
                 let paths = expand_paths(&p);
                 app.start_run(paths);
             }
@@ -2417,26 +3120,34 @@ async fn run(args: Args) {
                 let pause_key = esc || is_key_pressed(KeyCode::P);
                 if pause_key && app.screen == Screen::Play {
                     app.esc_used = true;
-                    if app.live.is_some() {
-                        if esc {
-                            app.to_menu();
-                        }
-                    } else {
+                    // Live audio cannot be paused at the source: the world freezes and what is
+                    // captured meanwhile is thrown away (`live_discard`).
+                    if app.live.is_none() {
                         app.audio.set_paused(true);
-                        app.screen = Screen::Paused;
-                        app.menu_sel = 0;
-                        app.audio.sfx(Sfx::UiSelect, 0.7, 0.0);
                     }
+                    app.screen = Screen::Paused;
+                    app.menu_sel = 0;
+                    app.quit_armed = false;
+                    app.audio.sfx(Sfx::UiSelect, 0.7, 0.0);
                 }
             }
             Screen::Paused => {
                 idle_target = app.idle;
+                if app.live.is_some() {
+                    app.live_discard();
+                    hud.title = "LIVE AUDIO".into();
+                    hud.show_combat = true;
+                }
                 if let Some(s) = &app.song {
                     hud.title = s.track.name.clone();
                     hud.progress = s.last_t / s.level.duration.max(0.1);
                     hud.show_combat = true;
                     progress = hud.progress;
                 }
+            }
+            Screen::Runner => {
+                idle_target = 1.0;
+                progress = app.step_highway(dt);
             }
             _ => {
                 // Menu-like screens: drift mode with the menu music; the player can still fly around.
@@ -2462,6 +3173,20 @@ async fn run(args: Args) {
         }
 
         // ---- draw ----
+        if app.args.screen == "highway" && app.screen == Screen::Menu && app.juke.loaded.as_ref().is_some_and(|(p, _)| Some(p) == app.juke.list.get(app.juke.idx)) {
+            app.args.screen.clear();
+            app.start_highway();
+        }
+        if let Some((scene, weather, floor, prop)) = app.args.mood {
+            app.world.mood = level::Mood { scene, weather, floor, prop };
+        }
+        if app.args.purgatory && app.screen == Screen::Play {
+            app.world.purgatory = true;
+            app.world.purg_until = app.world.t + 4.5;
+        }
+        if let Some((scene, weather, floor, prop)) = app.args.mood_to.filter(|_| app.wall > 3.0) {
+            app.world.mood = level::Mood { scene, weather, floor, prop };
+        }
         app.rend.set_palette(app.world.palette);
         if lan_match && app.lan.as_ref().is_some_and(|l| l.in_match()) {
             // Rally draws its own field and score HUD over the music-reactive scene.
@@ -2471,11 +3196,15 @@ async fn run(args: Args) {
             // Menu-like screens: no player or Heart in the vista, and the music sits lower than in a run.
             let in_run = matches!(app.screen, Screen::Play | Screen::Paused);
             app.rend.menu = !in_run;
-            let duck_to = if in_run { if matches!(app.phase, Phase::Dying(_)) { 0.35 } else { 1.0 } } else { MENU_MUSIC_GAIN };
+            let duck_to = if in_run { if matches!(app.phase, Phase::Dying(_)) { 0.35 } else { 1.0 } } else if app.screen == Screen::Runner { 1.0 } else { MENU_MUSIC_GAIN };
             app.music_gain += (duck_to - app.music_gain).clamp(-1.5 * dt, 1.5 * dt);
             app.audio.set_volume(if app.args.mute { 0.0 } else { app.volume * app.music_gain });
-            app.rend.draw_scene(&app.world, dt, app.idle, progress);
-            app.rend.draw_hud(&app.world, &hud, app.idle);
+            if let (Screen::Runner, Some(s)) = (app.screen, app.runner.as_ref()) {
+                app.rend.draw_runner(&s.r, &app.world, dt, progress);
+            } else {
+                app.rend.draw_scene(&app.world, dt, app.idle, progress);
+                app.rend.draw_hud(&app.world, &hud, app.idle);
+            }
         }
         let pal = app.rend.pal;
         let (sw, sh) = (screen_width(), screen_height());
@@ -2492,160 +3221,385 @@ async fn run(args: Args) {
                     .unwrap_or("none")
                     .to_string();
                 let n_lib = app.juke.list.len().saturating_sub(synth::THEME_COUNT);
-                let items = vec![
-                    "PLAY THIS TRACK".to_string(),
-                    "SHUFFLE RUN   (5 tracks)".to_string(),
-                    "PLAY FILES...".to_string(),
-                    "PLAY FOLDER...".to_string(),
-                    format!("MUSIC LIBRARY   {lib_name}  ({n_lib} tracks)"),
-                    "LIVE AUDIO   (what your PC is playing)".to_string(),
-                    "LAN RALLY   (two PCs, same network)".to_string(),
-                    format!("DIFFICULTY   {}", DIFFS[app.diff].1),
-                    "MUSIC VOLUME".to_string(),
-                    "EFFECTS VOLUME".to_string(),
-                    format!("SYNC OFFSET   {:+.0} ms", app.offset_ms),
-                    format!("VISUALS   {}", VISUALS[app.visuals].1),
-                    format!("DISPLAY   {}", if app.fullscreen { "BORDERLESS FULLSCREEN" } else { "WINDOWED" }),
-                    "QUIT".to_string(),
-                ];
-                let act = if app.dialog.is_none() { menu_list(&items, &mut app.menu_sel, 110.0 * u, 256.0 * u, u, &app.rend, &app.audio) } else { None };
-                // Volume rows are sliders: drag with the mouse, or Left / Right.
-                let act = match act {
-                    Some(8) | Some(9) => None,
-                    a => a,
-                };
-                let mut slid = false;
-                for (row, is_sfx) in [(8usize, false), (9usize, true)] {
-                    let by = 256.0 * u + row as f32 * 54.0 * u;
-                    let (tx, tw) = (110.0 * u + 262.0 * u, 176.0 * u);
-                    let ty = by + 23.0 * u;
-                    let v = if is_sfx { app.sfx_volume } else { app.volume };
-                    let on = app.menu_sel == row;
-                    let col = if on { pal.accent } else { pal.primary };
-                    draw_rectangle(tx, ty - 1.5 * u, tw, 3.0 * u, Color::new(1.0, 1.0, 1.0, 0.22));
-                    draw_rectangle(tx, ty - 1.5 * u, tw * v, 3.0 * u, col);
-                    draw_circle(tx + tw * v, ty, if on { 8.0 } else { 6.0 } * u, WHITE);
-                    draw_circle_lines(tx + tw * v, ty, if on { 11.0 } else { 9.0 } * u, 1.5 * u, col);
-                    text_left(&format!("{:.0}%", v * 100.0), tx + tw + 20.0 * u, by + 31.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85));
-                    let (mx, my) = mouse_position();
-                    if app.dialog.is_none() && is_mouse_button_down(MouseButton::Left) && my >= by && my <= by + 46.0 * u && mx >= tx - 14.0 * u && mx <= tx + tw + 14.0 * u {
-                        let nv = (((mx - tx) / tw).clamp(0.0, 1.0) * 20.0).round() / 20.0;
-                        if (nv - v).abs() > 0.001 {
-                            if is_sfx { app.sfx_volume = nv } else { app.volume = nv }
-                            app.menu_sel = row;
-                            slid = true;
-                        }
-                    }
+                let mut tip = ui::Tip::default();
+                let items: Vec<(Icon, String)> = MENU_ROWS
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (r.0, if i == M_LIBRARY { format!("{}   {lib_name}  ({n_lib})", r.1) } else { r.1.to_string() }))
+                    .collect();
+                let x = 110.0 * u;
+                let ys: Vec<f32> = (0..items.len()).map(|i| 300.0 * u + i as f32 * 68.0 * u).collect();
+                app.menu_sel = app.menu_sel.min(items.len() - 1);
+                let before = app.menu_sel;
+                let (act, hov) = if app.dialog.is_none() { ui::icon_list(&items, &ys, &mut app.menu_sel, x, 520.0 * u, 58.0 * u, u, &pal, app.rend.time) } else { (None, None) };
+                if act.is_some() {
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                } else if app.menu_sel != before {
+                    app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
                 }
-                // left/right adjusts the selected row; on the play rows it changes the track
-                let dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
-                let track_dirk = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32 + if app.menu_sel <= 1 { dirk } else { 0 };
+                let shown = hov.unwrap_or(app.menu_sel);
+                tip.set(MENU_ROWS[shown].1, MENU_ROWS[shown].2, hov.is_some());
+                let track_dirk = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32;
                 if track_dirk != 0 && app.dialog.is_none() {
                     app.juke_next(track_dirk);
                 }
-                let mut changed = slid;
-                if dirk != 0 {
-                    changed = true;
-                    match app.menu_sel {
-                        7 => app.diff = ((app.diff as i32 + dirk).rem_euclid(DIFFS.len() as i32)) as usize,
-                        8 => app.volume = (app.volume + 0.1 * dirk as f32).clamp(0.0, 1.0),
-                        9 => app.sfx_volume = (app.sfx_volume + 0.1 * dirk as f32).clamp(0.0, 1.0),
-                        10 => app.offset_ms = (app.offset_ms + 10.0 * dirk as f32).clamp(-100.0, 300.0),
-                        11 => app.visuals = ((app.visuals as i32 + dirk).rem_euclid(VISUALS.len() as i32)) as usize,
-                        _ => changed = false,
-                    }
-                }
                 match act {
-                    Some(0) => app.start_from_juke(0),
-                    Some(1) => app.start_from_juke(4),
-                    Some(2) => {
-                        let (tx, rx) = channel();
-                        std::thread::spawn(move || {
-                            let exts: Vec<&str> = decode::AUDIO_EXTS.to_vec();
-                            let r = rfd::FileDialog::new().set_title("Heartline - choose songs").add_filter("Audio", &exts).pick_files();
-                            let _ = tx.send(r.unwrap_or_default());
-                        });
-                        app.dialog = Some(rx);
-                        app.dialog_library = false;
+                    Some(M_PLAY) => {
+                        app.screen = Screen::Setup;
+                        app.menu_sel = S_START;
                     }
-                    Some(3) | Some(4) => {
-                        let library = act == Some(4);
-                        let (tx, rx) = channel();
-                        let start_dir = app.music_dir.clone();
-                        std::thread::spawn(move || {
-                            let mut d = rfd::FileDialog::new().set_title(if library { "Heartline - choose your music library folder" } else { "Heartline - choose a music folder to play" });
-                            if let Some(sd) = start_dir {
-                                d = d.set_directory(sd);
-                            }
-                            let _ = tx.send(d.pick_folder().map(|p| vec![p]).unwrap_or_default());
-                        });
-                        app.dialog = Some(rx);
-                        app.dialog_library = library;
-                    }
-                    Some(5) => {
-                        app.audio.refresh_devices();
-                        app.screen = Screen::LiveSetup;
+                    Some(M_HIGHWAY) => app.start_highway(),
+                    Some(M_CODEX) => {
+                        app.screen = Screen::Codex;
                         app.menu_sel = 0;
                     }
-                    Some(6) => app.lan_open(),
-                    Some(7) => {
-                        app.diff = (app.diff + 1) % DIFFS.len();
-                        changed = true;
+                    Some(M_LAN) => app.lan_open(),
+                    Some(M_LIBRARY) => {
+                        // SHIFT + ENTER picks an .m3u playlist instead of a folder.
+                        let playlist = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+                        app.open_folder_dialog(true, playlist);
                     }
-                    Some(8) => {
-                        app.volume = if app.volume >= 0.99 { 0.0 } else { (app.volume + 0.1).min(1.0) };
-                        changed = true;
+                    Some(M_OPTIONS) => {
+                        app.screen = Screen::Options;
+                        app.menu_sel = 0;
                     }
-                    Some(9) => {
-                        app.sfx_volume = if app.sfx_volume >= 0.99 { 0.0 } else { (app.sfx_volume + 0.1).min(1.0) };
-                        changed = true;
-                    }
-                    Some(10) => {
-                        app.offset_ms = if app.offset_ms >= 295.0 { -100.0 } else { app.offset_ms + 10.0 };
-                        changed = true;
-                    }
-                    Some(11) => {
-                        app.visuals = (app.visuals + 1) % VISUALS.len();
-                        changed = true;
-                    }
-                    Some(12) => {
-                        app.fullscreen = !app.fullscreen;
-                        display::set_borderless(app.fullscreen);
-                        changed = true;
-                    }
-                    Some(13) => break,
+                    Some(M_QUIT) => break,
                     _ => {}
                 }
+                let (title, hint) = app.juke_title();
+                app.rend.draw_now_playing(sw - 700.0 * u, 110.0 * u, 590.0 * u, u, &app.world, &title, &hint, progress);
+                let hy = sh - 60.0 * u;
+                text_shadow("WASD move   mouse aim   SPACE dash   F auto-fire   ESC / P pause   F11 fullscreen", 110.0 * u, hy + 28.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.55), -1);
+                tip.draw(110.0 * u, hy, u, &pal);
+                if app.dialog.is_some() {
+                    text_shadow("waiting for the file dialog...", sw * 0.5, sh * 0.5, 28.0 * u, pal.accent, 0);
+                }
+            }
+            Screen::Setup => {
+                dim(0.62);
+                let x = 110.0 * u;
+                let w = 760.0 * u;
+                render::vtext("RUN SETUP", x, 130.0 * u, 64.0 * u, WHITE, -1);
+                let mut tip = ui::Tip::default();
+                let busy = app.dialog.is_some();
+                let nd = DIFFS.len();
+                let mut dirk = 0i32;
+                if !busy {
+                    let dv = is_key_pressed(KeyCode::Down) as i32 - is_key_pressed(KeyCode::Up) as i32;
+                    if dv != 0 {
+                        app.menu_sel = (app.menu_sel as i32 + dv).rem_euclid(6) as usize;
+                        app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
+                    }
+                    dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
+                }
+                let row = app.menu_sel.min(S_OTHER);
+                let mut changed = false;
+                let mut pick = false;
+
+                // ---- mode: both choices stay visible ----
+                ui::heading("MODE", x, 212.0 * u, u, &pal);
+                let modes: Vec<(Option<Icon>, &str)> = SETUP_MODES.iter().map(|m| (Some(m.0), m.1)).collect();
+                let cur = app.setup_mode.min(SETUP_MODES.len() - 1);
+                let (click, hov) = ui::segments(x, 224.0 * u, w, 62.0 * u, &modes, cur, row == S_MODE, u, &pal);
+                if let Some(i) = hov {
+                    tip.set(SETUP_MODES[i].1, SETUP_MODES[i].2, true);
+                } else if row == S_MODE {
+                    tip.set(SETUP_MODES[cur].1, SETUP_MODES[cur].2, false);
+                }
+                if let Some(i) = click.filter(|_| !busy) {
+                    app.setup_mode = i;
+                    app.menu_sel = S_MODE;
+                    pick = true;
+                }
+                if row == S_MODE && dirk != 0 {
+                    app.setup_mode = (cur as i32 + dirk).rem_euclid(SETUP_MODES.len() as i32) as usize;
+                    pick = true;
+                }
+
+                // ---- difficulty: one tile per tier, the hovered or chosen one is described ----
+                ui::heading("DIFFICULTY", x, 334.0 * u, u, &pal);
+                let gap = 12.0 * u;
+                let ts = (w - gap * (nd as f32 - 1.0)) / nd as f32;
+                let ty = 346.0 * u;
+                let mut shown = app.diff;
+                for i in 0..nd {
+                    let (hv, click) = ui::diff_tile(x + i as f32 * (ts + gap), ty, ts, i, nd, i == app.diff, row == S_DIFF, u, &pal);
+                    if hv {
+                        shown = i;
+                        tip.set(DIFFS[i].1, DIFFS[i].2, true);
+                    }
+                    if click && !busy {
+                        app.diff = i;
+                        app.menu_sel = S_DIFF;
+                        changed = true;
+                        pick = true;
+                    }
+                }
+                if row == S_DIFF && dirk != 0 {
+                    app.diff = (app.diff as i32 + dirk).rem_euclid(nd as i32) as usize;
+                    shown = app.diff;
+                    changed = true;
+                    pick = true;
+                }
+                let dcol = ui::diff_color(shown, nd, &pal);
+                text_left(DIFFS[shown].1, x, ty + ts + 44.0 * u, 34.0 * u, dcol);
+                text_left(&format!("{} / {}", shown + 1, nd), x + text_w(DIFFS[shown].1, 34.0 * u) + 18.0 * u, ty + ts + 44.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
+                text_left(DIFFS[shown].2, x, ty + ts + 74.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85));
+                if row == S_DIFF {
+                    tip.set(DIFFS[app.diff].1, DIFFS[app.diff].2, false);
+                }
+
+                // ---- mutators: optional rules, each worth more score ----
+                ui::heading("MUTATORS", x, 560.0 * u, u, &pal);
+                let nm = game::MODS.len();
+                let mw = (w - gap * (nm as f32 - 1.0)) / nm as f32;
+                if row == S_MUT && dirk != 0 {
+                    app.mut_col = (app.mut_col as i32 + dirk).rem_euclid(nm as i32) as usize;
+                    pick = true;
+                }
+                let mut toggle: Option<usize> = None;
+                for (i, m) in game::MODS.iter().enumerate() {
+                    let on = app.mutators >> i & 1 == 1;
+                    let focus = row == S_MUT && app.mut_col == i;
+                    let (hv, click) = ui::button(x + i as f32 * (mw + gap), 572.0 * u, mw, 50.0 * u, None, m.0, focus, on, u, &pal);
+                    if hv || focus {
+                        tip.set(m.0, &format!("{}. +{:.0}% score. {}", m.1, game::MUTATOR_SCORE * 100.0, if on { "ON" } else { "off" }), hv);
+                    }
+                    if click && !busy {
+                        toggle = Some(i);
+                        app.menu_sel = S_MUT;
+                        app.mut_col = i;
+                    }
+                }
+
+                // ---- starting track ----
+                let ky = 674.0 * u;
+                ui::heading("STARTING TRACK", x, ky - 12.0 * u, u, &pal);
+                let (title, _) = app.juke_title();
+                let bw = 58.0 * u;
+                let (hl, cl) = ui::button(x, ky, bw, 56.0 * u, None, "<", false, false, u, &pal);
+                let (hr, cr) = ui::button(x + w - bw, ky, bw, 56.0 * u, None, ">", false, false, u, &pal);
+                let hm = ui::hover(x + bw, ky, w - 2.0 * bw, 56.0 * u);
+                // the title opens the whole library as a list
+                if !busy && ((hm && is_mouse_button_pressed(MouseButton::Left)) || is_key_pressed(KeyCode::T)) {
+                    app.track_sel = app.juke.idx;
+                    // drop the key that opened the list so it does not count as a letter jump
+                    while get_char_pressed().is_some() {}
+                    app.screen = Screen::Tracks;
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                }
+                draw_rectangle(x + bw + 8.0 * u, ky, w - 2.0 * bw - 16.0 * u, 56.0 * u, Color::new(0.0, 0.0, 0.05, 0.5));
+                if row == S_TRACK {
+                    draw_rectangle(x - 10.0 * u, ky, 3.0 * u, 56.0 * u, pal.accent);
+                }
+                text_center(&title, x + w * 0.5, ky + 37.0 * u, 26.0 * u, WHITE);
+                let mut track_dirk = is_key_pressed(KeyCode::E) as i32 - is_key_pressed(KeyCode::Q) as i32;
+                if row == S_TRACK {
+                    track_dirk += dirk;
+                }
+                if !busy {
+                    track_dirk += cr as i32 - cl as i32;
+                }
+                if track_dirk != 0 && !busy {
+                    app.juke_next(track_dirk.signum());
+                    if cl || cr {
+                        app.menu_sel = S_TRACK;
+                    }
+                }
+                // remix: the same song, dealt differently
+                let (hx, cx2) = ui::button(x + w + 14.0 * u, ky, 190.0 * u, 56.0 * u, None, &format!("REMIX {}", app.remix), false, app.remix > 0, u, &pal);
+                let rkey = !busy && is_key_pressed(KeyCode::R);
+                if (cx2 && !busy) || rkey {
+                    let back = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift) || is_mouse_button_down(MouseButton::Right);
+                    app.remix = if back { 0 } else { (app.remix + 1) % 100 };
+                    pick = true;
+                }
+                if hx {
+                    tip.set("REMIX", "The same song, dealt differently: other patterns, enemies and upgrade offers on the same beats. R or click for the next one, SHIFT+R back to the song's own. Scores share one best.", true);
+                }
+                if hl || hr || hm || row == S_TRACK {
+                    tip.set("STARTING TRACK", "The song the run starts on: the one the menu is playing. Q / E or the arrows step through your library; click the title or press T for the whole list.", hl || hr || hm);
+                }
+
+                // ---- start ----
+                let (hs, cs) = ui::button(x, 766.0 * u, 320.0 * u, 68.0 * u, Some(Icon::Play), "START", row == S_START, true, u, &pal);
+                // what the run is worth, and the best so far for this track, tier and mode
+                let key = app.score_key(&app.juke.list.get(app.juke.idx).map(|p| track_title(p)).unwrap_or_default());
+                let best = app.scores.get(&key).copied();
+                text_left(&format!("SCORE  x{:.2}", app.score_mult()), x + 350.0 * u, 792.0 * u, 26.0 * u, pal.accent);
+                let best_s = match best {
+                    Some((s, d)) => format!("BEST  {s}   (depth {d})"),
+                    None => "no best yet for this track, tier and mode".to_string(),
+                };
+                text_left(&best_s, x + 350.0 * u, 824.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.75));
+                if hs || row == S_START {
+                    tip.set("START", SETUP_MODES[cur].2, hs);
+                }
+                text_left("ENTER  start        ESC  back", x + 560.0 * u, 792.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
+
+                // ---- other things to play ----
+                ui::heading("OR PLAY SOMETHING ELSE", x, 880.0 * u, u, &pal);
+                let ow = (w - 2.0 * gap) / 3.0;
+                let mut other: Option<usize> = None;
+                if row == S_OTHER && dirk != 0 {
+                    app.setup_col = (app.setup_col as i32 + dirk).rem_euclid(3) as usize;
+                    pick = true;
+                }
+                for (i, o) in SETUP_OTHER.iter().enumerate() {
+                    let focus = row == S_OTHER && app.setup_col == i;
+                    let (hv, click) = ui::button(x + i as f32 * (ow + gap), 892.0 * u, ow, 54.0 * u, Some(o.0), o.1, focus, false, u, &pal);
+                    if hv || focus {
+                        tip.set(o.1, o.2, hv);
+                    }
+                    if click && !busy {
+                        other = Some(i);
+                    }
+                }
+                let enter = !busy && (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter));
+                if enter && row == S_OTHER {
+                    other = Some(app.setup_col);
+                }
+                if enter && row == S_MUT {
+                    toggle = Some(app.mut_col);
+                }
+                if let Some(i) = toggle {
+                    app.mutators ^= 1 << i;
+                    changed = true;
+                    pick = true;
+                }
+                let start = (cs && !busy) || (enter && row != S_OTHER && row != S_MUT);
+                if pick {
+                    app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
+                }
+                if changed {
+                    app.save_settings();
+                }
+                if start {
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                    let endless = app.setup_mode != 1;
+                    // DAILY SEED: days since 1970-01-01 (UTC) seeds the levels and the offers.
+                    app.args.seed = if app.setup_mode == MODE_DAILY {
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 86_400).unwrap_or(0)
+                    } else {
+                        app.base_seed.wrapping_add(app.remix.wrapping_mul(0x9E37_79B9))
+                    };
+                    app.start_from_juke(0, endless);
+                } else if let Some(i) = other {
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                    match i {
+                        0 => app.open_files_dialog(),
+                        1 => app.open_folder_dialog(false, false),
+                        _ => {
+                            app.audio.refresh_devices();
+                            app.screen = Screen::LiveSetup;
+                            app.menu_sel = 0;
+                        }
+                    }
+                } else if is_key_pressed(KeyCode::Escape) && !busy {
+                    app.screen = Screen::Menu;
+                    app.menu_sel = M_PLAY;
+                }
+                tip.draw(x, sh - 60.0 * u, u, &pal);
+                if busy {
+                    text_shadow("waiting for the file dialog...", sw * 0.5, sh * 0.5, 28.0 * u, pal.accent, 0);
+                }
+            }
+            Screen::Options => {
+                dim(0.5);
+                let x = 110.0 * u;
+                render::vtext("OPTIONS", x, 130.0 * u, 64.0 * u, WHITE, -1);
+                let mut tip = ui::Tip::default();
+                let dv = is_key_pressed(KeyCode::Down) as i32 - is_key_pressed(KeyCode::Up) as i32;
+                if dv != 0 {
+                    app.menu_sel = (app.menu_sel as i32 + dv).rem_euclid(O_BACK as i32 + 1) as usize;
+                    app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
+                }
+                let dirk = is_key_pressed(KeyCode::Right) as i32 - is_key_pressed(KeyCode::Left) as i32;
+                let (cx, cw, rh) = (x + 330.0 * u, 430.0 * u, 56.0 * u);
+                let mut changed = false;
+                let old_sfx = app.sfx_volume;
+                for (r, row) in OPTION_ROWS.iter().enumerate() {
+                    let y = 250.0 * u + r as f32 * 74.0 * u;
+                    let hv = ui::hover(x, y, 330.0 * u + cw + 110.0 * u, rh);
+                    if hv && mouse_delta_position() != Vec2::ZERO {
+                        app.menu_sel = r;
+                    }
+                    let focus = app.menu_sel == r;
+                    let col = if focus { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.72) };
+                    ui::icon(row.0, x + 26.0 * u, y + rh * 0.5, 15.0 * u, if focus { pal.accent } else { col });
+                    text_left(row.1, x + 60.0 * u, y + rh * 0.5 + 9.0 * u, 26.0 * u, col);
+                    if hv || focus {
+                        tip.set(row.1, row.2, hv);
+                    }
+                    let k = if focus { dirk } else { 0 };
+                    let note = |s: &str| text_left(s, cx + cw + 22.0 * u, y + rh * 0.5 + 8.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85));
+                    match r {
+                        O_MUSIC | O_SFX => {
+                            let v = if r == O_SFX { app.sfx_volume } else { app.volume };
+                            let mut nv = (v + 0.1 * k as f32).clamp(0.0, 1.0);
+                            if let Some(d) = ui::slider(cx, y, cw, rh, v, focus, u, &pal) {
+                                nv = (d * 20.0).round() / 20.0;
+                            }
+                            if (nv - v).abs() > 0.001 {
+                                if r == O_SFX { app.sfx_volume = nv } else { app.volume = nv }
+                                changed = true;
+                            }
+                            note(&format!("{:.0}%", nv * 100.0));
+                        }
+                        O_SYNC => {
+                            let v = app.offset_ms;
+                            let mut nv = (v + 10.0 * k as f32).clamp(-100.0, 300.0);
+                            if let Some(d) = ui::slider(cx, y, cw, rh, (v + 100.0) / 400.0, focus, u, &pal) {
+                                nv = ((d * 400.0 - 100.0) / 10.0).round() * 10.0;
+                            }
+                            if (nv - v).abs() > 0.5 {
+                                app.offset_ms = nv;
+                                changed = true;
+                            }
+                            note(&format!("{:+.0} ms", nv));
+                        }
+                        O_VISUALS => {
+                            let labels: Vec<(Option<Icon>, &str)> = VISUALS.iter().map(|v| (None, v.1)).collect();
+                            let (click, _) = ui::segments(cx, y, cw, rh, &labels, app.visuals, focus, u, &pal);
+                            let nv = click.unwrap_or(((app.visuals as i32 + k).rem_euclid(VISUALS.len() as i32)) as usize);
+                            if nv != app.visuals {
+                                app.visuals = nv;
+                                changed = true;
+                            }
+                        }
+                        _ => {
+                            let (click, _) = ui::segments(cx, y, cw, rh, &[(None, "WINDOWED"), (None, "BORDERLESS")], app.fullscreen as usize, focus, u, &pal);
+                            let nv = match click {
+                                Some(i) => i == 1,
+                                None => app.fullscreen ^ (k != 0),
+                            };
+                            if nv != app.fullscreen {
+                                app.fullscreen = nv;
+                                display::set_borderless(nv);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                let by = 250.0 * u + O_BACK as f32 * 74.0 * u + 10.0 * u;
+                let (hb, cb) = ui::button(x, by, 240.0 * u, rh, Some(Icon::Back), "BACK", app.menu_sel == O_BACK, false, u, &pal);
+                if hb || app.menu_sel == O_BACK {
+                    tip.set("BACK", "Return to the menu. ESC does the same. Settings are saved as you change them.", hb);
+                }
+                let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
                 if changed {
                     let mute = app.args.mute;
                     app.audio.set_sfx_volume(if mute { 0.0 } else { app.sfx_volume });
-                    if app.menu_sel == 9 && !is_mouse_button_down(MouseButton::Left) || (slid && is_mouse_button_pressed(MouseButton::Left)) {
+                    if (app.sfx_volume - old_sfx).abs() > 0.001 {
                         app.audio.sfx(Sfx::Shard, 1.0, 0.0);
                     }
                     app.save_settings();
                 }
-                // Now-playing card
-                let (title, hint) = match (&app.juke.loaded, app.juke.list.get(app.juke.idx)) {
-                    (_, None) => ("no music found".to_string(), "choose MUSIC LIBRARY or drop files on the window".to_string()),
-                    (Some((p, l)), Some(want)) if p == want => (l.track.name.clone(), "Q / E  change track        ENTER  play it".to_string()),
-                    (_, Some(want)) => (track_title(want), "reading the music...".to_string()),
-                };
-                let title: String = if title.chars().count() > 38 { title.chars().take(37).chain("…".chars()).collect() } else { title };
-                app.rend.draw_now_playing(sw - 700.0 * u, 110.0 * u, 590.0 * u, u, &app.world, &title, &hint, progress);
-                let hy = sh - 60.0 * u;
-                let help = match app.menu_sel {
-                    7 => DIFFS[app.diff].2,
-                    11 => "VISUALS: how hard the scene pulses with the music (zoom punches, flashes, rings). SUBTLE or OFF for comfort",
-                    6 => "LAN RALLY: a beat-locked paddle duel against a second PC on your network; the host picks the song",
-                    10 => "SYNC OFFSET: raise it if attacks land before you hear the beat (soundbar / Bluetooth lag), lower it if they land late",
-                    4 => "MUSIC LIBRARY: the folder the menu plays from and SHUFFLE RUN draws its tracks from",
-                    1 => "SHUFFLE RUN: this track plus four more; HP, upgrades and score carry over and the Heart gets tougher",
-                    _ => "drop audio files or folders on the window to play them",
-                };
-                text_shadow(help, 110.0 * u, hy, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.8), -1);
-                text_shadow("WASD move   mouse aim   SPACE dash   F auto-fire   ESC / P pause   F11 fullscreen", 110.0 * u, hy + 28.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.55), -1);
-                if app.dialog.is_some() {
-                    text_shadow("waiting for the file dialog...", sw * 0.5, sh * 0.5, 28.0 * u, pal.accent, 0);
+                tip.draw(x, sh - 60.0 * u, u, &pal);
+                if cb || is_key_pressed(KeyCode::Escape) || (enter && app.menu_sel == O_BACK) {
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                    app.screen = Screen::Menu;
+                    app.menu_sel = M_OPTIONS;
                 }
             }
             Screen::LiveSetup => {
@@ -2737,23 +3691,46 @@ async fn run(args: Args) {
                     app.start_live();
                 }
                 if is_key_pressed(KeyCode::Escape) {
-                    app.screen = Screen::Menu;
-                    app.menu_sel = 2;
+                    app.screen = Screen::Setup;
+                    app.menu_sel = S_OTHER;
                 }
             }
             Screen::Paused => {
                 dim(0.55);
                 render::vtext("PAUSED", sw * 0.5, sh * 0.3, 80.0 * u, WHITE, 0);
-                let items = vec!["RESUME".to_string(), "RESTART RUN".to_string(), "QUIT TO MENU".to_string()];
+                // Quitting throws the run away, so it takes a second press.
+                let live = app.live.is_some();
+                let quit_label = if app.quit_armed { "REALLY QUIT?  THE RUN IS LOST" } else { "QUIT TO MENU" };
+                let items: Vec<String> = if live {
+                    vec!["RESUME".to_string(), quit_label.to_string()]
+                } else {
+                    vec!["RESUME".to_string(), "RESTART RUN".to_string(), quit_label.to_string()]
+                };
+                let quit_row = items.len() - 1;
+                let before = app.menu_sel;
                 let act = menu_list(&items, &mut app.menu_sel, sw * 0.5 - 260.0 * u, sh * 0.42, u, &app.rend, &app.audio);
+                if app.menu_sel != before {
+                    app.quit_armed = false;
+                }
+                if live {
+                    text_center("the music keeps playing; nothing can hurt you while paused", sw * 0.5, sh * 0.42 + 150.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.7));
+                }
                 if ((is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::P)) && !app.esc_used) || act == Some(0) {
-                    app.audio.set_paused(false);
+                    if live {
+                        app.live_resume();
+                    } else {
+                        app.audio.set_paused(false);
+                    }
                     app.screen = Screen::Play;
+                } else if act == Some(quit_row) {
+                    if app.quit_armed {
+                        app.to_menu();
+                    } else {
+                        app.quit_armed = true;
+                    }
                 } else if act == Some(1) {
                     let q = app.queue.clone();
                     app.start_run(q);
-                } else if act == Some(2) {
-                    app.to_menu();
                 }
             }
             Screen::Results => {
@@ -2773,11 +3750,21 @@ async fn run(args: Args) {
                     "B"
                 };
                 text_center(&format!("RANK  {rank}"), sw * 0.5, sh * 0.39, 44.0 * u, pal.primary);
+                app.record_score();
+                if app.run_best {
+                    let pulse = 0.7 + 0.3 * (app.rend.time * 6.0).sin();
+                    text_center("NEW BEST", sw * 0.5 + 300.0 * u, sh * 0.32, 34.0 * u, Color::new(pal.accent.r, pal.accent.g, pal.accent.b, pulse));
+                } else if let Some((s, _)) = app.scores.get(&app.run_key) {
+                    text_center(&format!("best {s}"), sw * 0.5 + 300.0 * u, sh * 0.32, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                }
+                text_center(&format!("score x{:.2}", app.world.score_mult), sw * 0.5 - 300.0 * u, sh * 0.32, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
                 let rows = [
                     ("tracks cleared", format!("{}", st.songs)),
                     ("hearts broken", format!("{}", st.hearts_broken)),
                     ("enemies destroyed", format!("{}", st.kills)),
                     ("notes shot down", format!("{}", st.notes_shot)),
+                    ("grazes  (threads)", format!("{}  ({})", st.grazes, st.threads)),
+                    ("phases broken early", format!("{}", st.phases_broken)),
                     ("shards collected", format!("{}", st.shards)),
                     ("best combo", format!("{:.0}", st.max_combo)),
                     ("hits taken", format!("{}", st.hits)),
@@ -2790,13 +3777,246 @@ async fn run(args: Args) {
                     y += 36.0 * u;
                 }
                 let can_retry = !app.queue.is_empty();
-                let hint = if can_retry { "ENTER  play again        ESC  menu" } else { "ESC  menu" };
+                let can_continue = !app.died && !app.juke.list.is_empty();
+                let hint = match (can_continue, can_retry) {
+                    (true, _) => "SPACE  keep going with more songs        ENTER  new run        ESC  menu",
+                    (false, true) => "ENTER  play again        ESC  menu",
+                    _ => "ESC  menu",
+                };
                 text_center(hint, sw * 0.5, sh * 0.82, 28.0 * u, pal.accent);
                 if is_key_pressed(KeyCode::Escape) {
                     app.to_menu();
+                } else if can_continue && is_key_pressed(KeyCode::Space) {
+                    app.continue_run();
                 } else if can_retry && is_key_pressed(KeyCode::Enter) {
                     let q = app.queue.clone();
                     app.start_run(q);
+                }
+            }
+            Screen::Runner => {
+                let mut again = false;
+                let mut leave = is_key_pressed(KeyCode::Escape);
+                if let Some(s) = app.runner.as_ref() {
+                    let r = &s.r;
+                    let m = 34.0 * u;
+                    render::vtext(&format!("{:08}", r.score), m, m + 40.0 * u, 42.0 * u, WHITE, -1);
+                    let mult = 1 + (r.combo / 20).min(7);
+                    render::vtext(&format!("X{mult}"), m, m + 82.0 * u, 26.0 * u, if mult >= 4 { pal.accent } else { pal.primary }, -1);
+                    text_left(&format!("combo {}", r.combo), m + 70.0 * u, m + 80.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.75));
+                    text_shadow(&s.title, sw * 0.5, m + 8.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.85), 0);
+                    let (bx, bw) = (sw * 0.5 - 260.0 * u, 520.0 * u);
+                    draw_rectangle(bx, m + 22.0 * u, bw, 3.0 * u, Color::new(1.0, 1.0, 1.0, 0.2));
+                    draw_rectangle(bx, m + 22.0 * u, bw * progress.clamp(0.0, 1.0), 3.0 * u, pal.accent);
+                    render::vtext("HIGHWAY", sw - m, m + 26.0 * u, 26.0 * u, pal.secondary, 1);
+                    if r.hot() && !r.done {
+                        let pulse = 0.7 + 0.3 * (app.rend.time * 8.0).sin();
+                        render::vtext("OVERDRIVE  X2", sw - m, m + 54.0 * u, 18.0 * u, Color::new(pal.accent.r, pal.accent.g, pal.accent.b, pulse), 1);
+                    }
+                    for i in 0..r.max_hp {
+                        let (cx, cy) = (m + 16.0 * u + i as f32 * 34.0 * u, sh - m - 14.0 * u);
+                        if i < r.hp {
+                            draw_poly(cx, cy, 4, 12.0 * u, 0.0, pal.primary);
+                        } else {
+                            draw_poly_lines(cx, cy, 4, 12.0 * u, 0.0, 1.5 * u, Color::new(pal.primary.r, pal.primary.g, pal.primary.b, 0.4));
+                        }
+                    }
+                    if r.label_t > 0.0 && !r.done {
+                        let a = (r.label_t / 0.25).min(1.0);
+                        let col = if r.label == "HIT" { pal.danger } else if r.label == "CLOSE" { pal.secondary } else { pal.accent };
+                        render::vtext(r.label, sw * 0.5, sh * 0.70, 40.0 * u, Color::new(col.r, col.g, col.b, a), 0);
+                    }
+                    if r.t < 6.0 && !r.done {
+                        text_shadow("A / D  change lane        SPACE  jump the bars        ESC  menu", sw * 0.5, sh * 0.62, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.8), 0);
+                    }
+                    if r.done {
+                        dim(0.6);
+                        render::vtext(if r.dead { "CRASHED" } else { "ROAD COMPLETE" }, sw * 0.5, sh * 0.24, 80.0 * u, if r.dead { pal.danger } else { pal.accent }, 0);
+                        text_center(&format!("{:08}", r.score), sw * 0.5, sh * 0.36, 96.0 * u, WHITE);
+                        text_center(&format!("RANK  {}", r.rank()), sw * 0.5 - 330.0 * u, sh * 0.34, 40.0 * u, pal.primary);
+                        if s.best {
+                            text_center("NEW BEST", sw * 0.5, sh * 0.42, 34.0 * u, pal.accent);
+                        } else if let Some((b, _)) = app.scores.get(&s.key) {
+                            text_center(&format!("best {b}"), sw * 0.5, sh * 0.42, 24.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                        }
+                        let rows = [
+                            ("obstacles cleared", format!("{}", r.cleared)),
+                            ("perfect jumps", format!("{} of {}", r.perfects, r.bars_total)),
+                            ("close calls", format!("{}", r.close_calls)),
+                            ("gems", format!("{}", r.gems)),
+                            ("best combo", format!("{}", r.best_combo)),
+                            ("hits taken", format!("{}", r.hits)),
+                        ];
+                        let mut y = sh * 0.50;
+                        for (k, v) in rows {
+                            text_left(k, sw * 0.5 - 230.0 * u, y, 28.0 * u, Color::new(1.0, 1.0, 1.0, 0.75));
+                            let w = text_w(&v, 28.0 * u);
+                            text_left(&v, sw * 0.5 + 230.0 * u - w, y, 28.0 * u, WHITE);
+                            y += 36.0 * u;
+                        }
+                        text_center("ENTER  again        ESC  menu", sw * 0.5, sh * 0.82, 28.0 * u, pal.accent);
+                        again = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
+                    }
+                } else {
+                    leave = true;
+                }
+                if leave {
+                    app.to_menu();
+                } else if again {
+                    app.runner = None;
+                    app.start_highway();
+                }
+            }
+            Screen::Codex => {
+                dim(0.72);
+                let x = 110.0 * u;
+                render::vtext("CODEX", x, 130.0 * u, 64.0 * u, WHITE, -1);
+                let nt = CODEX_TABS.len();
+                let dirk = (is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::E)) as i32 - (is_key_pressed(KeyCode::Left) || is_key_pressed(KeyCode::Q)) as i32;
+                if dirk != 0 {
+                    app.menu_sel = (app.menu_sel as i32 + dirk).rem_euclid(nt as i32) as usize;
+                    app.audio.sfx(Sfx::UiMove, 0.6, 0.0);
+                }
+                let tab = app.menu_sel.min(nt - 1);
+                let tabs: Vec<(Option<Icon>, &str)> = CODEX_TABS.iter().map(|t| (None, *t)).collect();
+                let (click, _) = ui::segments(x, 170.0 * u, 1100.0 * u, 50.0 * u, &tabs, tab, true, u, &pal);
+                if let Some(i) = click {
+                    app.menu_sel = i;
+                }
+                let soft = Color::new(1.0, 1.0, 1.0, 0.85);
+                let y0 = 280.0 * u;
+                let entry = |k: usize, name: &str, body: &str, step: f32| {
+                    let y = y0 + k as f32 * step * u;
+                    text_left(name, x, y, 26.0 * u, pal.accent);
+                    for (i, l) in ui::wrap(body, 22.0 * u, sw - x - 420.0 * u).iter().enumerate() {
+                        text_left(l, x + 240.0 * u, y + i as f32 * 26.0 * u, 22.0 * u, soft);
+                    }
+                };
+                match tab {
+                    0 => CODEX_HEART.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 66.0)),
+                    1 => CODEX_ENEMIES.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 72.0)),
+                    2 => {
+                        // two columns: emblem, name, what it does, how far it levels
+                        for (k, up) in UpgradeId::ALL.iter().enumerate() {
+                            let (col, row) = (k / 10, k % 10);
+                            let cx = x + col as f32 * 840.0 * u;
+                            let y = y0 + row as f32 * 68.0 * u;
+                            let c = if up.rare() { pal.danger } else { pal.accent };
+                            render::upgrade_emblem(*up, vec2(cx + 22.0 * u, y - 8.0 * u), 17.0 * u, 2.4 * u, WHITE, c, app.rend.time);
+                            text_left(up.name(), cx + 60.0 * u, y, 26.0 * u, c);
+                            text_left(&format!("{}{}", if up.rare() { "rare  " } else { "" }, if up.max() > 1 { format!("levels 1-{}", up.max()) } else { "one level".to_string() }), cx + 60.0 * u, y + 24.0 * u, 18.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
+                            text_left(up.desc(), cx + 280.0 * u, y, 22.0 * u, soft);
+                        }
+                    }
+                    3 => CODEX_MUSIC.iter().enumerate().for_each(|(k, e)| entry(k, e.0, e.1, 66.0)),
+                    5 => {
+                        let have = MILESTONES.iter().filter(|m| app.scores.contains_key(&format!("ACH|{}", m.0))).count();
+                        text_left(&format!("{have} of {} earned", MILESTONES.len()), x, y0 - 34.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                        for (k, m) in MILESTONES.iter().enumerate() {
+                            let y = y0 + k as f32 * 54.0 * u;
+                            let done = app.scores.contains_key(&format!("ACH|{}", m.0));
+                            let c = if done { pal.accent } else { Color::new(1.0, 1.0, 1.0, 0.35) };
+                            draw_poly_lines(x + 14.0 * u, y - 8.0 * u, 4, 13.0 * u, 0.0, 2.0 * u, c);
+                            if done {
+                                draw_poly(x + 14.0 * u, y - 8.0 * u, 4, 7.0 * u, 0.0, c);
+                            }
+                            text_left(m.1, x + 44.0 * u, y, 26.0 * u, c);
+                            text_left(m.2, x + 360.0 * u, y, 22.0 * u, if done { soft } else { Color::new(1.0, 1.0, 1.0, 0.5) });
+                        }
+                    }
+                    _ => {
+                        let mut rows: Vec<(&String, &(u64, u32))> = app.scores.iter().filter(|(k, _)| !k.starts_with("ACH|")).collect();
+                        rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+                        if rows.is_empty() {
+                            text_left("No scores yet. Finish a run or a Highway road and it will be kept here.", x, y0, 24.0 * u, soft);
+                        }
+                        text_left("track", x, y0 - 34.0 * u, 18.0 * u, Color::new(1.0, 1.0, 1.0, 0.5));
+                        for (k, (key, v)) in rows.iter().take(16).enumerate() {
+                            let y = y0 + k as f32 * 40.0 * u;
+                            let mut it = key.split('|');
+                            let (title, tier, mode) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+                            let title: String = if title.chars().count() > 40 { title.chars().take(38).chain("..".chars()).collect() } else { title.to_string() };
+                            text_left(&title, x, y, 24.0 * u, WHITE);
+                            text_left(tier, x + 640.0 * u, y, 22.0 * u, pal.primary);
+                            text_left(mode, x + 860.0 * u, y, 22.0 * u, pal.secondary);
+                            text_left(&format!("{}", v.0), x + 1060.0 * u, y, 26.0 * u, pal.accent);
+                            if mode != "HIGHWAY" {
+                                text_left(&format!("depth {}", v.1), x + 1240.0 * u, y, 20.0 * u, soft);
+                            }
+                        }
+                    }
+                }
+                text_shadow("LEFT / RIGHT  change page        ESC  back", x, sh - 60.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.7), -1);
+                if is_key_pressed(KeyCode::Escape) {
+                    app.screen = Screen::Menu;
+                    app.menu_sel = M_CODEX;
+                }
+            }
+            Screen::Tracks => {
+                dim(0.75);
+                let x = 110.0 * u;
+                render::vtext("PICK A TRACK", x, 130.0 * u, 64.0 * u, WHITE, -1);
+                let n = app.juke.list.len();
+                let rows = 16usize;
+                let mut pick: Option<usize> = None;
+                if n > 0 {
+                    let step = is_key_pressed(KeyCode::Down) as i32 - is_key_pressed(KeyCode::Up) as i32 + (is_key_pressed(KeyCode::PageDown) as i32 - is_key_pressed(KeyCode::PageUp) as i32) * rows as i32;
+                    let (_, wheel) = mouse_wheel();
+                    let step = step - wheel.signum() as i32 * 3 * (wheel != 0.0) as i32;
+                    if step != 0 {
+                        app.track_sel = (app.track_sel as i32 + step).clamp(0, n as i32 - 1) as usize;
+                    }
+                    // typing a letter jumps to the next title that starts with it
+                    while let Some(c) = get_char_pressed() {
+                        if c.is_alphanumeric() {
+                            let want = c.to_ascii_lowercase();
+                            if let Some(k) = (1..=n).map(|d| (app.track_sel + d) % n).find(|&k| track_title(&app.juke.list[k]).to_lowercase().starts_with(want)) {
+                                app.track_sel = k;
+                            }
+                        }
+                    }
+                    let top = app.track_sel.saturating_sub(rows / 2).min(n.saturating_sub(rows));
+                    for (r, k) in (top..(top + rows).min(n)).enumerate() {
+                        let y = 190.0 * u + r as f32 * 46.0 * u;
+                        let hv = ui::hover(x, y, 1300.0 * u, 42.0 * u);
+                        if hv && mouse_delta_position() != Vec2::ZERO {
+                            app.track_sel = k;
+                        }
+                        let on = k == app.track_sel;
+                        if on {
+                            draw_rectangle(x, y, 1300.0 * u, 42.0 * u, Color::new(pal.secondary.r, pal.secondary.g, pal.secondary.b, 0.3));
+                            draw_rectangle(x, y, 4.0 * u, 42.0 * u, pal.accent);
+                        }
+                        let title = track_title(&app.juke.list[k]);
+                        let playing = k == app.juke.idx;
+                        text_left(&title, x + 18.0 * u, y + 29.0 * u, 24.0 * u, if playing { pal.accent } else if on { WHITE } else { Color::new(1.0, 1.0, 1.0, 0.72) });
+                        if let Some((s, d)) = app.scores.get(&app.score_key(&title)) {
+                            text_left(&format!("best {s}   depth {d}"), x + 980.0 * u, y + 29.0 * u, 20.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                        }
+                        if hv && is_mouse_button_pressed(MouseButton::Left) {
+                            pick = Some(k);
+                        }
+                    }
+                    text_left(&format!("{} of {}", app.track_sel + 1, n), x + 1100.0 * u, 130.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.6));
+                    if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
+                        pick = Some(app.track_sel);
+                    }
+                } else {
+                    text_left("No music found. Set a MUSIC LIBRARY on the title menu.", x, 220.0 * u, 24.0 * u, WHITE);
+                }
+                text_shadow("UP / DOWN  move     type a letter to jump     ENTER  choose     ESC  back", x, sh - 60.0 * u, 22.0 * u, Color::new(1.0, 1.0, 1.0, 0.7), -1);
+                if let Some(k) = pick {
+                    if k != app.juke.idx {
+                        app.juke.idx = k;
+                        app.juke.loader = None;
+                        app.juke.fails = 0;
+                        app.juke.played = 0.0;
+                    }
+                    app.audio.sfx(Sfx::UiSelect, 0.8, 0.0);
+                    app.screen = Screen::Setup;
+                    app.menu_sel = S_TRACK;
+                } else if is_key_pressed(KeyCode::Escape) {
+                    app.screen = Screen::Setup;
+                    app.menu_sel = S_TRACK;
                 }
             }
             Screen::Lan => app.lan_ui(u, sw, sh),

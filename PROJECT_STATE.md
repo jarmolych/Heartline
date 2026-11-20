@@ -1,6 +1,6 @@
 # Heartline — Project State
 
-_Last updated: 2026-11-14_
+_Last updated: 2026-11-15_
 
 ## Overview
 Heartline is a Rust (macroquad) game that converts music into a top-down synthwave arena fight
@@ -13,6 +13,85 @@ Full plan in `DESIGN.md`, player-facing notes in `README.md`.
 - [ ] **0.2 (in progress, second playtest round):** directed/telegraphed attacks, song-independent
       difficulty, menu music, sound effects, visual overhaul (line art + depth), better beat sync
 - [ ] Later: per-song high scores, gamepad, Heart boss phases, side mode (beat platformer)
+
+## Where the work is now (read this first)
+The sections further down describe 0.2 and are kept for background. Current work is **0.3**,
+driven by `docs/plans/0.3-playtest-2.md`: every slice has a "Progress" note saying what is done,
+what was changed from the proposal and what is still open.
+
+**Branches (2026-11-15).** The repo uses task branches and pull requests (see `CLAUDE.md`);
+`gh` is not installed here, so PRs are opened in the browser. Nothing below is merged into
+`main` yet. The branches are stacked in this order, each containing the ones before it, so
+merging the last one brings everything:
+1. `docs/director-rethink` — plan change only
+2. `feat/playlists-endless-run` — M3U playlists, endless runs, menu track rotation
+3. `feat/menu-options-screen` — menu groups + options screen (superseded by 8)
+4. `feat/gun-track` — gun fires on a per-song track, exact DPS (branched from `main`, merged
+   into 5)
+5. `tune/tier-rules` — per-tier ramp, mercy, warnings, unlocks
+6. `feat/song-phases` — analysis: layers, chimes, phases
+7. `feat/menu-run-setup` — RoR2-style menu: icons, run setup, tooltips (`src/ui.rs`)
+8. `feat/layer-director` — director credits arm layers; wisp enemy
+9. `feat/heart-phases` — Heart forms per section, purgatory
+10. `feat/rewards-depth` — graded rewards, rare upgrades, depth modifiers, daily seed
+11. `art/song-moods` — per-song backdrops, weather, floor styles
+12. `fix/live-pause` — pause in live mode, quit asks twice
+13. `fix/rally-fairness` — Crack lob, firewall rule offer
+14. `docs/state-0.3-t3` — README and this file
+15. `tune/playtest-3-gameplay` — gun on even beat divisions, steeper progression, rage and
+    encore instead of the purgatory loop, ear candy
+16. `art/playtest-3-visuals` — nine rebuilt skies, horizon props, sky transition, item and
+    Heart looks
+17. `chore/trim-agents` — four agents removed, self-check commands in `CLAUDE.md` (undone when
+    merged into `main`: all seven agents and `main`'s `CLAUDE.md` were kept)
+18. `docs/playtest-3-t4` — `docs/plans/0.4-playtest-3.md` and this file
+
+19. `art/sky-polish` — sky rework in the sun's style, radio masts, city, rain, tide sky
+20. `feat/heart-moves` — the Heart relocates on bar lines
+21. `feat/beat-sync-graze` — pulses timed to the beat ring, graze scoring
+22. `feat/enemies-items` — Metronome and Cymbal enemies, six new upgrades
+23. `feat/mutators-modes-scores` — mutators, score multipliers, best scores, DROP RUSH, DODGE
+24. `art/chime-stars` — chimes light stars in the sky
+25. `docs/depth-t5` — plan progress, README and this file
+26. `feat/live-phases` — live audio gets Heart phases, the moving Heart, beat-timed pulses
+27. `feat/charge-resonance` — the Heart charges in Overdrive; Resonance meter
+28. `feat/highway-mode` — Highway side mode (`src/runner.rs`)
+29. `feat/rally-heat` — rally speeds up; practice bot follows the tier
+30. `feat/codex-finale` — Codex screen, Finale, HUD fixes
+31. `docs/second-pass-t6` — plan progress, README and this file
+32. `feat/highway-depth` — Highway overdrive sections, close calls, rank
+33. `feat/elite-kinds` — Gunner, Summoner and Leaper elites
+34. `feat/remix` — REMIX in run setup
+35. `art/prism-sky` — the eleventh sky
+36. `docs/third-pass-t7` — plan progress, README and this file
+37. `feat/charge-carry` — carry a charge into the Heart; fuller results
+38. `feat/milestones` — twelve milestones, sixth Codex page
+39. `feat/live-predict` — reactive live mode announces pulses from the predicted beat
+40. `docs/fourth-pass-t8` — plan progress, README and this file
+41. `feat/comb-sweep` — Comb and Sweep attack patterns
+42. `feat/track-picker` — track list in run setup, depth frames around the arena
+43. `docs/fifth-pass-t9` — plan progress, README, `CLAUDE.md` brief and this file
+44. `feat/thread` — dash through a bullet for a "thread"; builds `Heartline-0.3.0-T10`
+
+The third playtest (2026-11-15) and what was done about it are in
+`docs/plans/0.4-playtest-3.md`. The depth pass that followed (every area of the game, planned
+and built the same day) is in `docs/plans/0.5-depth.md`; read its Progress and "Known weak
+spots" first.
+
+**Test build:** `#UserTesting\Heartline-0.3.0-T10-win-x64` (built from branch 44).
+
+**Verified by machine only:** 39 unit tests, `--sim` balance runs, screenshots of the menu
+screens, Heart forms, moods and the track-clear hand-off. **Not verified by a human:** how any
+of it feels or sounds, mouse hover tooltips and slider dragging, the firewall button (it was
+never run), a two-PC Rally match, live-mode pause with real audio.
+
+**Still open from the plan** (details in the plan's Progress notes): a Heart that roams or
+charges and side objectives; the full purgatory look; reward delivery variety and run outros;
+Boss rush mode; per-mood rim and Heart shapes; live mode on the new generator and per-app
+capture (`docs/plans/live-audio.md`, needs the player's answers to its section 6).
+
+Balance (`--sim`, 6 Straftat songs, 120 ms bot, hits per minute, LULLABY to FLATLINE):
+2.2 / 2.3 / 3.8 / 4.8 / 5.3 / 5.3 / 6.4 (after the fifth pass of 0.5).
 
 ## What the player said (2026-11-14 playtest of 0.1) — the brief for 0.2
 - Dies within ~30 s on any song; difficulty should NOT depend on the song (slow songs were much
@@ -148,13 +227,30 @@ Build / run / test:
   CRLF file to LF; use the Edit tool or `perl -pi`, then check with `file`.
 
 ## Source map
-`main.rs` app flow / menu / jukebox / settings / CLI · `analysis.rs` DSP (offline +
+`main.rs` app flow / menu / jukebox / settings / best scores / CLI · `ui.rs` menu widgets, icons, tooltips · `analysis.rs` DSP (offline +
 `StreamAnalyzer`) · `level.rs` events + `generate` + `LiveGen` · `game.rs` simulation ·
 `render.rs` shaders / drawing / HUD / UI widgets · `engine.rs` audio thread (playback, crossfade,
 SFX, loopback, delay line) · `synth.rs` built-in music · `decode.rs` symphonia · `tools.rs` CLI
-tools, balance simulator, bot · `rng.rs` PRNG.
+tools, balance simulator, bot · `rng.rs` PRNG · `runner.rs` Highway side mode.
 
 ## Session Log
+- 2026-11-15 — Fifth pass of 0.5: Comb and Sweep patterns, track list, depth frames. 39 unit
+  tests pass; shipped `Heartline-0.3.0-T9`.
+- 2026-11-15 — Fourth pass of 0.5: carry-a-charge objective, milestones, live pulses announced
+  from the predicted beat. 39 unit tests pass; shipped `Heartline-0.3.0-T8`.
+- 2026-11-15 — Third pass of 0.5: Highway overdrive / close calls / rank, three elite kinds,
+  REMIX, the prism sky. 39 unit tests pass; shipped `Heartline-0.3.0-T7`.
+- 2026-11-15 — Second pass of 0.5 (player away, "take the wheel"): live-mode phases, Heart
+  charge, Resonance, Highway mode, rally heat, Codex, Finale. 39 unit tests pass; shipped
+  `Heartline-0.3.0-T6`.
+- 2026-11-15 — Depth pass (`docs/plans/0.5-depth.md`): sky rework, moving Heart, beat-timed
+  pulses and graze, two enemies, six upgrades, mutators, best scores, DROP RUSH and DODGE.
+  38 unit tests pass; shipped `Heartline-0.3.0-T5`.
+- 2026-11-15 — Third playtest (`docs/plans/0.4-playtest-3.md`): gun sync, progression, rage and
+  encore, ear candy, rebuilt skies and transitions, item and Heart looks, agent roster trimmed.
+  37 unit tests pass; shipped `Heartline-0.3.0-T4`.
+- 2026-11-15 — 0.3 plan slices 1, 2, 3, 4, 7 (pause), 8, 9, 10, 11, 12, 13 and a new slice 15
+  (RoR2-style menu) on stacked branches; 35 unit tests pass; shipped `Heartline-0.3.0-T3`.
 - 2026-11-13 — Researched stack, installed Rust, wrote DESIGN.md, built 0.1.0, packaged to
   `#UserTesting/Heartline-0.1.0-win-x64/`.
 - 2026-11-14 — First playtest feedback. 0.2 work: generator rewrite (directed, per-second
