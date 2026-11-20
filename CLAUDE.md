@@ -67,6 +67,19 @@ always pulsing or moving. So:
 - no shaded surface textures (the player rejected a textured planet and moon), no thin spiky
   silhouettes, nothing static
 - nothing flat and unlit: give objects a lit face, a dark side and an outline
+- everything flows: nothing in the vista may step or flicker. Shape it from continuous time and
+  from `Renderer::spec_ago` (blended spectrum history), never from a raw snapshot or a
+  `floor(time)`. Silhouettes get soft edges, scan bars and a rim of light (`propPaint`,
+  `striped_layer`), not a flat sprite look.
+- skies stay in the striped sun's language. The player likes the cloud, lightning and wind
+  weather, the sea, and details such as the palms. They rejected the turning wire-globe sky, the
+  equaliser "bars" skyline and the tall arch ("cylinder oval") sky.
+- the camera stays put: a quiet stretch of a song, or the gap between two songs, must not change
+  the perspective
+- menus (modelled on a Risk of Rain 2 screenshot): panels with a header and lines between
+  groups, icons before text, condensed, soft rounded edges, a smooth font (never the pixel one).
+  Long rows of choices scroll with the far ones hidden, long song and library names must fit, and
+  nothing may need a modifier key.
 - look at a screenshot next to the sunset before shipping a visual change
 
 ## Checking your own work
@@ -78,8 +91,14 @@ song.
   numbers in `PROJECT_STATE.md`.
 - What the analysis hears: `heartline.exe --analyze FILE` (sections, phases, layers, ear candy).
 - Screenshots: `heartline.exe FILE --mute --selftest tmp/s --start 40 --shots 45,60 --secs 25
-  --size 1280x720`, then read the PNGs. Menu screens: no file, `--wall --screen setup|options`.
-  Looks: `--mood scene,weather,floor,prop`, `--mood-to ...` (sky transition), `--purgatory`.
+  --size 1280x720`, then read the PNGs. Menu screens: no file, `--wall --screen
+  setup|options|codex|live|results`; `--library PATH` uses a folder or playlist as the library
+  for that launch (handy for long names). Looks: `--mood scene,weather,floor,prop,ground`,
+  `--mood-to ...` (sky transition), `--purgatory`; add `--drift` with a file to see the vista
+  while a song plays. `--swap 1|-1` trades the first song two seconds in. Codex:
+  `--screen codex --mode PAGE --give ENTRY`. Launch opening: `FILE --screen launch`.
+- Player sync notes: while playing, T taps along and G / B / C mark good / off / ear candy; the
+  notes go to `heartline-notes.txt` beside the exe. `heartline.exe --notes-from FILE` reads them.
 - None of this tells you how the game feels or sounds. Say so when reporting.
 
 ## Project basics
