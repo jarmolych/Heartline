@@ -58,6 +58,30 @@ on GitHub, so it always builds and every feature can be reverted with one click.
 - **Starting new work:** `git switch main && git pull --ff-only` first, so the branch starts from
   the latest `main`.
 
+## Art direction
+In the player's words: what makes the original striped sun great is that it has a CRT-style
+texture and faded edges, so it looks right as a flat 2D image, it is synced to the song, and it is
+always pulsing or moving. So:
+- flat shapes with scan bars cut through them, soft glowing edges, a bass pulse, constant motion,
+  and something on every element that reacts to the music
+- no shaded surface textures (the player rejected a textured planet and moon), no thin spiky
+  silhouettes, nothing static
+- nothing flat and unlit: give objects a lit face, a dark side and an outline
+- look at a screenshot next to the sunset before shipping a visual change
+
+## Checking your own work
+Each of these takes seconds. Replace `MUSIC` with a folder of songs on this PC and `FILE` with one
+song.
+- Unit tests: `"$USERPROFILE/.cargo/bin/cargo.exe" test --release`
+- Balance: `heartline.exe --sim MUSIC --sample 6 --bot-delay 120` (`--diff N`, `--song-idx N` for
+  a later depth, `--give N` to start with N upgrades). Compare hits per minute with the last
+  numbers in `PROJECT_STATE.md`.
+- What the analysis hears: `heartline.exe --analyze FILE` (sections, phases, layers, ear candy).
+- Screenshots: `heartline.exe FILE --mute --selftest tmp/s --start 40 --shots 45,60 --secs 25
+  --size 1280x720`, then read the PNGs. Menu screens: no file, `--wall --screen setup|options`.
+  Looks: `--mood scene,weather,floor,prop`, `--mood-to ...` (sky transition), `--purgatory`.
+- None of this tells you how the game feels or sounds. Say so when reporting.
+
 ## Project basics
 - Rust is not on PATH: `"$USERPROFILE/.cargo/bin/cargo.exe"`.
 - Keep CRLF line endings, use pure-Rust dependencies, and keep level generation deterministic.
